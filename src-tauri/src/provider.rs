@@ -1,15 +1,16 @@
 use crate::{
     errors::{ProviderError, ProviderErrorKind},
-    models::{ProbeCredentials, QuotaSnapshot, QuotaWindow},
+    models::{AuthMode, ProbeCredentials, QuotaSnapshot, QuotaWindow},
 };
 use chrono::{DateTime, Duration, Utc};
 use reqwest::{
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue},
     Client, StatusCode,
 };
 use serde_json::json;
 
 const DEFAULT_PROBE_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const DEFAULT_API_URL: &str = "https://api.openai.com/v1/responses";
 const CODEX_CLI_VERSION: &str = "0.104.0";
 const CODEX_CLI_USER_AGENT: &str = "codex_cli_rs/0.104.0";
 const DEFAULT_MODEL: &str = "gpt-5.1-codex";
@@ -32,7 +33,7 @@ pub async fn fetch_quota(
         .build()
         .map_err(|error| ProviderError::new(ProviderErrorKind::Unknown, format!("创建 HTTP 客户端失败: {error}")))?;
 
-    let target = base_url_override.unwrap_or(DEFAULT_PROBE_URL);
+    let target = resolve_target_url(base_url_override, &credentials.auth_mode);
     let payload = json!({
         "model": DEFAULT_MODEL,
         "input": [
@@ -51,32 +52,22 @@ pub async fn fetch_quota(
         "instructions": DEFAULT_INSTRUCTIONS
     });
 
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-    headers.insert(
-        "OpenAI-Beta",
-        HeaderValue::from_static("responses=experimental"),
-    );
-    headers.insert("Originator", HeaderValue::from_static("codex_cli_rs"));
-    headers.insert("Version", HeaderValue::from_static(CODEX_CLI_VERSION));
-    headers.insert("User-Agent", HeaderValue::from_static(CODEX_CLI_USER_AGENT));
-    let auth = format_auth_header(credentials)?;
-    headers.insert(AUTHORIZATION, auth);
+    let headers = build_headers(credentials, &target)?;
 
-    if let Some(account_id) = credentials.chatgpt_account_id.as_deref() {
-        let value = HeaderValue::from_str(account_id)
-            .map_err(|_| ProviderError::new(ProviderErrorKind::InvalidResponse, "chatgpt_account_id 非法"))?;
-        headers.insert("chatgpt-account-id", value);
-    }
-
-    let response = client
+    let mut request = client
         .post(target)
         .headers(headers)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(map_request_error)?;
+        .json(&payload);
+
+    if uses_chatgpt_internal(credentials) {
+        request = request.header("Host", "chatgpt.com");
+    }
+
+    let response = request.send().await.map_err(map_request_error)?;
+
+    if let Some(snapshot) = parse_snapshot_if_present(account_name, response.headers())? {
+        return Ok(snapshot);
+    }
 
     if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
         return Err(ProviderError::new(
@@ -85,8 +76,23 @@ pub async fn fetch_quota(
         ));
     }
 
-    let snapshot = parse_snapshot(account_name, response.headers())?;
-    Ok(snapshot)
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        return Err(ProviderError::new(
+            ProviderErrorKind::MissingHeaders,
+            "请求被限流，且没有返回可识别的 x-codex-* 响应头",
+        ));
+    }
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| String::from("无法读取响应体"));
+
+    Err(ProviderError::new(
+        ProviderErrorKind::Unknown,
+        format!("上游返回 {status}：{}", compact_body(&body)),
+    ))
 }
 
 pub async fn test_connection(
@@ -129,6 +135,24 @@ fn parse_snapshot(account_name: &str, headers: &HeaderMap) -> Result<QuotaSnapsh
         fetched_at,
         source: "probe_headers".into(),
     })
+}
+
+fn parse_snapshot_if_present(
+    account_name: &str,
+    headers: &HeaderMap,
+) -> Result<Option<QuotaSnapshot>, ProviderError> {
+    let has_any = headers.contains_key("x-codex-primary-used-percent")
+        || headers.contains_key("x-codex-primary-window-minutes")
+        || headers.contains_key("x-codex-primary-reset-after-seconds")
+        || headers.contains_key("x-codex-secondary-used-percent")
+        || headers.contains_key("x-codex-secondary-window-minutes")
+        || headers.contains_key("x-codex-secondary-reset-after-seconds");
+
+    if !has_any {
+        return Ok(None);
+    }
+
+    parse_snapshot(account_name, headers).map(Some)
 }
 
 fn read_window(headers: &HeaderMap, prefix: &str) -> Result<Option<RawWindow>, ProviderError> {
@@ -247,17 +271,7 @@ fn get_header_u32(headers: &HeaderMap, key: &str) -> Result<Option<u32>, Provide
 }
 
 fn format_auth_header(credentials: &ProbeCredentials) -> Result<HeaderValue, ProviderError> {
-    let value = match credentials.auth_mode {
-        crate::models::AuthMode::ApiKey | crate::models::AuthMode::SessionToken => {
-            format!("Bearer {}", credentials.secret.trim())
-        }
-        crate::models::AuthMode::Cookie => {
-            return HeaderValue::from_str(credentials.secret.trim()).map_err(|_| {
-                ProviderError::new(ProviderErrorKind::InvalidResponse, "Cookie 认证值格式非法")
-            });
-        }
-    };
-
+    let value = format!("Bearer {}", credentials.secret.trim());
     HeaderValue::from_str(&value).map_err(|_| {
         ProviderError::new(
             ProviderErrorKind::InvalidResponse,
@@ -276,4 +290,151 @@ fn map_request_error(error: reqwest::Error) -> ProviderError {
     }
 
     ProviderError::new(ProviderErrorKind::Unknown, format!("请求失败: {error}"))
+}
+
+fn build_headers(credentials: &ProbeCredentials, target_url: &str) -> Result<HeaderMap, ProviderError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert("User-Agent", HeaderValue::from_static(CODEX_CLI_USER_AGENT));
+
+    match credentials.auth_mode {
+        AuthMode::ApiKey => {
+            headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+            headers.insert(AUTHORIZATION, format_auth_header(credentials)?);
+        }
+        AuthMode::SessionToken => {
+            headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+            headers.insert(
+                "OpenAI-Beta",
+                HeaderValue::from_static("responses=experimental"),
+            );
+            headers.insert("Originator", HeaderValue::from_static("codex_cli_rs"));
+            headers.insert("Version", HeaderValue::from_static(CODEX_CLI_VERSION));
+            headers.insert(AUTHORIZATION, format_auth_header(credentials)?);
+        }
+        AuthMode::Cookie => {
+            headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+            headers.insert(
+                "OpenAI-Beta",
+                HeaderValue::from_static("responses=experimental"),
+            );
+            headers.insert("Originator", HeaderValue::from_static("codex_cli_rs"));
+            headers.insert("Version", HeaderValue::from_static(CODEX_CLI_VERSION));
+            headers.insert(
+                COOKIE,
+                HeaderValue::from_str(credentials.secret.trim()).map_err(|_| {
+                    ProviderError::new(ProviderErrorKind::InvalidResponse, "Cookie 认证值格式非法")
+                })?,
+            );
+        }
+    }
+
+    if uses_chatgpt_internal(credentials) {
+        if let Some(account_id) = credentials.chatgpt_account_id.as_deref() {
+            let value = HeaderValue::from_str(account_id).map_err(|_| {
+                ProviderError::new(ProviderErrorKind::InvalidResponse, "chatgpt_account_id 非法")
+            })?;
+            headers.insert("chatgpt-account-id", value);
+        }
+    } else if target_url.contains("chatgpt.com") {
+        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    }
+
+    Ok(headers)
+}
+
+fn uses_chatgpt_internal(credentials: &ProbeCredentials) -> bool {
+    !matches!(credentials.auth_mode, AuthMode::ApiKey)
+}
+
+fn resolve_target_url(base_url_override: Option<&str>, auth_mode: &AuthMode) -> String {
+    if let Some(raw) = base_url_override.map(str::trim).filter(|value| !value.is_empty()) {
+        if raw.ends_with("/responses") {
+            return raw.to_string();
+        }
+        if raw.contains("/backend-api/codex") || raw.contains("/v1") {
+            return raw.to_string();
+        }
+        return match auth_mode {
+            AuthMode::ApiKey => format!("{}/v1/responses", raw.trim_end_matches('/')),
+            AuthMode::SessionToken | AuthMode::Cookie => {
+                format!("{}/backend-api/codex/responses", raw.trim_end_matches('/'))
+            }
+        };
+    }
+
+    match auth_mode {
+        AuthMode::ApiKey => DEFAULT_API_URL.to_string(),
+        AuthMode::SessionToken | AuthMode::Cookie => DEFAULT_PROBE_URL.to_string(),
+    }
+}
+
+fn compact_body(body: &str) -> String {
+    let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(200).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::HeaderName;
+
+    fn headers(entries: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (key, value) in entries {
+            map.insert(
+                HeaderName::from_bytes(key.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn resolves_default_url_by_auth_mode() {
+        assert_eq!(resolve_target_url(None, &AuthMode::ApiKey), DEFAULT_API_URL);
+        assert_eq!(resolve_target_url(None, &AuthMode::SessionToken), DEFAULT_PROBE_URL);
+        assert_eq!(resolve_target_url(None, &AuthMode::Cookie), DEFAULT_PROBE_URL);
+    }
+
+    #[test]
+    fn normalizes_windows_by_minutes() {
+        let map = headers(&[
+            ("x-codex-primary-used-percent", "70"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-primary-reset-after-seconds", "3600"),
+            ("x-codex-secondary-used-percent", "25"),
+            ("x-codex-secondary-window-minutes", "300"),
+            ("x-codex-secondary-reset-after-seconds", "1800"),
+        ]);
+
+        let snapshot = parse_snapshot("acc", &map).unwrap();
+        assert_eq!(
+            snapshot.five_hour.as_ref().unwrap().remaining_percent.round() as i64,
+            75
+        );
+        assert_eq!(
+            snapshot.seven_day.as_ref().unwrap().remaining_percent.round() as i64,
+            30
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_quota_headers() {
+        let map = HeaderMap::new();
+        assert!(parse_snapshot_if_present("acc", &map).unwrap().is_none());
+    }
+
+    #[test]
+    fn cookie_mode_uses_cookie_header() {
+        let credentials = ProbeCredentials {
+            auth_mode: AuthMode::Cookie,
+            secret: "foo=bar".into(),
+            chatgpt_account_id: Some("acct".into()),
+        };
+        let headers = build_headers(&credentials, DEFAULT_PROBE_URL).unwrap();
+        assert_eq!(headers.get(COOKIE).unwrap(), "foo=bar");
+        assert!(headers.get(AUTHORIZATION).is_none());
+        assert_eq!(headers.get("chatgpt-account-id").unwrap(), "acct");
+    }
 }
