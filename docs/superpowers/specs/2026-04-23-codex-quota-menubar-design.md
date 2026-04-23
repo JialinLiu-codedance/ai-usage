@@ -1,220 +1,220 @@
-# Codex Quota Menubar App Design
+# Codex 额度菜单栏应用设计文档
 
-## Overview
+## 概述
 
-This project is a macOS menu bar app built with Tauri and Rust. Its first milestone is intentionally narrow: monitor the remaining quota for Codex, keep the app resident in the macOS status bar, and provide lightweight settings and notifications for a single personal account.
+这个项目是一款基于 Tauri 和 Rust 开发的 macOS 状态栏常驻应用。第一阶段范围刻意收敛，只解决一个问题：监控 Codex 的剩余额度，并通过菜单栏、轻量面板和系统通知为个人用户提供随手可见的额度状态。
 
-The product is local-first and does not depend on any cloud backend. It should prefer official interfaces for quota retrieval, while allowing compatible non-official authentication inputs when needed to make Codex quota fetching work in practice.
+产品采用纯本地运行模式，不依赖云端服务。额度获取策略优先使用官方接口；如果官方接口无法满足实际需求，则允许兼容非官方认证输入或兼容接入方式，以保证 Codex 额度拉取链路在现实中可用。
 
-## Product Goals
+## 产品目标
 
-The first version should solve three concrete problems:
+第一版需要解决三个明确问题：
 
-1. Let the user see current Codex quota without opening a browser or client.
-2. Alert the user when remaining quota drops below a chosen threshold.
-3. Keep the setup and maintenance burden low enough for a personal utility app.
+1. 用户无需打开浏览器或客户端，就能看到当前 Codex 剩余额度。
+2. 当额度低于阈值时，应用能够及时提醒用户。
+3. 整个产品保持轻量，配置和维护成本足够低，适合作为个人工具长期常驻。
 
-## Out Of Scope
+## 非目标范围
 
-The first version does not include:
+第一版不包含以下内容：
 
-1. Multi-platform support for Claude, GLM, MiniMax, or Kimi.
-2. Multi-account support.
-3. Historical charts and long-term analytics.
-4. Refresh logs and confidence labels.
-5. Import/export, cloud sync, or team features.
+1. Claude、GLM、MiniMax、Kimi 等多平台支持。
+2. 多账号支持。
+3. 历史趋势图和长期分析。
+4. 刷新日志与可信度标记。
+5. 导入导出、云同步、团队能力。
 
-## Functional Scope
+## 功能范围
 
-### 1. Menu Bar Residency
+### 1. 状态栏常驻
 
-The app lives in the macOS status bar and is designed for quick-glance usage.
+应用以 macOS 菜单栏工具的形式存在，强调“抬眼即见”的使用体验。
 
-Required behavior:
+必需行为：
 
-1. Show a persistent menu bar icon.
-2. Reflect one of four states in the icon or title area:
-   - normal
-   - low quota
-   - refresh in progress
-   - refresh failed
-3. Open a lightweight panel when clicked.
+1. 显示常驻的菜单栏图标。
+2. 图标或标题区域能体现四种状态：
+   - 正常
+   - 低额度
+   - 刷新中
+   - 刷新失败
+3. 点击图标后展开轻量面板。
 
-### 2. Quota Overview Panel
+### 2. 额度总览面板
 
-The menu bar panel is the primary interaction surface. It should show only high-signal information.
+菜单栏面板是第一版的主要交互入口，只展示高价值信息，不做复杂后台页面。
 
-Required fields:
+必需展示字段：
 
-1. Account name
-2. Remaining quota
-3. Used quota
-4. Total quota
-5. Reset time, if available
-6. Last refresh time
+1. 账号名称
+2. 剩余额度
+3. 已用额度
+4. 总额度
+5. 重置时间（如果能获取）
+6. 最近刷新时间
 
-Required actions:
+必需操作：
 
-1. Manual refresh
-2. Open settings
+1. 手动刷新
+2. 打开设置
 
-### 3. Automatic Refresh
+### 3. 自动刷新
 
-The app should refresh Codex quota without user intervention.
+应用需要在后台定时刷新 Codex 额度，无需用户频繁手动触发。
 
-Required behavior:
+必需行为：
 
-1. Perform an initial refresh on app startup after loading settings and secrets.
-2. Support fixed refresh intervals such as 5, 15, and 30 minutes.
-3. Prevent overlapping refresh tasks.
-4. Update UI state immediately when refresh starts, succeeds, or fails.
+1. 启动后在设置和密钥加载完成后执行首次刷新。
+2. 支持固定刷新周期，例如 5 分钟、15 分钟、30 分钟。
+3. 防止并发刷新，避免同一时间重复发起请求。
+4. 在刷新开始、成功、失败时及时更新 UI 状态。
 
-### 4. Connection Setup
+### 4. 连接配置
 
-The first version supports a single Codex account only.
+第一版只支持一个 Codex 账号。
 
-The settings UI should allow configuration of the authentication method needed to retrieve Codex quota. The exact fields can be finalized during implementation once the working Codex access path is verified, but the design should reserve support for:
+设置页需要支持配置用于获取 Codex 额度的认证方式。具体字段可以在实现阶段根据最终验证通过的 Codex 接入方式确定，但设计上应预留以下输入能力：
 
-1. API key
-2. Session token
+1. API Key
+2. Session Token
 3. Cookie
-4. Base URL override
+4. Base URL 覆盖
 
-### 5. Connection Test
+### 5. 连接测试
 
-The app should provide a way to validate setup before relying on background refresh.
+应用需要提供连接测试能力，让用户在依赖后台刷新之前先确认接入配置可用。
 
-Required results:
+必需结果类型：
 
-1. Connection successful
-2. Authentication failed
-3. Network failed
-4. Endpoint unavailable or unsupported
+1. 连接成功
+2. 认证失败
+3. 网络失败
+4. 接口不可用或当前不支持
 
-The result should be readable in the settings UI without requiring a separate diagnostics page.
+测试结果应当能直接在设置页中用可读文本展示，不单独扩展一个复杂诊断页。
 
-### 6. Low Quota Notification
+### 6. 低额度提醒
 
-The user can define a low-quota threshold. When the remaining quota falls below that threshold, the app should send a native macOS notification.
+用户可以设置一个低额度阈值。当剩余额度低于该阈值时，应用发送 macOS 原生通知。
 
-Required behavior:
+必需行为：
 
-1. Allow enabling or disabling low-quota notification.
-2. Allow setting a threshold value.
-3. Deduplicate repeated notifications for the same low-quota condition so the app does not spam the user.
+1. 支持开启或关闭低额度提醒。
+2. 支持设置额度阈值。
+3. 对同一低额度状态进行去重，避免短时间内反复打扰用户。
 
-### 7. Reset Reminder
+### 7. 重置提醒
 
-If the Codex quota source exposes a reliable reset time, the app should support a reset reminder.
+如果 Codex 的额度来源可以提供可靠的重置时间，应用应支持重置提醒。
 
-Required behavior:
+必需行为：
 
-1. Allow enabling or disabling reset reminder.
-2. Notify the user before reset based on a simple lead time.
-3. Omit the feature in the UI when reset time is unavailable from the source.
+1. 支持开启或关闭重置提醒。
+2. 支持在重置前的固定提前量发送通知。
+3. 如果数据源没有可靠重置时间，则 UI 中不展示该功能。
 
-## Architecture
+## 架构设计
 
-The app should be split into a thin Tauri UI shell and a Rust service core. Business logic should stay on the Rust side so future platform integrations can be added without reworking the front end.
+应用应采用 `薄前端壳层 + Rust 服务核心` 的结构。业务逻辑尽量放在 Rust 侧，避免前端页面直接承载平台请求、调度与状态判断。这样后续扩展其他平台时，不需要重做 UI 架构。
 
-### Frontend Responsibilities
+### 前端职责
 
-The Tauri frontend handles:
+Tauri 前端负责：
 
-1. Menu bar panel rendering
-2. Settings page
-3. Connection test trigger
-4. Manual refresh trigger
-5. Display of current quota state
+1. 菜单栏面板渲染
+2. 设置页渲染
+3. 连接测试触发
+4. 手动刷新触发
+5. 当前额度状态展示
 
-The frontend should not contain provider-specific fetch logic.
+前端不应包含 Codex 专属的请求拼装与解析逻辑。
 
-### Rust Responsibilities
+### Rust 侧职责
 
-The Rust backend handles:
+Rust 后端负责：
 
-1. Quota refresh orchestration
-2. Codex-specific request building and response parsing
-3. Scheduler and refresh timing
-4. Notification triggering
-5. Keychain access
-6. Local state persistence
+1. 额度刷新编排
+2. Codex 请求构造与响应解析
+3. 定时刷新与调度
+4. 通知触发
+5. Keychain 访问
+6. 本地状态持久化
 
-## Module Breakdown
+## 模块划分
 
 ### `tray`
 
-Responsible for:
+负责：
 
-1. macOS status bar icon and menu
-2. Display state updates
-3. Click handling and panel open behavior
+1. macOS 状态栏图标与菜单
+2. 状态展示更新
+3. 点击行为与面板打开逻辑
 
 ### `quota_service`
 
-Central application service for:
+作为应用的核心服务，统一提供：
 
 1. `refresh_quota`
 2. `get_current_quota`
 3. `test_connection`
 
-This service owns refresh coordination and is the only path that should initiate provider fetches.
+这个服务负责刷新调度，是唯一允许触发平台请求的入口。
 
 ### `codex_provider`
 
-Responsible for:
+负责：
 
-1. Codex authentication injection
-2. Endpoint request construction
-3. Response parsing into a normalized quota snapshot
+1. Codex 认证信息注入
+2. 接口请求构造
+3. 响应解析并转换为统一额度快照
 
 ### `scheduler`
 
-Responsible for:
+负责：
 
-1. Startup refresh
-2. Interval-based refresh
-3. Ensuring only one refresh runs at a time
+1. 启动时首次刷新
+2. 定时周期刷新
+3. 保证任意时刻只有一个刷新任务在运行
 
 ### `settings`
 
-Responsible for:
+负责：
 
-1. Refresh interval
-2. Threshold settings
-3. Notification toggles
-4. Non-secret configuration persistence
+1. 刷新频率
+2. 阈值设置
+3. 通知开关
+4. 非敏感配置持久化
 
 ### `secrets`
 
-Responsible for storing and retrieving credentials from macOS Keychain.
+负责将敏感凭证写入和读取 macOS Keychain。
 
 ### `notifications`
 
-Responsible for:
+负责：
 
-1. Low-quota notifications
-2. Reset reminder notifications
-3. Notification deduplication
+1. 低额度通知
+2. 重置提醒通知
+3. 通知去重
 
 ### `state_store`
 
-Responsible for current in-memory application state, including:
+负责维护应用当前的内存态，包括：
 
-1. latest quota snapshot
-2. refresh status
-3. last refresh time
-4. last error state
+1. 最新额度快照
+2. 刷新状态
+3. 最近刷新时间
+4. 最近错误状态
 
-UI and tray rendering should subscribe to this state instead of issuing network requests directly.
+状态栏和面板 UI 都应订阅这里的状态，而不是自己发起网络请求。
 
-## Data Model
+## 数据模型
 
-Even for a single-provider first release, a normalized snapshot model should be defined up front.
+即使第一版只支持 Codex，也建议提前定义统一的数据结构，避免后续扩展时大面积返工。
 
 ### `QuotaSnapshot`
 
-Fields:
+字段：
 
 1. `account_name`
 2. `remaining`
@@ -227,7 +227,7 @@ Fields:
 
 ### `RefreshStatus`
 
-Values:
+取值：
 
 1. `idle`
 2. `refreshing`
@@ -236,73 +236,73 @@ Values:
 
 ### `AppSettings`
 
-Fields:
+字段：
 
 1. `refresh_interval_minutes`
 2. `low_quota_threshold`
 3. `notify_on_low_quota`
 4. `notify_on_reset`
 
-## State Flow
+## 状态流转
 
-The app should follow a single refresh path:
+应用应遵循单一刷新链路：
 
-1. App launches.
-2. Settings load from local storage.
-3. Secrets load from Keychain.
-4. `quota_service` performs initial refresh.
-5. `state_store` updates with the latest result.
-6. Tray and panel UI re-render from state.
-7. Scheduler triggers future refreshes.
-8. Notification rules evaluate against the updated snapshot.
+1. 应用启动。
+2. 从本地加载设置。
+3. 从 Keychain 读取密钥。
+4. `quota_service` 执行首次刷新。
+5. `state_store` 写入最新结果。
+6. 状态栏和面板 UI 根据状态重新渲染。
+7. `scheduler` 触发后续周期刷新。
+8. 通知规则基于最新快照进行判断。
 
-This flow avoids duplicated request logic and reduces inconsistent UI state.
+这个流程可以避免重复请求逻辑，也能减少状态不一致问题。
 
-## Storage Strategy
+## 存储策略
 
-Sensitive values must be stored in macOS Keychain. Non-sensitive settings and the latest snapshot can be stored locally, using SQLite or a lightweight local persistence mechanism depending on implementation complexity.
+敏感数据必须存储在 macOS Keychain 中。非敏感配置和最近一次额度快照可以存储在本地。
 
-For the MVP, the storage decision should optimize for simplicity:
+对于 MVP，存储方案应优先考虑简单可用：
 
-1. Keychain for credentials
-2. Lightweight local persistence for settings
-3. Cached latest snapshot for fast startup rendering
+1. 凭证使用 Keychain 存储。
+2. 普通设置使用轻量本地持久化。
+3. 缓存最近一次快照，以便应用启动后快速显示上次状态。
 
-## Error Handling
+## 错误处理
 
-The first version should not expose detailed logs, but it still needs clear behavior when refresh fails.
+第一版虽然不做详细日志系统，但仍然需要清晰的失败行为。
 
-Required behavior:
+必需行为：
 
-1. Preserve the last successful snapshot when a refresh fails.
-2. Mark the app state as failed.
-3. Surface a simple readable failure state in the UI.
-4. Allow manual retry from the menu bar panel.
+1. 刷新失败时保留最近一次成功的额度快照。
+2. 将应用状态标记为失败。
+3. 在 UI 中展示简洁可读的失败状态。
+4. 允许用户从菜单栏面板手动重试。
 
-## Testing Strategy
+## 测试策略
 
-The MVP should be validated with practical tests at three levels:
+MVP 建议至少覆盖三层验证：
 
-1. Unit tests for quota normalization, threshold checks, and notification deduplication.
-2. Integration tests for `codex_provider` parsing using recorded sample responses.
-3. Manual macOS validation for tray behavior, Keychain storage, notifications, and startup refresh.
+1. 单元测试：额度归一化、阈值判断、通知去重。
+2. 集成测试：基于录制样本验证 `codex_provider` 的解析逻辑。
+3. macOS 手工验证：状态栏行为、Keychain 存储、通知触发、启动后自动刷新。
 
-## MVP Success Criteria
+## MVP 成功标准
 
-The first release is successful if:
+如果满足以下条件，就可以认为第一版达到了可用标准：
 
-1. A user can configure one Codex account locally.
-2. The app can fetch and display the current Codex quota reliably enough for daily use.
-3. The menu bar always reflects the current app state.
-4. Low-quota notification works without repeated spam.
-5. Connection test clearly identifies setup failures.
+1. 用户能够在本地成功配置一个 Codex 账号。
+2. 应用能够稳定获取并展示当前 Codex 额度，足以支持日常使用。
+3. 菜单栏状态始终能反映当前应用健康状态。
+4. 低额度提醒可以工作且不会重复骚扰。
+5. 连接测试能够明确指出基础配置问题。
 
-## Iteration Plan After MVP
+## MVP 后续迭代顺序
 
-After the Codex-first release is stable, expansion should proceed in this order:
+Codex 第一版稳定后，后续应按以下顺序扩展：
 
-1. Hardening the Codex integration
-2. Adding one more provider through the same provider abstraction
-3. Introducing multi-provider overview
-4. Adding optional history and analytics
-5. Adding import/export or sync only if clearly needed
+1. 先加固 Codex 接入稳定性。
+2. 再增加一个新平台，验证 provider 扩展模型。
+3. 再做多平台总览。
+4. 再补历史记录和统计分析。
+5. 最后再考虑导入导出或同步能力。
