@@ -1,7 +1,6 @@
 use crate::{
-    models::{AppSettings, SaveSettingsInput},
-    secrets,
-    storage,
+    models::{AppSettings, AuthMode, SaveSettingsInput},
+    secrets, storage,
 };
 use tauri::AppHandle;
 
@@ -9,12 +8,16 @@ const SETTINGS_FILE: &str = "settings.json";
 
 pub fn load_settings(app: &AppHandle) -> Result<AppSettings, String> {
     let mut settings = storage::read_json::<AppSettings>(app, SETTINGS_FILE)?.unwrap_or_default();
-    settings.secret_configured = secrets::load_secret(&settings)?.is_some();
+    settings.secret_configured = match settings.auth_mode {
+        AuthMode::OAuth => secrets::oauth_secret_configured(&settings.account_id)?,
+        _ => secrets::load_secret(&settings)?.is_some(),
+    };
     Ok(settings)
 }
 
 pub fn save_settings(app: &AppHandle, input: SaveSettingsInput) -> Result<AppSettings, String> {
     let mut settings = AppSettings {
+        account_id: sanitize_account_id(input.account_id),
         account_name: input.account_name,
         auth_mode: input.auth_mode,
         base_url_override: sanitize_optional(input.base_url_override),
@@ -27,11 +30,17 @@ pub fn save_settings(app: &AppHandle, input: SaveSettingsInput) -> Result<AppSet
         secret_configured: false,
     };
 
-    if let Some(secret) = input.auth_secret.and_then(|value| sanitize_optional(Some(value))) {
+    if let Some(secret) = input
+        .auth_secret
+        .and_then(|value| sanitize_optional(Some(value)))
+    {
         secrets::save_secret(&secret)?;
     }
 
-    settings.secret_configured = secrets::load_secret(&settings)?.is_some();
+    settings.secret_configured = match settings.auth_mode {
+        AuthMode::OAuth => secrets::oauth_secret_configured(&settings.account_id)?,
+        _ => secrets::load_secret(&settings)?.is_some(),
+    };
     storage::write_json(app, SETTINGS_FILE, &settings)?;
     Ok(settings)
 }
@@ -45,4 +54,13 @@ fn sanitize_optional(input: Option<String>) -> Option<String> {
             Some(trimmed)
         }
     })
+}
+
+fn sanitize_account_id(input: String) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        crate::models::default_account_id()
+    } else {
+        trimmed.to_string()
+    }
 }

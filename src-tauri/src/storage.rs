@@ -11,14 +11,18 @@ pub fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn read_json<T: DeserializeOwned>(app: &AppHandle, filename: &str) -> Result<Option<T>, String> {
+pub fn read_json<T: DeserializeOwned>(
+    app: &AppHandle,
+    filename: &str,
+) -> Result<Option<T>, String> {
     let path = app_dir(app)?.join(filename);
     if !path.exists() {
         return Ok(None);
     }
 
     let content = fs::read_to_string(path).map_err(|error| format!("读取文件失败: {error}"))?;
-    let value = serde_json::from_str::<T>(&content).map_err(|error| format!("解析文件失败: {error}"))?;
+    let value =
+        serde_json::from_str::<T>(&content).map_err(|error| format!("解析文件失败: {error}"))?;
     Ok(Some(value))
 }
 

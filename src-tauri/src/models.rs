@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub enum AuthMode {
     ApiKey,
+    OAuth,
     SessionToken,
     Cookie,
 }
@@ -25,6 +26,7 @@ pub struct QuotaWindow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaSnapshot {
+    pub account_id: String,
     pub account_name: String,
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
@@ -49,6 +51,8 @@ impl Default for RefreshStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
     pub account_name: String,
     pub auth_mode: AuthMode,
     pub base_url_override: Option<String>,
@@ -64,6 +68,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            account_id: default_account_id(),
             account_name: "OpenAI Account".into(),
             auth_mode: AuthMode::ApiKey,
             base_url_override: None,
@@ -80,6 +85,8 @@ impl Default for AppSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveSettingsInput {
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
     pub account_name: String,
     pub auth_mode: AuthMode,
     pub base_url_override: Option<String>,
@@ -90,6 +97,22 @@ pub struct SaveSettingsInput {
     pub notify_on_reset: bool,
     pub reset_notify_lead_minutes: u32,
     pub auth_secret: Option<String>,
+}
+
+pub fn default_account_id() -> String {
+    "default".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StoredOAuthTokens {
+    pub account_id: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub email: Option<String>,
+    pub chatgpt_account_id: Option<String>,
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +138,29 @@ impl Default for AppStatus {
 pub struct ConnectionTestResult {
     pub success: bool,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthPhase {
+    Idle,
+    Running,
+    Success,
+    Error,
+}
+
+impl Default for OAuthPhase {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OAuthStatus {
+    pub phase: OAuthPhase,
+    pub message: Option<String>,
+    pub email: Option<String>,
+    pub auth_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

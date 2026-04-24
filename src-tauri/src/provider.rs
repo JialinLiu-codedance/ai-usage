@@ -4,7 +4,7 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 use reqwest::{
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue},
+    header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE},
     Client, StatusCode,
 };
 use serde_json::json;
@@ -13,7 +13,7 @@ const DEFAULT_PROBE_URL: &str = "https://chatgpt.com/backend-api/codex/responses
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/responses";
 const CODEX_CLI_VERSION: &str = "0.104.0";
 const CODEX_CLI_USER_AGENT: &str = "codex_cli_rs/0.104.0";
-const DEFAULT_MODEL: &str = "gpt-5.1-codex";
+const DEFAULT_MODEL: &str = "gpt-5.3-codex";
 const DEFAULT_INSTRUCTIONS: &str = "You are Codex. Respond briefly.";
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ struct RawWindow {
 }
 
 pub async fn fetch_quota(
+    account_id: &str,
     account_name: &str,
     base_url_override: Option<&str>,
     credentials: &ProbeCredentials,
@@ -31,7 +32,12 @@ pub async fn fetch_quota(
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|error| ProviderError::new(ProviderErrorKind::Unknown, format!("创建 HTTP 客户端失败: {error}")))?;
+        .map_err(|error| {
+            ProviderError::new(
+                ProviderErrorKind::Unknown,
+                format!("创建 HTTP 客户端失败: {error}"),
+            )
+        })?;
 
     let target = resolve_target_url(base_url_override, &credentials.auth_mode);
     let payload = json!({
@@ -54,10 +60,7 @@ pub async fn fetch_quota(
 
     let headers = build_headers(credentials, &target)?;
 
-    let mut request = client
-        .post(target)
-        .headers(headers)
-        .json(&payload);
+    let mut request = client.post(target).headers(headers).json(&payload);
 
     if uses_chatgpt_internal(credentials) {
         request = request.header("Host", "chatgpt.com");
@@ -65,7 +68,8 @@ pub async fn fetch_quota(
 
     let response = request.send().await.map_err(map_request_error)?;
 
-    if let Some(snapshot) = parse_snapshot_if_present(account_name, response.headers())? {
+    if let Some(snapshot) = parse_snapshot_if_present(account_id, account_name, response.headers())?
+    {
         return Ok(snapshot);
     }
 
@@ -96,11 +100,12 @@ pub async fn fetch_quota(
 }
 
 pub async fn test_connection(
+    account_id: &str,
     account_name: &str,
     base_url_override: Option<&str>,
     credentials: &ProbeCredentials,
 ) -> Result<String, ProviderError> {
-    let snapshot = fetch_quota(account_name, base_url_override, credentials).await?;
+    let snapshot = fetch_quota(account_id, account_name, base_url_override, credentials).await?;
     let five = snapshot
         .five_hour
         .as_ref()
@@ -114,7 +119,11 @@ pub async fn test_connection(
     Ok(format!("连接成功，5H 剩余 {five}，7D 剩余 {seven}"))
 }
 
-fn parse_snapshot(account_name: &str, headers: &HeaderMap) -> Result<QuotaSnapshot, ProviderError> {
+fn parse_snapshot(
+    account_id: &str,
+    account_name: &str,
+    headers: &HeaderMap,
+) -> Result<QuotaSnapshot, ProviderError> {
     let fetched_at = Utc::now();
     let primary = read_window(headers, "primary")?;
     let secondary = read_window(headers, "secondary")?;
@@ -129,6 +138,7 @@ fn parse_snapshot(account_name: &str, headers: &HeaderMap) -> Result<QuotaSnapsh
     let (five_hour, seven_day) = normalize_windows(primary, secondary, fetched_at);
 
     Ok(QuotaSnapshot {
+        account_id: account_id.to_string(),
         account_name: account_name.to_string(),
         five_hour,
         seven_day,
@@ -138,6 +148,7 @@ fn parse_snapshot(account_name: &str, headers: &HeaderMap) -> Result<QuotaSnapsh
 }
 
 fn parse_snapshot_if_present(
+    account_id: &str,
     account_name: &str,
     headers: &HeaderMap,
 ) -> Result<Option<QuotaSnapshot>, ProviderError> {
@@ -152,7 +163,7 @@ fn parse_snapshot_if_present(
         return Ok(None);
     }
 
-    parse_snapshot(account_name, headers).map(Some)
+    parse_snapshot(account_id, account_name, headers).map(Some)
 }
 
 fn read_window(headers: &HeaderMap, prefix: &str) -> Result<Option<RawWindow>, ProviderError> {
@@ -188,15 +199,24 @@ fn normalize_windows(
             let primary_minutes = primary.window_minutes.unwrap_or(10080);
             let secondary_minutes = secondary.window_minutes.unwrap_or(300);
             if primary_minutes <= secondary_minutes {
-                (Some(to_window(primary, fetched_at)), Some(to_window(secondary, fetched_at)))
+                (
+                    Some(to_window(primary, fetched_at)),
+                    Some(to_window(secondary, fetched_at)),
+                )
             } else {
-                (Some(to_window(secondary, fetched_at)), Some(to_window(primary, fetched_at)))
+                (
+                    Some(to_window(secondary, fetched_at)),
+                    Some(to_window(primary, fetched_at)),
+                )
             }
         }
     }
 }
 
-fn classify_single(window: RawWindow, fetched_at: DateTime<Utc>) -> (Option<QuotaWindow>, Option<QuotaWindow>) {
+fn classify_single(
+    window: RawWindow,
+    fetched_at: DateTime<Utc>,
+) -> (Option<QuotaWindow>, Option<QuotaWindow>) {
     match window.window_minutes {
         Some(minutes) if minutes <= 360 => (Some(to_window(window, fetched_at)), None),
         Some(_) => (None, Some(to_window(window, fetched_at))),
@@ -235,9 +255,19 @@ fn get_header_f64(headers: &HeaderMap, key: &str) -> Result<Option<f64>, Provide
 
     let parsed = value
         .to_str()
-        .map_err(|_| ProviderError::new(ProviderErrorKind::InvalidResponse, format!("{key} 不是合法文本")))?
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("{key} 不是合法文本"),
+            )
+        })?
         .parse::<f64>()
-        .map_err(|_| ProviderError::new(ProviderErrorKind::InvalidResponse, format!("{key} 不是合法数字")))?;
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("{key} 不是合法数字"),
+            )
+        })?;
 
     Ok(Some(parsed))
 }
@@ -249,9 +279,19 @@ fn get_header_i64(headers: &HeaderMap, key: &str) -> Result<Option<i64>, Provide
 
     let parsed = value
         .to_str()
-        .map_err(|_| ProviderError::new(ProviderErrorKind::InvalidResponse, format!("{key} 不是合法文本")))?
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("{key} 不是合法文本"),
+            )
+        })?
         .parse::<i64>()
-        .map_err(|_| ProviderError::new(ProviderErrorKind::InvalidResponse, format!("{key} 不是合法整数")))?;
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("{key} 不是合法整数"),
+            )
+        })?;
 
     Ok(Some(parsed))
 }
@@ -263,9 +303,19 @@ fn get_header_u32(headers: &HeaderMap, key: &str) -> Result<Option<u32>, Provide
 
     let parsed = value
         .to_str()
-        .map_err(|_| ProviderError::new(ProviderErrorKind::InvalidResponse, format!("{key} 不是合法文本")))?
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("{key} 不是合法文本"),
+            )
+        })?
         .parse::<u32>()
-        .map_err(|_| ProviderError::new(ProviderErrorKind::InvalidResponse, format!("{key} 不是合法整数")))?;
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                format!("{key} 不是合法整数"),
+            )
+        })?;
 
     Ok(Some(parsed))
 }
@@ -292,7 +342,10 @@ fn map_request_error(error: reqwest::Error) -> ProviderError {
     ProviderError::new(ProviderErrorKind::Unknown, format!("请求失败: {error}"))
 }
 
-fn build_headers(credentials: &ProbeCredentials, target_url: &str) -> Result<HeaderMap, ProviderError> {
+fn build_headers(
+    credentials: &ProbeCredentials,
+    target_url: &str,
+) -> Result<HeaderMap, ProviderError> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert("User-Agent", HeaderValue::from_static(CODEX_CLI_USER_AGENT));
@@ -302,7 +355,7 @@ fn build_headers(credentials: &ProbeCredentials, target_url: &str) -> Result<Hea
             headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
             headers.insert(AUTHORIZATION, format_auth_header(credentials)?);
         }
-        AuthMode::SessionToken => {
+        AuthMode::OAuth | AuthMode::SessionToken => {
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
             headers.insert(
                 "OpenAI-Beta",
@@ -332,7 +385,10 @@ fn build_headers(credentials: &ProbeCredentials, target_url: &str) -> Result<Hea
     if uses_chatgpt_internal(credentials) {
         if let Some(account_id) = credentials.chatgpt_account_id.as_deref() {
             let value = HeaderValue::from_str(account_id).map_err(|_| {
-                ProviderError::new(ProviderErrorKind::InvalidResponse, "chatgpt_account_id 非法")
+                ProviderError::new(
+                    ProviderErrorKind::InvalidResponse,
+                    "chatgpt_account_id 非法",
+                )
             })?;
             headers.insert("chatgpt-account-id", value);
         }
@@ -348,7 +404,10 @@ fn uses_chatgpt_internal(credentials: &ProbeCredentials) -> bool {
 }
 
 fn resolve_target_url(base_url_override: Option<&str>, auth_mode: &AuthMode) -> String {
-    if let Some(raw) = base_url_override.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(raw) = base_url_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         if raw.ends_with("/responses") {
             return raw.to_string();
         }
@@ -357,7 +416,7 @@ fn resolve_target_url(base_url_override: Option<&str>, auth_mode: &AuthMode) -> 
         }
         return match auth_mode {
             AuthMode::ApiKey => format!("{}/v1/responses", raw.trim_end_matches('/')),
-            AuthMode::SessionToken | AuthMode::Cookie => {
+            AuthMode::OAuth | AuthMode::SessionToken | AuthMode::Cookie => {
                 format!("{}/backend-api/codex/responses", raw.trim_end_matches('/'))
             }
         };
@@ -365,7 +424,9 @@ fn resolve_target_url(base_url_override: Option<&str>, auth_mode: &AuthMode) -> 
 
     match auth_mode {
         AuthMode::ApiKey => DEFAULT_API_URL.to_string(),
-        AuthMode::SessionToken | AuthMode::Cookie => DEFAULT_PROBE_URL.to_string(),
+        AuthMode::OAuth | AuthMode::SessionToken | AuthMode::Cookie => {
+            DEFAULT_PROBE_URL.to_string()
+        }
     }
 }
 
@@ -393,8 +454,14 @@ mod tests {
     #[test]
     fn resolves_default_url_by_auth_mode() {
         assert_eq!(resolve_target_url(None, &AuthMode::ApiKey), DEFAULT_API_URL);
-        assert_eq!(resolve_target_url(None, &AuthMode::SessionToken), DEFAULT_PROBE_URL);
-        assert_eq!(resolve_target_url(None, &AuthMode::Cookie), DEFAULT_PROBE_URL);
+        assert_eq!(
+            resolve_target_url(None, &AuthMode::SessionToken),
+            DEFAULT_PROBE_URL
+        );
+        assert_eq!(
+            resolve_target_url(None, &AuthMode::Cookie),
+            DEFAULT_PROBE_URL
+        );
     }
 
     #[test]
@@ -408,13 +475,23 @@ mod tests {
             ("x-codex-secondary-reset-after-seconds", "1800"),
         ]);
 
-        let snapshot = parse_snapshot("acc", &map).unwrap();
+        let snapshot = parse_snapshot("default", "acc", &map).unwrap();
         assert_eq!(
-            snapshot.five_hour.as_ref().unwrap().remaining_percent.round() as i64,
+            snapshot
+                .five_hour
+                .as_ref()
+                .unwrap()
+                .remaining_percent
+                .round() as i64,
             75
         );
         assert_eq!(
-            snapshot.seven_day.as_ref().unwrap().remaining_percent.round() as i64,
+            snapshot
+                .seven_day
+                .as_ref()
+                .unwrap()
+                .remaining_percent
+                .round() as i64,
             30
         );
     }
@@ -422,7 +499,9 @@ mod tests {
     #[test]
     fn returns_none_when_no_quota_headers() {
         let map = HeaderMap::new();
-        assert!(parse_snapshot_if_present("acc", &map).unwrap().is_none());
+        assert!(parse_snapshot_if_present("default", "acc", &map)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

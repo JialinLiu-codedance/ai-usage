@@ -1,6 +1,6 @@
 export type RefreshStatus = "idle" | "refreshing" | "ok" | "error";
 
-export type AuthMode = "apiKey" | "sessionToken" | "cookie";
+export type AuthMode = "apiKey" | "oauth" | "sessionToken" | "cookie";
 
 export interface QuotaWindow {
   used_percent: number;
@@ -10,6 +10,7 @@ export interface QuotaWindow {
 }
 
 export interface QuotaSnapshot {
+  account_id: string;
   account_name: string;
   five_hour: QuotaWindow | null;
   seven_day: QuotaWindow | null;
@@ -18,6 +19,7 @@ export interface QuotaSnapshot {
 }
 
 export interface AppSettings {
+  account_id: string;
   account_name: string;
   auth_mode: AuthMode;
   base_url_override: string | null;
@@ -31,6 +33,7 @@ export interface AppSettings {
 }
 
 export interface SaveSettingsInput {
+  account_id: string;
   account_name: string;
   auth_mode: AuthMode;
   base_url_override: string | null;
@@ -53,4 +56,11 @@ export interface AppStatus {
 export interface ConnectionTestResult {
   success: boolean;
   message: string;
+}
+
+export interface OAuthStatus {
+  phase: "idle" | "running" | "success" | "error";
+  message: string | null;
+  email: string | null;
+  auth_url: string | null;
 }
