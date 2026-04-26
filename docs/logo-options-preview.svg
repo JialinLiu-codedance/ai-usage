@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="700" viewBox="0 0 1040 700">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#000" flood-opacity=".18"/>
+    </filter>
+    <style>
+      .title { font: 700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #18181b; }
+      .label { font: 700 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27272a; }
+      .note { font: 500 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #71717a; }
+      .small { font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #71717a; }
+    </style>
+  </defs>
+
+  <rect width="1040" height="700" rx="28" fill="#f7f7f8"/>
+  <text x="48" y="58" class="title">AI Usage logo options</text>
+  <text x="48" y="86" class="note">Top row previews the macOS menu bar template icon. Bottom row previews the in-app header button.</text>
+
+  <g transform="translate(48 128)">
+    <rect width="944" height="86" rx="18" fill="#666"/>
+    <rect x="24" y="20" width="132" height="46" rx="8" fill="#8b8b8b"/>
+    <rect x="200" y="20" width="132" height="46" rx="8" fill="#8b8b8b"/>
+    <rect x="376" y="20" width="132" height="46" rx="8" fill="#8b8b8b"/>
+    <rect x="552" y="20" width="132" height="46" rx="8" fill="#8b8b8b"/>
+
+    <g transform="translate(52 27)" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <path d="M8 9v13a6 6 0 0 0 6 6h8a6 6 0 0 0 6-6V9"/>
+      <path d="M12 21l5-5 4 4 7-9"/>
+    </g>
+    <text x="92" y="50" font-size="24" font-weight="700" fill="#fff" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">A</text>
+
+    <g transform="translate(228 27)" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <path d="M7 23h5l3-13 5 20 4-12h5"/>
+    </g>
+    <text x="268" y="50" font-size="24" font-weight="700" fill="#fff" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">B</text>
+
+    <g transform="translate(404 27)" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M16 6a12 12 0 1 0 10.6 17.6"/>
+      <path d="M16 6v8h8"/>
+      <path d="M12 23l4 4 8-10"/>
+    </g>
+    <text x="444" y="50" font-size="24" font-weight="700" fill="#fff" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">C</text>
+
+    <g transform="translate(580 27)" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 24h24"/>
+      <path d="M8 24v-7"/>
+      <path d="M16 24V9"/>
+      <path d="M24 24V13"/>
+      <path d="M8 14l8-6 8 5 6-7"/>
+    </g>
+    <text x="620" y="50" font-size="24" font-weight="700" fill="#fff" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">D</text>
+  </g>
+
+  <g transform="translate(48 262)">
+    <g>
+      <rect width="212" height="310" rx="18" fill="#fff" filter="url(#shadow)"/>
+      <text x="24" y="38" class="label">A. Inbox + signal</text>
+      <text x="24" y="62" class="note">Closest to usage/quota.</text>
+      <rect x="24" y="92" width="64" height="64" rx="16" fill="#f4f4f5"/>
+      <svg x="39" y="107" width="34" height="34" viewBox="0 0 34 34" fill="none">
+        <path d="M7.5 8.5v14a6 6 0 0 0 6 6h7a6 6 0 0 0 6-6v-14" stroke="#71717A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M11 22l5-5.5 4 4 7-9" stroke="#18181B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <text x="24" y="198" class="small">Pros: readable, related to quota</text>
+      <text x="24" y="220" class="small">Risk: more detailed at 18px</text>
+    </g>
+
+    <g transform="translate(244 0)">
+      <rect width="212" height="310" rx="18" fill="#fff" filter="url(#shadow)"/>
+      <text x="24" y="38" class="label">B. Pulse meter</text>
+      <text x="24" y="62" class="note">Minimal, system-like.</text>
+      <rect x="24" y="92" width="64" height="64" rx="16" fill="#f4f4f5"/>
+      <svg x="39" y="107" width="34" height="34" viewBox="0 0 34 34" fill="none">
+        <path d="M5 22h6l3.5-14 5.5 22 4.5-13h4.5" stroke="#18181B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <text x="24" y="198" class="small">Pros: clean in menu bar</text>
+      <text x="24" y="220" class="small">Risk: less app-specific</text>
+    </g>
+
+    <g transform="translate(488 0)">
+      <rect width="212" height="310" rx="18" fill="#fff" filter="url(#shadow)"/>
+      <text x="24" y="38" class="label">C. Refresh quota</text>
+      <text x="24" y="62" class="note">Emphasizes updating usage.</text>
+      <rect x="24" y="92" width="64" height="64" rx="16" fill="#f4f4f5"/>
+      <svg x="39" y="107" width="34" height="34" viewBox="0 0 34 34" fill="none">
+        <path d="M17 5a12 12 0 1 0 10.5 17.8" stroke="#71717A" stroke-width="3" stroke-linecap="round"/>
+        <path d="M17 5v8h8" stroke="#71717A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M12 22l4 4 8-10" stroke="#18181B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <text x="24" y="198" class="small">Pros: action-oriented</text>
+      <text x="24" y="220" class="small">Risk: close to refresh icon</text>
+    </g>
+
+    <g transform="translate(732 0)">
+      <rect width="212" height="310" rx="18" fill="#fff" filter="url(#shadow)"/>
+      <text x="24" y="38" class="label">D. Bars + trend</text>
+      <text x="24" y="62" class="note">Dashboard-style usage mark.</text>
+      <rect x="24" y="92" width="64" height="64" rx="16" fill="#f4f4f5"/>
+      <svg x="39" y="107" width="34" height="34" viewBox="0 0 34 34" fill="none">
+        <path d="M5 27h24" stroke="#A1A1AA" stroke-width="3" stroke-linecap="round"/>
+        <path d="M8 27v-8M17 27V8M26 27V14" stroke="#71717A" stroke-width="3" stroke-linecap="round"/>
+        <path d="M8 16l9-7 8 5 5-7" stroke="#18181B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <text x="24" y="198" class="small">Pros: clear usage metaphor</text>
+      <text x="24" y="220" class="small">Risk: busiest option</text>
+    </g>
+  </g>
+</svg>

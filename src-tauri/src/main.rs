@@ -21,6 +21,7 @@ const TRAY_ID: &str = "ai-usage-tray";
 const MENU_MAIN: &str = "main";
 const MENU_REFRESH: &str = "refresh";
 const MENU_QUIT: &str = "quit";
+const TRAY_USAGE_LINE_WIDTH: usize = 52;
 
 fn main() {
     tauri::Builder::default()
@@ -203,14 +204,11 @@ fn build_tray_menu(
             account_lines
         };
         for account_group in lines {
-            let account = account_usage_menu_item(app, &account_group[0])?;
-            let five_hour = account_usage_menu_item(app, &account_group[1])?;
-            let seven_day = account_usage_menu_item(app, &account_group[2])?;
-            menu = menu
-                .item(&account)
-                .item(&five_hour)
-                .item(&seven_day)
-                .separator();
+            for line in account_group {
+                let item = account_usage_menu_item(app, &line)?;
+                menu = menu.item(&item);
+            }
+            menu = menu.separator();
         }
     }
 
@@ -270,45 +268,54 @@ fn provider_supports_quota_refresh(provider: &str) -> bool {
 fn fallback_tray_account_summary_lines(
     settings: &models::AppSettings,
     status: &models::AppStatus,
-) -> Vec<[String; 3]> {
+) -> Vec<Vec<String>> {
     let name = status
         .snapshot
         .as_ref()
         .map(|snapshot| snapshot.account_name.as_str())
         .unwrap_or(settings.account_name.as_str());
-    vec![[
+    vec![tray_account_summary_group(
         format!(
             "{}    {}",
             provider_display_label(settings.active_provider()),
             display_account_name(name)
         ),
-        usage_line(
-            "5H",
-            status.snapshot.as_ref().and_then(|s| s.five_hour.as_ref()),
-        ),
-        usage_line(
-            "7D",
-            status.snapshot.as_ref().and_then(|s| s.seven_day.as_ref()),
-        ),
-    ]]
+        status.snapshot.as_ref().and_then(|s| s.five_hour.as_ref()),
+        status.snapshot.as_ref().and_then(|s| s.seven_day.as_ref()),
+    )]
 }
 
-fn tray_account_summary_lines(status: &models::AppStatus) -> Vec<[String; 3]> {
+fn tray_account_summary_lines(status: &models::AppStatus) -> Vec<Vec<String>> {
     status
         .accounts
         .iter()
         .map(|account| {
-            [
+            tray_account_summary_group(
                 format!(
                     "{}    {}",
                     provider_display_label(&account.provider),
                     display_account_name(&account.account_name)
                 ),
-                usage_line("5H", account.five_hour.as_ref()),
-                usage_line("7D", account.seven_day.as_ref()),
-            ]
+                account.five_hour.as_ref(),
+                account.seven_day.as_ref(),
+            )
         })
         .collect()
+}
+
+fn tray_account_summary_group(
+    account_line: String,
+    five_hour: Option<&models::QuotaWindow>,
+    seven_day: Option<&models::QuotaWindow>,
+) -> Vec<String> {
+    let mut lines = vec![account_line];
+    if let Some(window) = five_hour {
+        lines.push(usage_line("5H", Some(window)));
+    }
+    if let Some(window) = seven_day {
+        lines.push(usage_line("7D", Some(window)));
+    }
+    lines
 }
 
 fn provider_display_label(provider: &str) -> &'static str {
@@ -330,7 +337,11 @@ fn display_account_name(name: &str) -> &str {
 }
 
 fn usage_line(label: &str, window: Option<&models::QuotaWindow>) -> String {
-    format!("{label}    {}", compact_percent(window))
+    let percent = compact_percent(window);
+    format!(
+        "{label:<2}{percent:>width$}",
+        width = TRAY_USAGE_LINE_WIDTH - 2
+    )
 }
 
 fn tray_tooltip(status: &models::AppStatus) -> String {
@@ -394,16 +405,13 @@ fn tray_icon_image() -> Image<'static> {
 }
 
 fn logo_sample_is_filled(x: f64, y: f64) -> bool {
-    const FRAME_WIDTH: f64 = 2.2;
-    const SIGNAL_WIDTH: f64 = 2.15;
+    const SIGNAL_WIDTH: f64 = 2.25;
 
-    stroke_segment_distance(x, y, 4.6, 5.0, 4.6, 12.4) <= FRAME_WIDTH / 2.0
-        || stroke_segment_distance(x, y, 4.6, 12.4, 8.2, 14.2) <= FRAME_WIDTH / 2.0
-        || stroke_segment_distance(x, y, 8.2, 14.2, 13.4, 14.2) <= FRAME_WIDTH / 2.0
-        || stroke_segment_distance(x, y, 13.4, 14.2, 13.4, 8.9) <= FRAME_WIDTH / 2.0
-        || stroke_segment_distance(x, y, 7.0, 11.2, 9.0, 9.2) <= SIGNAL_WIDTH / 2.0
-        || stroke_segment_distance(x, y, 9.0, 9.2, 11.0, 10.9) <= SIGNAL_WIDTH / 2.0
-        || stroke_segment_distance(x, y, 11.0, 10.9, 14.2, 6.8) <= SIGNAL_WIDTH / 2.0
+    stroke_segment_distance(x, y, 3.0, 11.6, 6.2, 11.6) <= SIGNAL_WIDTH / 2.0
+        || stroke_segment_distance(x, y, 6.2, 11.6, 7.9, 4.2) <= SIGNAL_WIDTH / 2.0
+        || stroke_segment_distance(x, y, 7.9, 4.2, 10.7, 15.7) <= SIGNAL_WIDTH / 2.0
+        || stroke_segment_distance(x, y, 10.7, 15.7, 13.1, 9.0) <= SIGNAL_WIDTH / 2.0
+        || stroke_segment_distance(x, y, 13.1, 9.0, 15.4, 9.0) <= SIGNAL_WIDTH / 2.0
 }
 
 fn stroke_segment_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
@@ -528,14 +536,70 @@ mod tests {
         let lines = tray_account_summary_lines(&status);
 
         assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), 2);
+        assert_eq!(lines[0][0], "OpenAI    first@example.com");
         assert_eq!(
-            lines[0],
-            ["OpenAI    first@example.com", "5H    96%", "7D    --"]
+            lines[0][1],
+            format!(
+                "{:<2}{:>width$}",
+                "5H",
+                "96%",
+                width = TRAY_USAGE_LINE_WIDTH - 2
+            )
         );
+        assert_eq!(lines[1].len(), 2);
+        assert_eq!(lines[1][0], "Anthropic    second@example.com");
         assert_eq!(
-            lines[1],
-            ["Anthropic    second@example.com", "5H    --", "7D    90%"]
+            lines[1][1],
+            format!(
+                "{:<2}{:>width$}",
+                "7D",
+                "90%",
+                width = TRAY_USAGE_LINE_WIDTH - 2
+            )
         );
+    }
+
+    #[test]
+    fn usage_line_right_aligns_percent_value() {
+        let line = usage_line(
+            "5H",
+            Some(&models::QuotaWindow {
+                used_percent: 12.0,
+                remaining_percent: 88.0,
+                reset_at: None,
+                window_minutes: Some(300),
+            }),
+        );
+
+        assert_eq!(line.chars().count(), 52);
+        assert!(line.starts_with("5H"));
+        assert!(line.ends_with("88%"));
+    }
+
+    #[test]
+    fn tray_summary_lines_hide_missing_quota_windows() {
+        let status = models::AppStatus {
+            accounts: vec![models::AccountQuotaStatus {
+                account_id: "minimax".into(),
+                account_name: "MiniMax Account".into(),
+                provider: models::PROVIDER_MINIMAX.into(),
+                five_hour: Some(models::QuotaWindow {
+                    used_percent: 0.0,
+                    remaining_percent: 100.0,
+                    reset_at: None,
+                    window_minutes: Some(300),
+                }),
+                seven_day: None,
+                fetched_at: Some(chrono::Utc::now()),
+                source: Some("minimax_coding_plan".into()),
+            }],
+            ..models::AppStatus::default()
+        };
+
+        let lines = tray_account_summary_lines(&status);
+
+        assert!(!lines[0].iter().any(|line| line.contains("--")));
     }
 
     #[test]

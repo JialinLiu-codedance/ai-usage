@@ -34,7 +34,7 @@ import {
   shouldApplyOAuthStartResult,
   shouldResetOAuthAuthDraft,
 } from "./lib/oauth-auth-state";
-import { remainingQuotaProgressValue } from "./lib/quota-display";
+import { quotaDisplayRows, remainingQuotaProgressValue } from "./lib/quota-display";
 import type {
   AccountQuotaStatus,
   AppSettings,
@@ -760,8 +760,15 @@ function QuotaAccountCard({
       {error ? <div className="inline-error">{error}</div> : null}
       {stale ? <div className="stale-text">数据来自缓存</div> : null}
 
-      <QuotaRow label="5H" window={account.five_hour} threshold={threshold} muted={muted || !account.five_hour} />
-      <QuotaRow label="7D" window={account.seven_day} threshold={threshold} muted={muted || !account.seven_day} />
+      {quotaDisplayRows(account).map((row) => (
+        <QuotaRow
+          key={row.label}
+          label={row.label}
+          window={row.window}
+          threshold={threshold}
+          muted={muted}
+        />
+      ))}
     </Card>
   );
 }
