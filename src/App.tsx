@@ -15,19 +15,22 @@ import qwenIcon from "../icons/extracted/qwen.svg";
 import zhipuIcon from "../icons/extracted/zhipu.svg";
 import aiUsageLogo from "../icons/ai-usage-logo.svg";
 import {
-  deleteOpenAIAccount,
+  deleteConnectedAccount,
   getCurrentQuota,
   getSettings,
+  completeAnthropicOAuth,
   completeOpenAIOAuth,
+  importKimiAccount,
   resizePanel,
   refreshQuota,
   saveSettings,
+  startAnthropicOAuth,
   startOpenAIOAuth,
 } from "./lib/tauri";
 import {
-  hasGeneratedOpenAIAuthLink,
+  hasGeneratedOAuthAuthLink,
   shouldApplyOAuthStartResult,
-  shouldResetOpenAIAuthDraft,
+  shouldResetOAuthAuthDraft,
 } from "./lib/oauth-auth-state";
 import { remainingQuotaProgressValue } from "./lib/quota-display";
 import type {
@@ -39,8 +42,9 @@ import type {
   SaveSettingsInput,
 } from "./lib/types";
 
-type PanelView = "overview" | "settings" | "add-account" | "openai-auth";
+type PanelView = "overview" | "settings" | "add-account" | "oauth-auth" | "kimi-auth";
 type AddAccountBackView = Extract<PanelView, "overview" | "settings">;
+type OAuthProviderKey = "openai" | "anthropic";
 type Tone = "success" | "warning" | "danger" | "muted";
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const PANEL_WIDTH = 420;
@@ -104,7 +108,7 @@ function connectedAccounts(settings: AppSettings, status: AppStatus): ConnectedA
 }
 
 function connectedAccountSubtitle(account: ConnectedAccount): string {
-  return account.account_name.trim() || "OpenAI Account";
+  return account.account_name.trim() || defaultProviderAccountName(account.provider);
 }
 
 function quotaAccounts(settings: AppSettings, status: AppStatus): AccountQuotaStatus[] {
@@ -116,6 +120,7 @@ function quotaAccounts(settings: AppSettings, status: AppStatus): AccountQuotaSt
     return {
       account_id: account.account_id,
       account_name: connectedAccountSubtitle(account),
+      provider: account.provider,
       five_hour: snapshot?.five_hour ?? null,
       seven_day: snapshot?.seven_day ?? null,
       fetched_at: snapshot?.fetched_at ?? null,
@@ -125,7 +130,41 @@ function quotaAccounts(settings: AppSettings, status: AppStatus): AccountQuotaSt
 }
 
 function quotaAccountSubtitle(account: AccountQuotaStatus): string {
-  return account.account_name.trim() || "OpenAI Account";
+  return account.account_name.trim() || defaultProviderAccountName(account.provider);
+}
+
+function defaultProviderAccountName(provider: string): string {
+  if (provider === "anthropic") {
+    return "Anthropic Account";
+  }
+  if (provider === "kimi") {
+    return "Kimi Account";
+  }
+  return "OpenAI Account";
+}
+
+function providerDisplayName(provider: string): string {
+  if (provider === "anthropic") {
+    return "Anthropic";
+  }
+  if (provider === "kimi") {
+    return "Kimi";
+  }
+  return "OpenAI";
+}
+
+function providerIconConfig(provider: string): { icon: string; iconMode?: ProviderIconMode } {
+  const match = providers.find((item) => item.key === provider);
+  return { icon: match?.icon ?? openaiIcon, iconMode: match?.iconMode };
+}
+
+function isOAuthProvider(provider: ProviderKey): provider is OAuthProviderKey {
+  return provider === "openai" || provider === "anthropic";
+}
+
+function nextKimiAccountName(settings: AppSettings): string {
+  const existingCount = settings.accounts.filter((account) => account.provider === "kimi").length;
+  return existingCount === 0 ? "Kimi Account" : `Kimi Account ${existingCount + 1}`;
 }
 
 export default function App() {
@@ -139,7 +178,11 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [oauthStarting, setOauthStarting] = useState(false);
+  const [oauthProvider, setOAuthProvider] = useState<OAuthProviderKey>("openai");
   const [oauthTargetAccountId, setOAuthTargetAccountId] = useState<string | null>(null);
+  const [kimiTargetAccountId, setKimiTargetAccountId] = useState<string | null>(null);
+  const [kimiAccountName, setKimiAccountName] = useState("Kimi Account");
+  const [kimiImporting, setKimiImporting] = useState(false);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [authCode, setAuthCode] = useState("");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
@@ -263,7 +306,10 @@ export default function App() {
     const shouldApplyStartResult = () =>
       shouldApplyOAuthStartResult(currentViewRef.current, oauthRequestIdRef.current, requestId);
     try {
-      const nextAuthUrl = await startOpenAIOAuth(oauthTargetAccountId);
+      const nextAuthUrl =
+        oauthProvider === "anthropic"
+          ? await startAnthropicOAuth(oauthTargetAccountId)
+          : await startOpenAIOAuth(oauthTargetAccountId);
       if (shouldApplyStartResult()) {
         setAuthUrl(nextAuthUrl);
       }
@@ -283,13 +329,14 @@ export default function App() {
     setAuthUrl(null);
     setAuthCode("");
     setOauthStarting(false);
+    setOAuthProvider("openai");
     setOAuthTargetAccountId(null);
   }
 
   function navigateToView(nextView: PanelView) {
     const previousView = currentViewRef.current;
     currentViewRef.current = nextView;
-    if (shouldResetOpenAIAuthDraft(previousView, nextView)) {
+    if (shouldResetOAuthAuthDraft(previousView, nextView)) {
       resetOAuthDraft();
     }
     setView(nextView);
@@ -297,7 +344,7 @@ export default function App() {
 
   async function handleCompleteOAuth() {
     setSettingsMessage(null);
-    if (!hasGeneratedOpenAIAuthLink(authUrl)) {
+    if (!hasGeneratedOAuthAuthLink(authUrl)) {
       setSettingsMessage("请先重新生成授权链接");
       return;
     }
@@ -307,7 +354,10 @@ export default function App() {
     }
 
     try {
-      const result = await completeOpenAIOAuth(authCode.trim());
+      const result =
+        oauthProvider === "anthropic"
+          ? await completeAnthropicOAuth(authCode.trim())
+          : await completeOpenAIOAuth(authCode.trim());
       if (result.phase === "success") {
         setSettingsMessage(null);
         navigateToView("settings");
@@ -328,16 +378,52 @@ export default function App() {
     navigateToView("add-account");
   }
 
-  function openOpenAIAuth(accountId: string | null) {
+  function openOAuthAuth(provider: OAuthProviderKey, accountId: string | null) {
     setSettingsMessage(null);
+    setOAuthProvider(provider);
     setOAuthTargetAccountId(accountId);
-    navigateToView("openai-auth");
+    navigateToView("oauth-auth");
   }
 
-  async function handleDeleteOpenAIAccount(accountId: string) {
+  function openKimiImport(accountId: string | null, accountName: string) {
+    setSettingsMessage(null);
+    setKimiTargetAccountId(accountId);
+    setKimiAccountName(accountName.trim() || "Kimi Account");
+    setKimiImporting(false);
+    navigateToView("kimi-auth");
+  }
+
+  async function handleImportKimi() {
+    const trimmedName = kimiAccountName.trim();
+    if (!trimmedName) {
+      setSettingsMessage("请输入账号名称");
+      return;
+    }
+
+    setKimiImporting(true);
     setSettingsMessage(null);
     try {
-      const nextSettings = await deleteOpenAIAccount(accountId);
+      const nextSettings = await importKimiAccount(trimmedName, kimiTargetAccountId);
+      applySettings(nextSettings);
+      navigateToView("settings");
+      try {
+        setStatus(await refreshQuota());
+        setSettingsMessage("Kimi 账号已导入并刷新额度");
+      } catch (refreshError) {
+        setStatus(await getCurrentQuota());
+        setSettingsMessage(refreshError instanceof Error ? refreshError.message : "Kimi 账号已导入，额度刷新失败");
+      }
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "导入 Kimi 账号失败");
+    } finally {
+      setKimiImporting(false);
+    }
+  }
+
+  async function handleDeleteConnectedAccount(accountId: string) {
+    setSettingsMessage(null);
+    try {
+      const nextSettings = await deleteConnectedAccount(accountId);
       applySettings(nextSettings);
       setStatus(await getCurrentQuota());
     } catch (error) {
@@ -374,8 +460,14 @@ export default function App() {
           onChange={(nextForm) => void updateSettings(nextForm)}
           onBack={() => navigateToView("overview")}
           onAddAccount={() => openAddAccount("settings")}
-          onReauthorize={(accountId) => openOpenAIAuth(accountId)}
-          onDeleteAccount={(accountId) => void handleDeleteOpenAIAccount(accountId)}
+          onReauthorize={(account) => {
+            if (account.provider === "kimi") {
+              openKimiImport(account.account_id, connectedAccountSubtitle(account));
+              return;
+            }
+            openOAuthAuth(account.provider as OAuthProviderKey, account.account_id);
+          }}
+          onDeleteAccount={(accountId) => void handleDeleteConnectedAccount(accountId)}
         />
       ) : null}
 
@@ -385,8 +477,12 @@ export default function App() {
           onBack={() => navigateToView(addAccountBackView)}
           onNext={(provider) => {
             setSettingsMessage(null);
-            if (provider === "openai") {
-              openOpenAIAuth(null);
+            if (isOAuthProvider(provider)) {
+              openOAuthAuth(provider, null);
+              return;
+            }
+            if (provider === "kimi") {
+              openKimiImport(null, nextKimiAccountName(settings));
               return;
             }
             setSettingsMessage("该平台的接入流程尚未实现");
@@ -394,8 +490,9 @@ export default function App() {
         />
       ) : null}
 
-      {view === "openai-auth" ? (
-        <OpenAIAuthPanel
+      {view === "oauth-auth" ? (
+        <OAuthAuthPanel
+          provider={oauthProvider}
           authUrl={authUrl}
           authCode={authCode}
           oauthStarting={oauthStarting}
@@ -404,6 +501,17 @@ export default function App() {
           onGenerate={() => void handleOAuth()}
           onComplete={() => void handleCompleteOAuth()}
           onCodeChange={setAuthCode}
+        />
+      ) : null}
+
+      {view === "kimi-auth" ? (
+        <KimiImportPanel
+          accountName={kimiAccountName}
+          importing={kimiImporting}
+          message={settingsMessage}
+          onBack={() => navigateToView(kimiTargetAccountId ? "settings" : "add-account")}
+          onAccountNameChange={setKimiAccountName}
+          onImport={() => void handleImportKimi()}
         />
       ) : null}
     </main>
@@ -483,10 +591,13 @@ function QuotaAccountCard({
   stale: boolean;
   error: string | null;
 }) {
+  const icon = providerIconConfig(account.provider);
   return (
     <Card className={`quota-card ${muted ? "quota-card-error" : ""}`}>
       <div className="overview-account-row">
-        <img className="overview-provider-logo" src={openaiIcon} alt="" aria-hidden="true" />
+        <span className="overview-provider-logo">
+          <ProviderIcon icon={icon.icon} iconMode={icon.iconMode} />
+        </span>
         <span className="account-subtitle">{quotaAccountSubtitle(account)}</span>
       </div>
 
@@ -574,7 +685,7 @@ function SettingsPanel({
   onChange: (nextForm: SaveSettingsInput) => void;
   onBack: () => void;
   onAddAccount: () => void;
-  onReauthorize: (accountId: string) => void;
+  onReauthorize: (account: ConnectedAccount) => void;
   onDeleteAccount: (accountId: string) => void;
 }) {
   const [thresholdDraft, setThresholdDraft] = useState(String(form.low_quota_threshold_percent));
@@ -613,18 +724,23 @@ function SettingsPanel({
           accounts.map((account) => (
             <Card className="account-card settings-account-card" key={account.account_id}>
               <div className="account-line">
-                <span className="account-title">OpenAI</span>
+                <span className="settings-account-title">
+                  <ProviderIcon {...providerIconConfig(account.provider)} />
+                  <span className="account-title">{providerDisplayName(account.provider)}</span>
+                </span>
                 <span className="account-status">已授权</span>
               </div>
               <div className="account-subtitle">{connectedAccountSubtitle(account)}</div>
               <div className="account-actions">
-                <Button
-                  variant="secondary"
-                  className="account-action-button"
-                  onClick={() => onReauthorize(account.account_id)}
-                >
-                  重新授权
-                </Button>
+                {isOAuthProvider(account.provider as ProviderKey) || account.provider === "kimi" ? (
+                  <Button
+                    variant="secondary"
+                    className="account-action-button"
+                    onClick={() => onReauthorize(account)}
+                  >
+                    {account.provider === "kimi" ? "重新导入" : "重新授权"}
+                  </Button>
+                ) : null}
                 <Button className="account-delete-button" onClick={() => onDeleteAccount(account.account_id)}>
                   删除
                 </Button>
@@ -762,7 +878,8 @@ function AddAccountPanel({
   );
 }
 
-function OpenAIAuthPanel({
+function OAuthAuthPanel({
+  provider,
   authUrl,
   authCode,
   oauthStarting,
@@ -772,6 +889,7 @@ function OpenAIAuthPanel({
   onComplete,
   onCodeChange,
 }: {
+  provider: OAuthProviderKey;
   authUrl: string | null;
   authCode: string;
   oauthStarting: boolean;
@@ -781,17 +899,22 @@ function OpenAIAuthPanel({
   onComplete: () => void;
   onCodeChange: (value: string) => void;
 }) {
+  const providerName = providerDisplayName(provider);
+  const callbackExample =
+    provider === "anthropic"
+      ? "https://platform.claude.com/oauth/code/callback?code=..."
+      : "http://localhost:1455/auth/callback?code=...";
   return (
     <Card className="settings-panel oauth-panel">
       <div className="add-header">
         <Button variant="ghost" size="icon-sm" className="icon-button back-button" onClick={onBack} aria-label="返回">
           <ArrowLeft data-icon="inline-start" />
         </Button>
-        <h1>OpenAI 账户授权</h1>
+        <h1>{providerName} 账户授权</h1>
       </div>
 
       <p className="auth-subtitle">Authorization Method</p>
-      <p className="auth-instruction">请按照以下步骤完成 OpenAI 账户的授权：</p>
+      <p className="auth-instruction">请按照以下步骤完成 {providerName} 账户的授权：</p>
 
       <AuthStepCard number={1} title="点击下方按钮生成授权链接">
         {authUrl ? (
@@ -816,14 +939,14 @@ function OpenAIAuthPanel({
       </AuthStepCard>
 
       <AuthStepCard number={2} title="在浏览器中打开链接并完成授权">
-        <p className="auth-muted">请在新标签页中打开授权链接，登录您的 OpenAI 账户并授权。</p>
+        <p className="auth-muted">请在新标签页中打开授权链接，登录您的 {providerName} 账户并授权。</p>
         <div className="auth-alert">
-          重要提示：授权后页面可能会加载较长时间，请耐心等待。当浏览器地址栏变为 http://localhost... 开头时，表示授权已完成。
+          重要提示：授权后页面可能会加载较长时间，请耐心等待。当浏览器地址栏变为回调地址并包含 code 时，表示授权已完成。
         </div>
       </AuthStepCard>
 
       <AuthStepCard number={3} title="输入授权链接或 Code">
-        <p className="auth-muted">授权完成后，当页面地址变为 http://localhost:xxx/auth/callback?code=... 时：</p>
+        <p className="auth-muted">授权完成后，当页面地址变为 {callbackExample} 时：</p>
         <label className="auth-input-label" htmlFor="oauth-code">
           <KeyRound />
           授权链接或 Code
@@ -833,7 +956,7 @@ function OpenAIAuthPanel({
           className="auth-code-input"
           value={authCode}
           onChange={(event) => onCodeChange(event.target.value)}
-          placeholder={"方式1：复制完整的链接（http://localhost:xxx/auth/callback?code=...）\n方式2：仅复制 code 参数的值"}
+          placeholder={`方式1：复制完整的链接（${callbackExample}）\n方式2：仅复制 code 参数的值`}
         />
         <div className="auth-hint">
           <Info />
@@ -843,6 +966,59 @@ function OpenAIAuthPanel({
 
       <Button className="submit-auth-button" onClick={onComplete}>
         完成授权
+      </Button>
+      {message ? <div className="settings-message">{message}</div> : null}
+    </Card>
+  );
+}
+
+function KimiImportPanel({
+  accountName,
+  importing,
+  message,
+  onBack,
+  onAccountNameChange,
+  onImport,
+}: {
+  accountName: string;
+  importing: boolean;
+  message: string | null;
+  onBack: () => void;
+  onAccountNameChange: (value: string) => void;
+  onImport: () => void;
+}) {
+  return (
+    <Card className="settings-panel oauth-panel">
+      <div className="add-header">
+        <Button variant="ghost" size="icon-sm" className="icon-button back-button" onClick={onBack} aria-label="返回">
+          <ArrowLeft data-icon="inline-start" />
+        </Button>
+        <h1>Kimi 账号导入</h1>
+      </div>
+
+      <p className="auth-subtitle">Kimi Code</p>
+      <p className="auth-instruction">从当前 Kimi CLI 登录态导入账号。</p>
+
+      <AuthStepCard number={1} title="账号名称">
+        <label className="auth-input-label" htmlFor="kimi-account-name">
+          <KeyRound />
+          账号名称
+        </label>
+        <input
+          id="kimi-account-name"
+          className="kimi-account-input"
+          value={accountName}
+          onChange={(event) => onAccountNameChange(event.target.value)}
+          placeholder="Kimi Work"
+        />
+      </AuthStepCard>
+
+      <AuthStepCard number={2} title="CLI 登录态">
+        <p className="auth-muted">使用本机 ~/.kimi/credentials/kimi-code.json。添加多个账号时，先切换 Kimi CLI 登录态，再用不同名称导入。</p>
+      </AuthStepCard>
+
+      <Button className="submit-auth-button" onClick={onImport} disabled={importing || !accountName.trim()}>
+        {importing ? "导入中" : "导入账号"}
       </Button>
       {message ? <div className="settings-message">{message}</div> : null}
     </Card>
@@ -879,10 +1055,10 @@ const refreshIntervalOptions = [
   { value: 60, label: "1 小时" },
 ];
 
-const providers: Array<{ key: ProviderKey; name: string; method: "OAuth" | "API Key"; icon: string; iconMode?: ProviderIconMode }> = [
+const providers: Array<{ key: ProviderKey; name: string; method: "OAuth" | "API Key" | "Kimi CLI"; icon: string; iconMode?: ProviderIconMode }> = [
   { key: "openai", name: "OpenAI", method: "OAuth", icon: openaiIcon },
   { key: "anthropic", name: "Anthropic", method: "OAuth", icon: anthropicIcon },
-  { key: "kimi", name: "Kimi", method: "API Key", icon: kimiIcon },
+  { key: "kimi", name: "Kimi", method: "Kimi CLI", icon: kimiIcon },
   { key: "glm", name: "GLM", method: "API Key", icon: zhipuIcon, iconMode: "mask" },
   { key: "minimax", name: "MiniMax", method: "API Key", icon: minimaxIcon },
   { key: "qwen", name: "Qwen", method: "API Key", icon: qwenIcon },

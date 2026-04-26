@@ -10,6 +10,7 @@ pub fn load_secret(settings: &AppSettings) -> Result<Option<ProbeCredentials>, S
     if matches!(settings.auth_mode, AuthMode::OAuth) {
         return Ok(
             load_oauth_tokens(&settings.account_id)?.map(|tokens| ProbeCredentials {
+                provider: settings.active_provider().to_string(),
                 auth_mode: settings.auth_mode.clone(),
                 secret: tokens.access_token,
                 chatgpt_account_id: tokens
@@ -28,6 +29,7 @@ pub fn load_secret(settings: &AppSettings) -> Result<Option<ProbeCredentials>, S
             }
 
             Ok(Some(ProbeCredentials {
+                provider: settings.active_provider().to_string(),
                 auth_mode: settings.auth_mode.clone(),
                 secret,
                 chatgpt_account_id: settings.chatgpt_account_id.clone(),

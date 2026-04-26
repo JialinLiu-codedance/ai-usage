@@ -14,13 +14,42 @@ let mockOAuthSequence = 0;
 let mockOAuthCompleteSequence = 0;
 let mockPendingOAuthAccountId: string | null = null;
 
-function mockAccount(accountId: string, accountName: string): ConnectedAccount {
+type OAuthProviderKey = "openai" | "anthropic";
+type MockProviderKey = OAuthProviderKey | "kimi";
+
+const oauthProviderConfig: Record<
+  OAuthProviderKey,
+  {
+    authorizeUrl: string;
+    clientId: string;
+    redirectUri: string;
+    scope: string;
+    defaultAccountName: string;
+  }
+> = {
+  openai: {
+    authorizeUrl: "https://auth.openai.com/oauth/authorize",
+    clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
+    redirectUri: "http://localhost:1455/auth/callback",
+    scope: "openid profile email offline_access",
+    defaultAccountName: "OpenAI Account",
+  },
+  anthropic: {
+    authorizeUrl: "https://claude.ai/oauth/authorize",
+    clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    redirectUri: "https://platform.claude.com/oauth/code/callback",
+    scope: "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+    defaultAccountName: "Anthropic Account",
+  },
+};
+
+function mockAccount(accountId: string, accountName: string, provider: MockProviderKey = "openai"): ConnectedAccount {
   return {
     account_id: accountId,
     account_name: accountName,
-    provider: "openai",
+    provider,
     auth_mode: "oauth",
-    chatgpt_account_id: accountId,
+    chatgpt_account_id: provider === "openai" ? accountId : null,
     secret_configured: true,
   };
 }
@@ -84,6 +113,7 @@ let mockStatus: AppStatus = {
     {
       account_id: "default",
       account_name: "OpenAI Account",
+      provider: "openai",
       five_hour: {
         used_percent: 55,
         remaining_percent: 45,
@@ -157,6 +187,41 @@ export async function saveSettings(input: SaveSettingsInput): Promise<AppSetting
   return invoke("save_settings", { input });
 }
 
+export async function importKimiAccount(accountName?: string | null, accountId?: string | null): Promise<AppSettings> {
+  const normalizedName = accountName?.trim() || "Kimi Account";
+  if (!isTauriRuntime) {
+    const nextAccountId = accountId?.trim() || uniqueMockAccountId("kimi", normalizedName);
+    const nextAccount = mockAccount(nextAccountId, normalizedName, "kimi");
+    const existingIndex = mockSettings.accounts.findIndex((account) => account.account_id === nextAccountId);
+    const accounts =
+      existingIndex >= 0
+        ? mockSettings.accounts.map((account, index) => (index === existingIndex ? nextAccount : account))
+        : [...mockSettings.accounts, nextAccount];
+
+    mockSettings = {
+      ...mockSettings,
+      account_id: nextAccountId,
+      account_name: normalizedName,
+      auth_mode: "oauth",
+      chatgpt_account_id: null,
+      accounts,
+      secret_configured: true,
+    };
+    mockStatus = {
+      ...mockStatus,
+      accounts: mockAccountStatuses(accounts),
+      snapshot: mockStatus.snapshot
+        ? { ...mockStatus.snapshot, account_id: nextAccountId, account_name: normalizedName }
+        : null,
+    };
+    return mockSettings;
+  }
+  return invoke("import_kimi_account", {
+    accountName: normalizedName,
+    accountId: accountId?.trim() || null,
+  });
+}
+
 export async function testConnection(): Promise<ConnectionTestResult> {
   if (!isTauriRuntime) {
     return { success: true, message: "Mock connection succeeded" };
@@ -165,18 +230,38 @@ export async function testConnection(): Promise<ConnectionTestResult> {
 }
 
 export async function startOpenAIOAuth(accountId?: string | null): Promise<string> {
+  return startProviderOAuth("openai", accountId);
+}
+
+export async function startAnthropicOAuth(accountId?: string | null): Promise<string> {
+  return startProviderOAuth("anthropic", accountId);
+}
+
+async function startProviderOAuth(provider: OAuthProviderKey, accountId?: string | null): Promise<string> {
   if (!isTauriRuntime) {
     mockPendingOAuthAccountId = accountId?.trim() || null;
     mockOAuthSequence += 1;
     const nonce = `${Date.now().toString(36)}-${mockOAuthSequence.toString(36)}`;
+    const config = oauthProviderConfig[provider];
     const params = new URLSearchParams({
-      client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+      client_id: config.clientId,
+      redirect_uri: config.redirectUri,
+      scope: config.scope,
+      response_type: "code",
       code_challenge: `mocked_for_preview_${nonce}`,
+      code_challenge_method: "S256",
       state: `preview_${nonce}`,
     });
-    return `https://auth.openai.com/oauth/authorize?${params.toString()}`;
+    if (provider === "openai") {
+      params.set("id_token_add_organizations", "true");
+      params.set("codex_cli_simplified_flow", "true");
+    } else {
+      params.set("code", "true");
+    }
+    return `${config.authorizeUrl}?${params.toString()}`;
   }
-  return invoke("start_openai_oauth", { accountId: accountId ?? null });
+  const command = provider === "anthropic" ? "start_anthropic_oauth" : "start_openai_oauth";
+  return invoke(command, { accountId: accountId ?? null });
 }
 
 export async function getOAuthStatus(): Promise<OAuthStatus> {
@@ -187,11 +272,22 @@ export async function getOAuthStatus(): Promise<OAuthStatus> {
 }
 
 export async function completeOpenAIOAuth(callbackUrl: string): Promise<OAuthStatus> {
+  return completeProviderOAuth("openai", callbackUrl);
+}
+
+export async function completeAnthropicOAuth(callbackUrl: string): Promise<OAuthStatus> {
+  return completeProviderOAuth("anthropic", callbackUrl);
+}
+
+async function completeProviderOAuth(provider: OAuthProviderKey, callbackUrl: string): Promise<OAuthStatus> {
   if (!isTauriRuntime) {
     mockOAuthCompleteSequence += 1;
-    const email = mockEmailFromCallback(callbackUrl) ?? `john+${mockOAuthCompleteSequence}@example.com`;
-    const accountId = mockPendingOAuthAccountId ?? uniqueMockAccountId(email);
-    const nextAccount = mockAccount(accountId, email);
+    const config = oauthProviderConfig[provider];
+    const fallbackEmail =
+      provider === "anthropic" ? `claude+${mockOAuthCompleteSequence}@example.com` : `john+${mockOAuthCompleteSequence}@example.com`;
+    const email = mockEmailFromCallback(callbackUrl) ?? fallbackEmail;
+    const accountId = mockPendingOAuthAccountId ?? uniqueMockAccountId(provider, email);
+    const nextAccount = mockAccount(accountId, email || config.defaultAccountName, provider);
     const existingIndex = mockSettings.accounts.findIndex((account) => account.account_id === accountId);
     const accounts =
       existingIndex >= 0
@@ -203,7 +299,7 @@ export async function completeOpenAIOAuth(callbackUrl: string): Promise<OAuthSta
       account_id: accountId,
       account_name: email,
       auth_mode: "oauth",
-      chatgpt_account_id: accountId,
+      chatgpt_account_id: provider === "openai" ? accountId : null,
       accounts,
       secret_configured: true,
     };
@@ -217,10 +313,15 @@ export async function completeOpenAIOAuth(callbackUrl: string): Promise<OAuthSta
     mockPendingOAuthAccountId = null;
     return { phase: "success", message: callbackUrl, email, auth_url: null };
   }
-  return invoke("complete_openai_oauth", { callbackUrl });
+  const command = provider === "anthropic" ? "complete_anthropic_oauth" : "complete_openai_oauth";
+  return invoke(command, { callbackUrl });
 }
 
 export async function deleteOpenAIAccount(accountId: string): Promise<AppSettings> {
+  return deleteConnectedAccount(accountId);
+}
+
+export async function deleteConnectedAccount(accountId: string): Promise<AppSettings> {
   if (!isTauriRuntime) {
     const accounts = mockSettings.accounts.filter((account) => account.account_id !== accountId);
     const activeAccount =
@@ -261,7 +362,7 @@ export async function deleteOpenAIAccount(accountId: string): Promise<AppSetting
     };
     return mockSettings;
   }
-  return invoke("delete_openai_account", { accountId });
+  return invoke("delete_connected_account", { accountId });
 }
 
 function mockStatusWithAccounts(): AppStatus {
@@ -277,6 +378,7 @@ function mockAccountStatuses(accounts: ConnectedAccount[]): AccountQuotaStatus[]
     return {
       account_id: account.account_id,
       account_name: account.account_name,
+      provider: account.provider,
       five_hour: snapshot?.five_hour ?? null,
       seven_day: snapshot?.seven_day ?? null,
       fetched_at: snapshot?.fetched_at ?? null,
@@ -294,13 +396,13 @@ function mockEmailFromCallback(input: string): string | null {
   }
 }
 
-function uniqueMockAccountId(email: string): string {
+function uniqueMockAccountId(provider: MockProviderKey, email: string): string {
   const base = email
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  const normalizedBase = base || "openai";
+  const normalizedBase = provider === "openai" ? base || "openai" : `${provider}-${base || "account"}`;
   if (!mockSettings.accounts.some((account) => account.account_id === normalizedBase)) {
     return normalizedBase;
   }

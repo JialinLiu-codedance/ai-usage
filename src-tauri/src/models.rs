@@ -1,6 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub const PROVIDER_OPENAI: &str = "openai";
+pub const PROVIDER_ANTHROPIC: &str = "anthropic";
+pub const PROVIDER_KIMI: &str = "kimi";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AuthMode {
@@ -67,6 +71,8 @@ pub struct ConnectedAccount {
 pub struct AccountQuotaStatus {
     pub account_id: String,
     pub account_name: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
     pub fetched_at: Option<DateTime<Utc>>,
@@ -110,6 +116,16 @@ impl Default for AppSettings {
     }
 }
 
+impl AppSettings {
+    pub fn active_provider(&self) -> &str {
+        self.accounts
+            .iter()
+            .find(|account| account.account_id == self.account_id)
+            .map(|account| account.provider.as_str())
+            .unwrap_or(PROVIDER_OPENAI)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveSettingsInput {
     #[serde(default = "default_account_id")]
@@ -131,11 +147,13 @@ pub fn default_account_id() -> String {
 }
 
 fn default_provider() -> String {
-    "openai".into()
+    PROVIDER_OPENAI.into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredOAuthTokens {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub account_id: String,
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -199,6 +217,7 @@ pub struct OAuthStatus {
 
 #[derive(Debug, Clone)]
 pub struct ProbeCredentials {
+    pub provider: String,
     pub auth_mode: AuthMode,
     pub secret: String,
     pub chatgpt_account_id: Option<String>,

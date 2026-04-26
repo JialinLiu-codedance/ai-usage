@@ -74,13 +74,15 @@ fn main() {
                             let guard = state.inner.read().await;
                             if matches!(guard.refresh_status, models::RefreshStatus::Refreshing) {
                                 false
+                            } else if !should_enable_refresh_menu(&settings, &guard) {
+                                false
                             } else {
                                 match guard.last_refreshed_at {
                                     Some(last) => {
                                         UtcNow::minutes_since(last)
                                             >= i64::from(settings.refresh_interval_minutes)
                                     }
-                                    None => settings.secret_configured,
+                                    None => true,
                                 }
                             }
                         };
@@ -103,10 +105,14 @@ fn main() {
             commands::test_connection,
             commands::get_settings,
             commands::save_settings,
+            commands::import_kimi_account,
             commands::start_openai_oauth,
+            commands::start_anthropic_oauth,
             commands::get_oauth_status,
             commands::complete_openai_oauth,
+            commands::complete_anthropic_oauth,
             commands::delete_openai_account,
+            commands::delete_connected_account,
             commands::resize_main_panel,
             sync_tray_menu,
         ])
@@ -227,7 +233,25 @@ fn disabled_menu_item(app: &tauri::AppHandle, text: &str) -> tauri::Result<MenuI
 }
 
 fn should_enable_refresh_menu(settings: &models::AppSettings, _status: &models::AppStatus) -> bool {
-    settings.secret_configured
+    has_refreshable_quota_account(settings)
+}
+
+fn has_refreshable_quota_account(settings: &models::AppSettings) -> bool {
+    if settings.accounts.is_empty() {
+        return settings.secret_configured
+            && provider_supports_quota_refresh(settings.active_provider());
+    }
+
+    settings.accounts.iter().any(|account| {
+        account.secret_configured && provider_supports_quota_refresh(&account.provider)
+    })
+}
+
+fn provider_supports_quota_refresh(provider: &str) -> bool {
+    matches!(
+        provider,
+        models::PROVIDER_OPENAI | models::PROVIDER_ANTHROPIC | models::PROVIDER_KIMI
+    )
 }
 
 fn fallback_tray_account_summary_lines(
@@ -240,7 +264,11 @@ fn fallback_tray_account_summary_lines(
         .map(|snapshot| snapshot.account_name.as_str())
         .unwrap_or(settings.account_name.as_str());
     vec![[
-        format!("OpenAI    {}", display_account_name(name)),
+        format!(
+            "{}    {}",
+            provider_display_label(settings.active_provider()),
+            display_account_name(name)
+        ),
         usage_line(
             "5H",
             status.snapshot.as_ref().and_then(|s| s.five_hour.as_ref()),
@@ -258,12 +286,24 @@ fn tray_account_summary_lines(status: &models::AppStatus) -> Vec<[String; 3]> {
         .iter()
         .map(|account| {
             [
-                format!("OpenAI    {}", display_account_name(&account.account_name)),
+                format!(
+                    "{}    {}",
+                    provider_display_label(&account.provider),
+                    display_account_name(&account.account_name)
+                ),
                 usage_line("5H", account.five_hour.as_ref()),
                 usage_line("7D", account.seven_day.as_ref()),
             ]
         })
         .collect()
+}
+
+fn provider_display_label(provider: &str) -> &'static str {
+    match provider {
+        models::PROVIDER_ANTHROPIC => "Anthropic",
+        models::PROVIDER_KIMI => "Kimi",
+        _ => "OpenAI",
+    }
 }
 
 fn display_account_name(name: &str) -> &str {
@@ -394,6 +434,26 @@ mod tests {
 
         settings.secret_configured = true;
         assert!(should_enable_refresh_menu(&settings, &status));
+
+        settings.accounts = vec![models::ConnectedAccount {
+            account_id: settings.account_id.clone(),
+            account_name: "claude@example.com".into(),
+            provider: models::PROVIDER_ANTHROPIC.into(),
+            auth_mode: models::AuthMode::OAuth,
+            chatgpt_account_id: None,
+            secret_configured: true,
+        }];
+        assert!(should_enable_refresh_menu(&settings, &status));
+
+        settings.accounts.push(models::ConnectedAccount {
+            account_id: "openai".into(),
+            account_name: "openai@example.com".into(),
+            provider: models::PROVIDER_OPENAI.into(),
+            auth_mode: models::AuthMode::OAuth,
+            chatgpt_account_id: None,
+            secret_configured: true,
+        });
+        assert!(should_enable_refresh_menu(&settings, &status));
     }
 
     #[test]
@@ -403,6 +463,7 @@ mod tests {
                 models::AccountQuotaStatus {
                     account_id: "first".into(),
                     account_name: "first@example.com".into(),
+                    provider: models::PROVIDER_OPENAI.into(),
                     five_hour: Some(models::QuotaWindow {
                         used_percent: 4.0,
                         remaining_percent: 96.0,
@@ -416,6 +477,7 @@ mod tests {
                 models::AccountQuotaStatus {
                     account_id: "second".into(),
                     account_name: "second@example.com".into(),
+                    provider: models::PROVIDER_ANTHROPIC.into(),
                     five_hour: None,
                     seven_day: Some(models::QuotaWindow {
                         used_percent: 10.0,
@@ -439,7 +501,7 @@ mod tests {
         );
         assert_eq!(
             lines[1],
-            ["OpenAI    second@example.com", "5H    --", "7D    90%"]
+            ["Anthropic    second@example.com", "5H    --", "7D    90%"]
         );
     }
 

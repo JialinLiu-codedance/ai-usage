@@ -15,7 +15,7 @@ export interface QuotaSnapshot {
   five_hour: QuotaWindow | null;
   seven_day: QuotaWindow | null;
   fetched_at: string;
-  source: "probe_headers";
+  source: string;
 }
 
 export interface AppSettings {
@@ -59,6 +59,7 @@ export interface ConnectedAccount {
 export interface AccountQuotaStatus {
   account_id: string;
   account_name: string;
+  provider: string;
   five_hour: QuotaWindow | null;
   seven_day: QuotaWindow | null;
   fetched_at: string | null;

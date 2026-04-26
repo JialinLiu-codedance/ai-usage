@@ -1,5 +1,8 @@
 use crate::{
-    models::{default_account_id, AppSettings, AuthMode, ConnectedAccount, SaveSettingsInput},
+    models::{
+        default_account_id, AppSettings, AuthMode, ConnectedAccount, SaveSettingsInput,
+        PROVIDER_KIMI, PROVIDER_OPENAI,
+    },
     secrets, storage,
 };
 use std::collections::HashSet;
@@ -66,11 +69,29 @@ pub(crate) fn upsert_oauth_account(
     email: Option<String>,
     chatgpt_account_id: Option<String>,
 ) -> String {
+    upsert_provider_oauth_account(
+        settings,
+        PROVIDER_OPENAI,
+        target_account_id,
+        email,
+        chatgpt_account_id,
+    )
+}
+
+pub(crate) fn upsert_provider_oauth_account(
+    settings: &mut AppSettings,
+    provider: &str,
+    target_account_id: Option<String>,
+    email: Option<String>,
+    provider_account_id: Option<String>,
+) -> String {
+    let provider = normalize_provider(provider);
     let account_id = resolve_oauth_account_id(
         settings,
+        &provider,
         target_account_id.as_deref(),
         email.as_deref(),
-        chatgpt_account_id.as_deref(),
+        provider_account_id.as_deref(),
     );
     let account_name = email
         .as_deref()
@@ -83,14 +104,14 @@ pub(crate) fn upsert_oauth_account(
                 .find(|account| account.account_id == account_id)
                 .map(|account| account.account_name.clone())
         })
-        .unwrap_or_else(|| "OpenAI Account".into());
+        .unwrap_or_else(|| default_account_name_for_provider(&provider).into());
 
     let next_account = ConnectedAccount {
         account_id: account_id.clone(),
         account_name: account_name.clone(),
-        provider: "openai".into(),
+        provider: provider.clone(),
         auth_mode: AuthMode::OAuth,
-        chatgpt_account_id: chatgpt_account_id.clone(),
+        chatgpt_account_id: provider_account_id.clone(),
         secret_configured: true,
     };
 
@@ -107,7 +128,7 @@ pub(crate) fn upsert_oauth_account(
     settings.account_id = account_id.clone();
     settings.account_name = account_name;
     settings.auth_mode = AuthMode::OAuth;
-    settings.chatgpt_account_id = chatgpt_account_id;
+    settings.chatgpt_account_id = provider_account_id;
     settings.secret_configured = true;
     account_id
 }
@@ -159,9 +180,10 @@ fn hydrate_connected_accounts(settings: &mut AppSettings) -> Result<(), String> 
     let mut seen = HashSet::new();
     for mut account in std::mem::take(&mut settings.accounts) {
         account.account_id = sanitize_account_id(account.account_id);
+        account.provider = normalize_provider(&account.provider);
         account.account_name = account.account_name.trim().to_string();
         if account.account_name.is_empty() {
-            account.account_name = "OpenAI Account".into();
+            account.account_name = default_account_name_for_provider(&account.provider).into();
         }
         account.secret_configured = secret_configured_for_account(&account)?;
         if account.secret_configured && seen.insert(account.account_id.clone()) {
@@ -210,9 +232,10 @@ fn secret_configured_for_account(account: &ConnectedAccount) -> Result<bool, Str
 
 fn resolve_oauth_account_id(
     settings: &AppSettings,
+    provider: &str,
     target_account_id: Option<&str>,
     email: Option<&str>,
-    chatgpt_account_id: Option<&str>,
+    provider_account_id: Option<&str>,
 ) -> String {
     if let Some(target) = target_account_id
         .map(str::trim)
@@ -221,32 +244,32 @@ fn resolve_oauth_account_id(
         return sanitize_account_id(target.to_string());
     }
 
-    if let Some(chatgpt_account_id) = chatgpt_account_id {
-        if let Some(account) = settings
-            .accounts
-            .iter()
-            .find(|account| account.chatgpt_account_id.as_deref() == Some(chatgpt_account_id))
-        {
+    if let Some(provider_account_id) = provider_account_id {
+        if let Some(account) = settings.accounts.iter().find(|account| {
+            account.provider == provider
+                && account.chatgpt_account_id.as_deref() == Some(provider_account_id)
+        }) {
             return account.account_id.clone();
         }
     }
 
     if let Some(email) = email.map(str::trim).filter(|value| !value.is_empty()) {
-        if let Some(account) = settings
-            .accounts
-            .iter()
-            .find(|account| account.account_name.eq_ignore_ascii_case(email))
-        {
+        if let Some(account) = settings.accounts.iter().find(|account| {
+            account.provider == provider && account.account_name.eq_ignore_ascii_case(email)
+        }) {
             return account.account_id.clone();
         }
     }
 
-    let base = sanitize_generated_account_id(
-        chatgpt_account_id
-            .or(email)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("openai"),
-    );
+    let raw_base = provider_account_id
+        .or(email)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(provider);
+    let base = if provider == PROVIDER_OPENAI {
+        sanitize_generated_account_id(raw_base)
+    } else {
+        sanitize_generated_account_id(&format!("{provider}-{raw_base}"))
+    };
     unique_account_id(settings, &base)
 }
 
@@ -305,6 +328,23 @@ fn reset_account_binding(settings: &mut AppSettings) {
     settings.auth_mode = AuthMode::ApiKey;
     settings.chatgpt_account_id = None;
     settings.secret_configured = false;
+}
+
+fn normalize_provider(provider: &str) -> String {
+    let trimmed = provider.trim();
+    if trimmed.is_empty() {
+        PROVIDER_OPENAI.into()
+    } else {
+        trimmed.to_ascii_lowercase()
+    }
+}
+
+fn default_account_name_for_provider(provider: &str) -> &'static str {
+    match provider {
+        crate::models::PROVIDER_ANTHROPIC => "Anthropic Account",
+        PROVIDER_KIMI => "Kimi Account",
+        _ => "OpenAI Account",
+    }
 }
 
 fn sanitize_optional(input: Option<String>) -> Option<String> {
@@ -401,6 +441,67 @@ mod tests {
             Some("acct-first-new")
         );
         assert_eq!(settings.accounts[1].account_name, "second@example.com");
+    }
+
+    #[test]
+    fn anthropic_oauth_completion_stores_provider_and_prefixed_account_id() {
+        let mut settings = AppSettings::default();
+
+        let account_id = upsert_provider_oauth_account(
+            &mut settings,
+            crate::models::PROVIDER_ANTHROPIC,
+            None,
+            Some("claude@example.com".into()),
+            Some("acct-uuid".into()),
+        );
+
+        assert_eq!(account_id, "anthropic-acct-uuid");
+        assert_eq!(
+            settings.active_provider(),
+            crate::models::PROVIDER_ANTHROPIC
+        );
+        assert_eq!(settings.account_name, "claude@example.com");
+        assert_eq!(settings.accounts.len(), 1);
+        assert_eq!(
+            settings.accounts[0].provider,
+            crate::models::PROVIDER_ANTHROPIC
+        );
+    }
+
+    #[test]
+    fn kimi_oauth_imports_support_multiple_named_accounts() {
+        let mut settings = AppSettings::default();
+
+        let work_id = upsert_provider_oauth_account(
+            &mut settings,
+            crate::models::PROVIDER_KIMI,
+            None,
+            Some("Kimi Work".into()),
+            None,
+        );
+        let personal_id = upsert_provider_oauth_account(
+            &mut settings,
+            crate::models::PROVIDER_KIMI,
+            None,
+            Some("Kimi Personal".into()),
+            None,
+        );
+
+        assert_eq!(work_id, "kimi-kimi-work");
+        assert_eq!(personal_id, "kimi-kimi-personal");
+        assert_eq!(settings.accounts.len(), 2);
+        assert_eq!(
+            settings
+                .accounts
+                .iter()
+                .map(|account| (account.provider.as_str(), account.account_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (crate::models::PROVIDER_KIMI, "Kimi Work"),
+                (crate::models::PROVIDER_KIMI, "Kimi Personal"),
+            ]
+        );
+        assert_eq!(settings.active_provider(), crate::models::PROVIDER_KIMI);
     }
 
     #[test]
