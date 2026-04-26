@@ -1,10 +1,11 @@
 use crate::models::{
-    default_account_id, AppSettings, AuthMode, ProbeCredentials, StoredOAuthTokens,
+    default_account_id, AppSettings, AuthMode, ProbeCredentials, StoredOAuthTokens, PROVIDER_OPENAI,
 };
 use keyring::Entry;
 
 const SERVICE_NAME: &str = "com.liujialin.ai-usage";
 const SECRET_ACCOUNT: &str = "default";
+const ACCOUNT_SECRET_PREFIX: &str = "account-secret:";
 
 pub fn load_secret(settings: &AppSettings) -> Result<Option<ProbeCredentials>, String> {
     if matches!(settings.auth_mode, AuthMode::OAuth) {
@@ -18,6 +19,19 @@ pub fn load_secret(settings: &AppSettings) -> Result<Option<ProbeCredentials>, S
                     .or_else(|| settings.chatgpt_account_id.clone()),
             }),
         );
+    }
+
+    let active_provider = settings.active_provider().to_string();
+    if let Some(secret) = load_account_secret(&settings.account_id)? {
+        return Ok(Some(ProbeCredentials {
+            provider: active_provider,
+            auth_mode: settings.auth_mode.clone(),
+            secret,
+            chatgpt_account_id: settings.chatgpt_account_id.clone(),
+        }));
+    }
+    if active_provider != PROVIDER_OPENAI {
+        return Ok(None);
     }
 
     let entry = Entry::new(SERVICE_NAME, SECRET_ACCOUNT)
@@ -46,6 +60,42 @@ pub fn save_secret(secret: &str) -> Result<(), String> {
     entry
         .set_password(secret)
         .map_err(|error| format!("写入 Keychain 失败: {error}"))
+}
+
+pub fn load_account_secret(account_id: &str) -> Result<Option<String>, String> {
+    let entry = Entry::new(SERVICE_NAME, &account_secret_keychain_account(account_id))
+        .map_err(|error| format!("初始化账号 Keychain 失败: {error}"))?;
+    match entry.get_password() {
+        Ok(secret) => {
+            if secret.trim().is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(secret))
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!("读取账号 Keychain 失败: {error}")),
+    }
+}
+
+pub fn save_account_secret(account_id: &str, secret: &str) -> Result<(), String> {
+    let entry = Entry::new(SERVICE_NAME, &account_secret_keychain_account(account_id))
+        .map_err(|error| format!("初始化账号 Keychain 失败: {error}"))?;
+    entry
+        .set_password(secret)
+        .map_err(|error| format!("写入账号 Keychain 失败: {error}"))
+}
+
+pub fn delete_account_secret(account_id: &str) -> Result<(), String> {
+    let entry = Entry::new(SERVICE_NAME, &account_secret_keychain_account(account_id))
+        .map_err(|error| format!("初始化账号 Keychain 失败: {error}"))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!("删除账号 Keychain 凭证失败: {error}")),
+    }
+}
+
+pub fn account_secret_configured(account_id: &str) -> Result<bool, String> {
+    Ok(load_account_secret(account_id)?.is_some())
 }
 
 pub fn load_oauth_tokens(account_id: &str) -> Result<Option<StoredOAuthTokens>, String> {
@@ -96,4 +146,14 @@ fn oauth_keychain_account(account_id: &str) -> String {
         trimmed.to_string()
     };
     format!("openai-oauth:{id}")
+}
+
+fn account_secret_keychain_account(account_id: &str) -> String {
+    let trimmed = account_id.trim();
+    let id = if trimmed.is_empty() {
+        default_account_id()
+    } else {
+        trimmed.to_string()
+    };
+    format!("{ACCOUNT_SECRET_PREFIX}{id}")
 }

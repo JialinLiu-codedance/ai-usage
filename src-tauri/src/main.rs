@@ -106,6 +106,7 @@ fn main() {
             commands::get_settings,
             commands::save_settings,
             commands::import_kimi_account,
+            commands::import_minimax_account,
             commands::start_openai_oauth,
             commands::start_anthropic_oauth,
             commands::get_oauth_status,
@@ -250,7 +251,10 @@ fn has_refreshable_quota_account(settings: &models::AppSettings) -> bool {
 fn provider_supports_quota_refresh(provider: &str) -> bool {
     matches!(
         provider,
-        models::PROVIDER_OPENAI | models::PROVIDER_ANTHROPIC | models::PROVIDER_KIMI
+        models::PROVIDER_OPENAI
+            | models::PROVIDER_ANTHROPIC
+            | models::PROVIDER_KIMI
+            | models::PROVIDER_MINIMAX
     )
 }
 
@@ -302,6 +306,7 @@ fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         models::PROVIDER_ANTHROPIC => "Anthropic",
         models::PROVIDER_KIMI => "Kimi",
+        models::PROVIDER_MINIMAX => "MiniMax",
         _ => "OpenAI",
     }
 }

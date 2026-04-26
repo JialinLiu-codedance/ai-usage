@@ -15,7 +15,7 @@ let mockOAuthCompleteSequence = 0;
 let mockPendingOAuthAccountId: string | null = null;
 
 type OAuthProviderKey = "openai" | "anthropic";
-type MockProviderKey = OAuthProviderKey | "kimi";
+type MockProviderKey = OAuthProviderKey | "kimi" | "minimax";
 
 const oauthProviderConfig: Record<
   OAuthProviderKey,
@@ -43,12 +43,17 @@ const oauthProviderConfig: Record<
   },
 };
 
-function mockAccount(accountId: string, accountName: string, provider: MockProviderKey = "openai"): ConnectedAccount {
+function mockAccount(
+  accountId: string,
+  accountName: string,
+  provider: MockProviderKey = "openai",
+  authMode: ConnectedAccount["auth_mode"] = "oauth",
+): ConnectedAccount {
   return {
     account_id: accountId,
     account_name: accountName,
     provider,
-    auth_mode: "oauth",
+    auth_mode: authMode,
     chatgpt_account_id: provider === "openai" ? accountId : null,
     secret_configured: true,
   };
@@ -218,6 +223,50 @@ export async function importKimiAccount(accountName?: string | null, accountId?:
   }
   return invoke("import_kimi_account", {
     accountName: normalizedName,
+    accountId: accountId?.trim() || null,
+  });
+}
+
+export async function importMiniMaxAccount(
+  accountName: string,
+  apiKey: string,
+  accountId?: string | null,
+): Promise<AppSettings> {
+  const normalizedName = accountName.trim() || "MiniMax Account";
+  const normalizedApiKey = apiKey.trim();
+  if (!normalizedApiKey) {
+    throw new Error("请填写 MiniMax API Key");
+  }
+  if (!isTauriRuntime) {
+    const nextAccountId = accountId?.trim() || uniqueMockAccountId("minimax", normalizedName);
+    const nextAccount = mockAccount(nextAccountId, normalizedName, "minimax", "apiKey");
+    const existingIndex = mockSettings.accounts.findIndex((account) => account.account_id === nextAccountId);
+    const accounts =
+      existingIndex >= 0
+        ? mockSettings.accounts.map((account, index) => (index === existingIndex ? nextAccount : account))
+        : [...mockSettings.accounts, nextAccount];
+
+    mockSettings = {
+      ...mockSettings,
+      account_id: nextAccountId,
+      account_name: normalizedName,
+      auth_mode: "apiKey",
+      chatgpt_account_id: null,
+      accounts,
+      secret_configured: true,
+    };
+    mockStatus = {
+      ...mockStatus,
+      accounts: mockAccountStatuses(accounts),
+      snapshot: mockStatus.snapshot
+        ? { ...mockStatus.snapshot, account_id: nextAccountId, account_name: normalizedName }
+        : null,
+    };
+    return mockSettings;
+  }
+  return invoke("import_minimax_account", {
+    accountName: normalizedName,
+    apiKey: normalizedApiKey,
     accountId: accountId?.trim() || null,
   });
 }

@@ -2,7 +2,7 @@ use crate::{
     errors::{ProviderError, ProviderErrorKind},
     models::{
         AuthMode, ProbeCredentials, QuotaSnapshot, QuotaWindow, PROVIDER_ANTHROPIC, PROVIDER_KIMI,
-        PROVIDER_OPENAI,
+        PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -17,11 +17,23 @@ const DEFAULT_PROBE_URL: &str = "https://chatgpt.com/backend-api/codex/responses
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_ANTHROPIC_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const DEFAULT_KIMI_USAGE_URL: &str = "https://api.kimi.com/coding/v1/usages";
+const MINIMAX_GLOBAL_USAGE_URLS: [&str; 3] = [
+    "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
+    "https://api.minimax.io/v1/coding_plan/remains",
+    "https://www.minimax.io/v1/api/openplatform/coding_plan/remains",
+];
+const MINIMAX_CN_USAGE_URLS: [&str; 2] = [
+    "https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains",
+    "https://api.minimaxi.com/v1/coding_plan/remains",
+];
 const ANTHROPIC_OAUTH_USAGE_BETA: &str = "oauth-2025-04-20";
 const CODEX_CLI_VERSION: &str = "0.104.0";
 const CODEX_CLI_USER_AGENT: &str = "codex_cli_rs/0.104.0";
 const DEFAULT_MODEL: &str = "gpt-5.3-codex";
 const DEFAULT_INSTRUCTIONS: &str = "You are Codex. Respond briefly.";
+const MINIMAX_CODING_PLAN_WINDOW_MINUTES: u32 = 300;
+const MINIMAX_CODING_PLAN_WINDOW_MS: f64 = 5.0 * 60.0 * 60.0 * 1000.0;
+const MINIMAX_CODING_PLAN_WINDOW_TOLERANCE_MS: f64 = 10.0 * 60.0 * 1000.0;
 
 #[derive(Debug, Clone)]
 struct RawWindow {
@@ -41,6 +53,12 @@ struct KimiQuota {
 struct KimiLimitCandidate {
     quota: KimiQuota,
     window_minutes: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MiniMaxEndpoint {
+    Global,
+    Cn,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +126,9 @@ pub async fn fetch_quota(
         }
         PROVIDER_KIMI => {
             fetch_kimi_quota(account_id, account_name, base_url_override, credentials).await
+        }
+        PROVIDER_MINIMAX => {
+            fetch_minimax_quota(account_id, account_name, base_url_override, credentials).await
         }
         provider => Err(ProviderError::new(
             ProviderErrorKind::Unknown,
@@ -325,10 +346,65 @@ async fn fetch_kimi_quota(
     parse_kimi_usage_snapshot(account_id, account_name, &body)
 }
 
+async fn fetch_minimax_quota(
+    account_id: &str,
+    account_name: &str,
+    base_url_override: Option<&str>,
+    credentials: &ProbeCredentials,
+) -> Result<QuotaSnapshot, ProviderError> {
+    if !matches!(credentials.auth_mode, AuthMode::ApiKey) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            "MiniMax 额度刷新当前仅支持 API Key 账号",
+        ));
+    }
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| {
+            ProviderError::new(
+                ProviderErrorKind::Unknown,
+                format!("创建 HTTP 客户端失败: {error}"),
+            )
+        })?;
+
+    let mut first_error = None;
+    for endpoint in [MiniMaxEndpoint::Global, MiniMaxEndpoint::Cn] {
+        for url in minimax_usage_urls(base_url_override, endpoint) {
+            match request_minimax_usage(&client, &url, credentials).await {
+                Ok(body) => {
+                    match parse_minimax_usage_snapshot(account_id, account_name, &body, endpoint) {
+                        Ok(snapshot) => return Ok(snapshot),
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+    }
+
+    Err(first_error.unwrap_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::MissingHeaders,
+            "MiniMax 使用量接口没有返回可识别的额度窗口",
+        )
+    }))
+}
+
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         PROVIDER_ANTHROPIC => "Anthropic",
         PROVIDER_KIMI => "Kimi",
+        PROVIDER_MINIMAX => "MiniMax",
         _ => "OpenAI",
     }
 }
@@ -656,6 +732,15 @@ fn build_kimi_usage_headers(credentials: &ProbeCredentials) -> Result<HeaderMap,
     Ok(headers)
 }
 
+fn build_minimax_usage_headers(credentials: &ProbeCredentials) -> Result<HeaderMap, ProviderError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert("User-Agent", HeaderValue::from_static("ai-usage"));
+    headers.insert(AUTHORIZATION, format_auth_header(credentials)?);
+    Ok(headers)
+}
+
 fn uses_chatgpt_internal(credentials: &ProbeCredentials) -> bool {
     !matches!(credentials.auth_mode, AuthMode::ApiKey)
 }
@@ -717,6 +802,82 @@ fn resolve_kimi_usage_url(base_url_override: Option<&str>) -> String {
     } else {
         format!("{}/coding/v1/usages", raw.trim_end_matches('/'))
     }
+}
+
+fn minimax_usage_urls(base_url_override: Option<&str>, endpoint: MiniMaxEndpoint) -> Vec<String> {
+    if let Some(raw) = base_url_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let url = if raw.ends_with("/coding_plan/remains") {
+            raw.to_string()
+        } else if raw.contains("/v1/") {
+            raw.to_string()
+        } else {
+            format!(
+                "{}/v1/api/openplatform/coding_plan/remains",
+                raw.trim_end_matches('/')
+            )
+        };
+        return vec![url];
+    }
+
+    match endpoint {
+        MiniMaxEndpoint::Global => MINIMAX_GLOBAL_USAGE_URLS
+            .iter()
+            .map(|url| (*url).to_string())
+            .collect(),
+        MiniMaxEndpoint::Cn => MINIMAX_CN_USAGE_URLS
+            .iter()
+            .map(|url| (*url).to_string())
+            .collect(),
+    }
+}
+
+async fn request_minimax_usage(
+    client: &Client,
+    url: &str,
+    credentials: &ProbeCredentials,
+) -> Result<String, ProviderError> {
+    let response = client
+        .get(url)
+        .headers(build_minimax_usage_headers(credentials)?)
+        .send()
+        .await
+        .map_err(map_request_error)?;
+
+    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unauthorized,
+            "MiniMax API Key 认证失败，请检查后重新保存",
+        ));
+    }
+
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            "MiniMax 使用量接口被限流，请稍后重试",
+        ));
+    }
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("无法读取响应体"));
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            format!("MiniMax 使用量接口返回 {status}：{}", compact_body(&body)),
+        ));
+    }
+
+    response.text().await.map_err(|error| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            format!("读取 MiniMax 使用量响应失败: {error}"),
+        )
+    })
 }
 
 fn parse_anthropic_usage_snapshot(
@@ -807,6 +968,261 @@ fn parse_kimi_usage_snapshot(
         fetched_at: Utc::now(),
         source: "kimi_code_usage".into(),
     })
+}
+
+fn parse_minimax_usage_snapshot(
+    account_id: &str,
+    account_name: &str,
+    body: &str,
+    endpoint: MiniMaxEndpoint,
+) -> Result<QuotaSnapshot, ProviderError> {
+    let payload = serde_json::from_str::<serde_json::Value>(body).map_err(|error| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            format!("解析 MiniMax 使用量响应失败: {error}"),
+        )
+    })?;
+
+    let data = payload
+        .get("data")
+        .filter(|value| value.is_object())
+        .unwrap_or(&payload);
+    validate_minimax_base_response(data, &payload)?;
+    let remains = minimax_model_remains(data, &payload).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::MissingHeaders,
+            "MiniMax 使用量接口没有返回 model_remains",
+        )
+    })?;
+    let item = pick_minimax_model_remain(remains).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::MissingHeaders,
+            "MiniMax 使用量接口没有返回可识别的额度窗口",
+        )
+    })?;
+    let total = minimax_number_by_keys(
+        item,
+        &["current_interval_total_count", "currentIntervalTotalCount"],
+    )
+    .filter(|value| *value > 0.0)
+    .ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::MissingHeaders,
+            "MiniMax 使用量接口缺少 current_interval_total_count",
+        )
+    })?;
+    let remaining = minimax_number_by_keys(
+        item,
+        &[
+            "current_interval_remaining_count",
+            "currentIntervalRemainingCount",
+            "current_interval_remains_count",
+            "currentIntervalRemainsCount",
+            "current_interval_remain_count",
+            "currentIntervalRemainCount",
+            "remaining_count",
+            "remainingCount",
+            "remains_count",
+            "remainsCount",
+            "remaining",
+            "remains",
+            "left_count",
+            "leftCount",
+        ],
+    )
+    .or_else(|| {
+        minimax_number_by_keys(
+            item,
+            &["current_interval_usage_count", "currentIntervalUsageCount"],
+        )
+    });
+    let explicit_used = minimax_number_by_keys(
+        item,
+        &[
+            "current_interval_used_count",
+            "currentIntervalUsedCount",
+            "used_count",
+            "used",
+        ],
+    );
+    let used = explicit_used
+        .or_else(|| remaining.map(|remaining| total - remaining))
+        .map(|value| value.clamp(0.0, total))
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::MissingHeaders,
+                "MiniMax 使用量接口缺少可识别的已用或剩余额度",
+            )
+        })?;
+
+    let reset_at = minimax_epoch_to_datetime(minimax_value_by_keys(item, &["end_time", "endTime"]))
+        .or_else(|| {
+            minimax_remains_duration(item)
+                .and_then(|duration| Utc::now().checked_add_signed(duration))
+        });
+    let window_minutes = minimax_window_minutes(item).or(Some(MINIMAX_CODING_PLAN_WINDOW_MINUTES));
+    let used_percent = ((used / total) * 100.0).clamp(0.0, 100.0);
+    let five_hour = Some(QuotaWindow {
+        used_percent,
+        remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
+        reset_at,
+        window_minutes,
+    });
+
+    Ok(QuotaSnapshot {
+        account_id: account_id.to_string(),
+        account_name: account_name.to_string(),
+        five_hour,
+        seven_day: None,
+        fetched_at: Utc::now(),
+        source: match endpoint {
+            MiniMaxEndpoint::Global => "minimax_coding_plan",
+            MiniMaxEndpoint::Cn => "minimax_coding_plan_cn",
+        }
+        .into(),
+    })
+}
+
+fn validate_minimax_base_response(
+    data: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> Result<(), ProviderError> {
+    let base_resp = data
+        .get("base_resp")
+        .or_else(|| data.get("baseResp"))
+        .or_else(|| payload.get("base_resp"))
+        .or_else(|| payload.get("baseResp"));
+    let Some(base_resp) = base_resp else {
+        return Ok(());
+    };
+    let status_code = minimax_number_by_keys(base_resp, &["status_code", "statusCode"]);
+    if status_code.unwrap_or(0.0) == 0.0 {
+        return Ok(());
+    }
+    let status_message =
+        minimax_string_by_keys(base_resp, &["status_msg", "statusMsg"]).unwrap_or_default();
+    let normalized = status_message.to_ascii_lowercase();
+    if status_code == Some(1004.0)
+        || normalized.contains("cookie")
+        || normalized.contains("login")
+        || normalized.contains("log in")
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unauthorized,
+            "MiniMax API Key 认证失败，请检查后重新保存",
+        ));
+    }
+
+    Err(ProviderError::new(
+        ProviderErrorKind::Unknown,
+        if status_message.trim().is_empty() {
+            format!(
+                "MiniMax API 返回错误状态 {}",
+                status_code.unwrap_or_default().round()
+            )
+        } else {
+            format!("MiniMax API 返回错误：{status_message}")
+        },
+    ))
+}
+
+fn minimax_model_remains<'a>(
+    data: &'a serde_json::Value,
+    payload: &'a serde_json::Value,
+) -> Option<&'a Vec<serde_json::Value>> {
+    data.get("model_remains")
+        .or_else(|| payload.get("model_remains"))
+        .or_else(|| data.get("modelRemains"))
+        .or_else(|| payload.get("modelRemains"))
+        .and_then(|value| value.as_array())
+        .filter(|items| !items.is_empty())
+}
+
+fn pick_minimax_model_remain(items: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    items
+        .iter()
+        .find(|item| {
+            minimax_number_by_keys(
+                item,
+                &["current_interval_total_count", "currentIntervalTotalCount"],
+            )
+            .map(|total| total > 0.0)
+            .unwrap_or(false)
+        })
+        .or_else(|| items.first())
+}
+
+fn minimax_window_minutes(item: &serde_json::Value) -> Option<u32> {
+    let start = minimax_epoch_to_ms(minimax_value_by_keys(item, &["start_time", "startTime"]))?;
+    let end = minimax_epoch_to_ms(minimax_value_by_keys(item, &["end_time", "endTime"]))?;
+    if end <= start {
+        return None;
+    }
+    let minutes = ((end - start) as f64 / 60_000.0).round();
+    if !minutes.is_finite() || minutes <= 0.0 || minutes > f64::from(u32::MAX) {
+        None
+    } else {
+        Some(minutes as u32)
+    }
+}
+
+fn minimax_remains_duration(item: &serde_json::Value) -> Option<Duration> {
+    let remains = minimax_number_by_keys(item, &["remains_time", "remainsTime"])?;
+    if !remains.is_finite() || remains <= 0.0 {
+        return None;
+    }
+    let max_window_ms = MINIMAX_CODING_PLAN_WINDOW_MS + MINIMAX_CODING_PLAN_WINDOW_TOLERANCE_MS;
+    let seconds_ms = remains * 1000.0;
+    let millis_ms = remains;
+    let inferred_ms = if seconds_ms <= max_window_ms {
+        seconds_ms
+    } else if millis_ms <= max_window_ms {
+        millis_ms
+    } else {
+        seconds_ms
+    };
+    Some(Duration::milliseconds(inferred_ms.round() as i64))
+}
+
+fn minimax_epoch_to_datetime(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
+    let ms = minimax_epoch_to_ms(value)?;
+    Utc.timestamp_millis_opt(ms).single()
+}
+
+fn minimax_epoch_to_ms(value: Option<&serde_json::Value>) -> Option<i64> {
+    let raw = json_number(value?)?;
+    if !raw.is_finite() {
+        return None;
+    }
+    let ms = if raw.abs() < 10_000_000_000.0 {
+        raw * 1000.0
+    } else {
+        raw
+    };
+    Some(ms.round() as i64)
+}
+
+fn minimax_number_by_keys(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(json_number))
+}
+
+fn minimax_string_by_keys(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn minimax_value_by_keys<'a>(
+    value: &'a serde_json::Value,
+    keys: &[&str],
+) -> Option<&'a serde_json::Value> {
+    keys.iter().find_map(|key| value.get(*key))
 }
 
 fn kimi_limit_candidates(data: &serde_json::Value) -> Vec<KimiLimitCandidate> {
@@ -1176,5 +1592,70 @@ mod tests {
         assert_eq!(seven.used_percent, 25.0);
         assert_eq!(seven.remaining_percent, 75.0);
         assert_eq!(seven.window_minutes, Some(10080));
+    }
+
+    #[test]
+    fn minimax_usage_response_maps_remaining_count_to_five_hour_window() {
+        let body = r#"{
+            "data": {
+                "current_subscribe_title": "MiniMax Coding Plan Plus",
+                "model_remains": [
+                    {
+                        "model_name": "MiniMax-M2",
+                        "current_interval_total_count": 300,
+                        "current_interval_usage_count": 180,
+                        "start_time": 1700000000000,
+                        "end_time": 1700018000000
+                    }
+                ]
+            }
+        }"#;
+
+        let snapshot = parse_minimax_usage_snapshot(
+            "mini-work",
+            "MiniMax Work",
+            body,
+            MiniMaxEndpoint::Global,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.account_id, "mini-work");
+        assert_eq!(snapshot.account_name, "MiniMax Work");
+        assert_eq!(snapshot.source, "minimax_coding_plan");
+        let five = snapshot.five_hour.unwrap();
+        assert_eq!(five.used_percent, 40.0);
+        assert_eq!(five.remaining_percent, 60.0);
+        assert_eq!(five.window_minutes, Some(300));
+        assert_eq!(
+            five.reset_at.unwrap().to_rfc3339(),
+            "2023-11-15T03:13:20+00:00"
+        );
+        assert!(snapshot.seven_day.is_none());
+    }
+
+    #[test]
+    fn minimax_cn_usage_response_converts_model_calls_to_prompt_percent() {
+        let body = r#"{
+            "data": {
+                "model_remains": [
+                    {
+                        "currentIntervalTotalCount": 1500,
+                        "currentIntervalRemainingCount": 1200,
+                        "remainsTime": 3600
+                    }
+                ]
+            }
+        }"#;
+
+        let snapshot =
+            parse_minimax_usage_snapshot("mini-cn", "MiniMax CN", body, MiniMaxEndpoint::Cn)
+                .unwrap();
+        let five = snapshot.five_hour.unwrap();
+
+        assert_eq!(snapshot.source, "minimax_coding_plan_cn");
+        assert_eq!(five.used_percent, 20.0);
+        assert_eq!(five.remaining_percent, 80.0);
+        assert_eq!(five.window_minutes, Some(300));
+        assert!(five.reset_at.is_some());
     }
 }

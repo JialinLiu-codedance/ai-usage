@@ -73,7 +73,8 @@ textarea {
 .panel-root-settings,
 .panel-root-add-account,
 .panel-root-oauth-auth,
-.panel-root-kimi-auth {
+.panel-root-kimi-auth,
+.panel-root-minimax-auth {
   width: 100%;
 }
 

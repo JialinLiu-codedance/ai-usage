@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const PROVIDER_OPENAI: &str = "openai";
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_KIMI: &str = "kimi";
+pub const PROVIDER_MINIMAX: &str = "minimax";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

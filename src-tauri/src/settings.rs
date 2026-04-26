@@ -1,7 +1,7 @@
 use crate::{
     models::{
         default_account_id, AppSettings, AuthMode, ConnectedAccount, SaveSettingsInput,
-        PROVIDER_KIMI, PROVIDER_OPENAI,
+        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     secrets, storage,
 };
@@ -133,6 +133,54 @@ pub(crate) fn upsert_provider_oauth_account(
     account_id
 }
 
+pub(crate) fn upsert_api_key_account(
+    settings: &mut AppSettings,
+    provider: &str,
+    target_account_id: Option<String>,
+    account_name: String,
+) -> String {
+    let provider = normalize_provider(provider);
+    let account_id = resolve_oauth_account_id(
+        settings,
+        &provider,
+        target_account_id.as_deref(),
+        Some(account_name.as_str()),
+        None,
+    );
+    let account_name = account_name.trim();
+    let account_name = if account_name.is_empty() {
+        default_account_name_for_provider(&provider).to_string()
+    } else {
+        account_name.to_string()
+    };
+
+    let next_account = ConnectedAccount {
+        account_id: account_id.clone(),
+        account_name: account_name.clone(),
+        provider,
+        auth_mode: AuthMode::ApiKey,
+        chatgpt_account_id: None,
+        secret_configured: true,
+    };
+
+    if let Some(existing) = settings
+        .accounts
+        .iter_mut()
+        .find(|account| account.account_id == account_id)
+    {
+        *existing = next_account;
+    } else {
+        settings.accounts.push(next_account);
+    }
+
+    settings.account_id = account_id.clone();
+    settings.account_name = account_name;
+    settings.auth_mode = AuthMode::ApiKey;
+    settings.chatgpt_account_id = None;
+    settings.secret_configured = true;
+    account_id
+}
+
 pub(crate) fn delete_account_from_settings(settings: &mut AppSettings, account_id: &str) -> bool {
     let normalized = sanitize_account_id(account_id.to_string());
     let previous_len = settings.accounts.len();
@@ -226,6 +274,11 @@ fn secret_configured_for_settings(settings: &AppSettings) -> Result<bool, String
 fn secret_configured_for_account(account: &ConnectedAccount) -> Result<bool, String> {
     match account.auth_mode {
         AuthMode::OAuth => secrets::oauth_secret_configured(&account.account_id),
+        AuthMode::ApiKey => {
+            secrets::account_secret_configured(&account.account_id).map(|configured| {
+                configured || account.secret_configured && account.provider != PROVIDER_MINIMAX
+            })
+        }
         _ => Ok(account.secret_configured),
     }
 }
@@ -343,6 +396,7 @@ fn default_account_name_for_provider(provider: &str) -> &'static str {
     match provider {
         crate::models::PROVIDER_ANTHROPIC => "Anthropic Account",
         PROVIDER_KIMI => "Kimi Account",
+        PROVIDER_MINIMAX => "MiniMax Account",
         _ => "OpenAI Account",
     }
 }
@@ -502,6 +556,61 @@ mod tests {
             ]
         );
         assert_eq!(settings.active_provider(), crate::models::PROVIDER_KIMI);
+    }
+
+    #[test]
+    fn upsert_api_key_account_appends_multiple_minimax_accounts() {
+        let mut settings = AppSettings::default();
+
+        let first_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_MINIMAX,
+            None,
+            "MiniMax Work".into(),
+        );
+        let second_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_MINIMAX,
+            None,
+            "MiniMax Personal".into(),
+        );
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(settings.accounts.len(), 2);
+        assert_eq!(
+            settings.accounts[0].provider,
+            crate::models::PROVIDER_MINIMAX
+        );
+        assert_eq!(settings.accounts[0].auth_mode, AuthMode::ApiKey);
+        assert_eq!(settings.accounts[0].account_name, "MiniMax Work");
+        assert!(settings.accounts[0].secret_configured);
+        assert_eq!(settings.account_id, second_id);
+        assert_eq!(settings.account_name, "MiniMax Personal");
+        assert_eq!(settings.auth_mode, AuthMode::ApiKey);
+    }
+
+    #[test]
+    fn upsert_api_key_account_updates_target_minimax_account() {
+        let mut settings = AppSettings::default();
+
+        let account_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_MINIMAX,
+            None,
+            "MiniMax Work".into(),
+        );
+        let updated_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_MINIMAX,
+            Some(account_id.clone()),
+            "MiniMax Renamed".into(),
+        );
+
+        assert_eq!(updated_id, account_id);
+        assert_eq!(settings.accounts.len(), 1);
+        assert_eq!(settings.accounts[0].account_name, "MiniMax Renamed");
+        assert_eq!(settings.account_id, account_id);
+        assert_eq!(settings.account_name, "MiniMax Renamed");
     }
 
     #[test]
