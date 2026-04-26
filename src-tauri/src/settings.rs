@@ -1,7 +1,7 @@
 use crate::{
     models::{
         default_account_id, AppSettings, AuthMode, ConnectedAccount, SaveSettingsInput,
-        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     secrets, storage,
 };
@@ -276,7 +276,9 @@ fn secret_configured_for_account(account: &ConnectedAccount) -> Result<bool, Str
         AuthMode::OAuth => secrets::oauth_secret_configured(&account.account_id),
         AuthMode::ApiKey => {
             secrets::account_secret_configured(&account.account_id).map(|configured| {
-                configured || account.secret_configured && account.provider != PROVIDER_MINIMAX
+                configured
+                    || account.secret_configured
+                        && !matches!(account.provider.as_str(), PROVIDER_GLM | PROVIDER_MINIMAX)
             })
         }
         _ => Ok(account.secret_configured),
@@ -395,6 +397,7 @@ fn normalize_provider(provider: &str) -> String {
 fn default_account_name_for_provider(provider: &str) -> &'static str {
     match provider {
         crate::models::PROVIDER_ANTHROPIC => "Anthropic Account",
+        PROVIDER_GLM => "GLM Account",
         PROVIDER_KIMI => "Kimi Account",
         PROVIDER_MINIMAX => "MiniMax Account",
         _ => "OpenAI Account",
@@ -611,6 +614,73 @@ mod tests {
         assert_eq!(settings.accounts[0].account_name, "MiniMax Renamed");
         assert_eq!(settings.account_id, account_id);
         assert_eq!(settings.account_name, "MiniMax Renamed");
+    }
+
+    #[test]
+    fn upsert_api_key_account_appends_multiple_glm_accounts() {
+        let mut settings = AppSettings::default();
+
+        let first_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_GLM,
+            None,
+            "GLM Work".into(),
+        );
+        let second_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_GLM,
+            None,
+            "GLM Personal".into(),
+        );
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(settings.accounts.len(), 2);
+        assert_eq!(
+            settings
+                .accounts
+                .iter()
+                .map(|account| (
+                    account.provider.as_str(),
+                    account.auth_mode.clone(),
+                    account.account_name.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (crate::models::PROVIDER_GLM, AuthMode::ApiKey, "GLM Work"),
+                (
+                    crate::models::PROVIDER_GLM,
+                    AuthMode::ApiKey,
+                    "GLM Personal"
+                ),
+            ]
+        );
+        assert_eq!(settings.account_id, second_id);
+        assert_eq!(settings.account_name, "GLM Personal");
+    }
+
+    #[test]
+    fn upsert_api_key_account_updates_target_glm_account() {
+        let mut settings = AppSettings::default();
+
+        let account_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_GLM,
+            None,
+            "GLM Work".into(),
+        );
+        let updated_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_GLM,
+            Some(account_id.clone()),
+            "GLM Renamed".into(),
+        );
+
+        assert_eq!(updated_id, account_id);
+        assert_eq!(settings.accounts.len(), 1);
+        assert_eq!(settings.accounts[0].provider, crate::models::PROVIDER_GLM);
+        assert_eq!(settings.accounts[0].account_name, "GLM Renamed");
+        assert_eq!(settings.account_id, account_id);
+        assert_eq!(settings.account_name, "GLM Renamed");
     }
 
     #[test]

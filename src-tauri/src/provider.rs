@@ -1,8 +1,8 @@
 use crate::{
     errors::{ProviderError, ProviderErrorKind},
     models::{
-        AuthMode, ProbeCredentials, QuotaSnapshot, QuotaWindow, PROVIDER_ANTHROPIC, PROVIDER_KIMI,
-        PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        AuthMode, ProbeCredentials, QuotaSnapshot, QuotaWindow, PROVIDER_ANTHROPIC, PROVIDER_GLM,
+        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -17,6 +17,7 @@ const DEFAULT_PROBE_URL: &str = "https://chatgpt.com/backend-api/codex/responses
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_ANTHROPIC_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const DEFAULT_KIMI_USAGE_URL: &str = "https://api.kimi.com/coding/v1/usages";
+const DEFAULT_GLM_USAGE_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
 const MINIMAX_GLOBAL_USAGE_URLS: [&str; 3] = [
     "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
     "https://api.minimax.io/v1/coding_plan/remains",
@@ -34,6 +35,8 @@ const DEFAULT_INSTRUCTIONS: &str = "You are Codex. Respond briefly.";
 const MINIMAX_CODING_PLAN_WINDOW_MINUTES: u32 = 300;
 const MINIMAX_CODING_PLAN_WINDOW_MS: f64 = 5.0 * 60.0 * 60.0 * 1000.0;
 const MINIMAX_CODING_PLAN_WINDOW_TOLERANCE_MS: f64 = 10.0 * 60.0 * 1000.0;
+const GLM_SESSION_WINDOW_MINUTES: u32 = 300;
+const GLM_WEEKLY_WINDOW_MINUTES: u32 = 10080;
 
 #[derive(Debug, Clone)]
 struct RawWindow {
@@ -126,6 +129,9 @@ pub async fn fetch_quota(
         }
         PROVIDER_KIMI => {
             fetch_kimi_quota(account_id, account_name, base_url_override, credentials).await
+        }
+        PROVIDER_GLM => {
+            fetch_glm_quota(account_id, account_name, base_url_override, credentials).await
         }
         PROVIDER_MINIMAX => {
             fetch_minimax_quota(account_id, account_name, base_url_override, credentials).await
@@ -346,6 +352,71 @@ async fn fetch_kimi_quota(
     parse_kimi_usage_snapshot(account_id, account_name, &body)
 }
 
+async fn fetch_glm_quota(
+    account_id: &str,
+    account_name: &str,
+    base_url_override: Option<&str>,
+    credentials: &ProbeCredentials,
+) -> Result<QuotaSnapshot, ProviderError> {
+    if !matches!(credentials.auth_mode, AuthMode::ApiKey) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            "GLM 额度刷新当前仅支持 API Key 账号",
+        ));
+    }
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| {
+            ProviderError::new(
+                ProviderErrorKind::Unknown,
+                format!("创建 HTTP 客户端失败: {error}"),
+            )
+        })?;
+
+    let response = client
+        .get(resolve_glm_usage_url(base_url_override))
+        .headers(build_glm_usage_headers(credentials)?)
+        .send()
+        .await
+        .map_err(map_request_error)?;
+
+    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unauthorized,
+            "GLM API Key 认证失败，请检查后重新保存",
+        ));
+    }
+
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            "GLM 使用量接口被限流，请稍后重试",
+        ));
+    }
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("无法读取响应体"));
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            format!("GLM 使用量接口返回 {status}：{}", compact_body(&body)),
+        ));
+    }
+
+    let body = response.text().await.map_err(|error| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            format!("读取 GLM 使用量响应失败: {error}"),
+        )
+    })?;
+    parse_glm_usage_snapshot(account_id, account_name, &body)
+}
+
 async fn fetch_minimax_quota(
     account_id: &str,
     account_name: &str,
@@ -403,6 +474,7 @@ async fn fetch_minimax_quota(
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         PROVIDER_ANTHROPIC => "Anthropic",
+        PROVIDER_GLM => "GLM",
         PROVIDER_KIMI => "Kimi",
         PROVIDER_MINIMAX => "MiniMax",
         _ => "OpenAI",
@@ -732,6 +804,15 @@ fn build_kimi_usage_headers(credentials: &ProbeCredentials) -> Result<HeaderMap,
     Ok(headers)
 }
 
+fn build_glm_usage_headers(credentials: &ProbeCredentials) -> Result<HeaderMap, ProviderError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert("User-Agent", HeaderValue::from_static("ai-usage"));
+    headers.insert(AUTHORIZATION, format_auth_header(credentials)?);
+    Ok(headers)
+}
+
 fn build_minimax_usage_headers(credentials: &ProbeCredentials) -> Result<HeaderMap, ProviderError> {
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -801,6 +882,25 @@ fn resolve_kimi_usage_url(base_url_override: Option<&str>) -> String {
         format!("{raw}/usages")
     } else {
         format!("{}/coding/v1/usages", raw.trim_end_matches('/'))
+    }
+}
+
+fn resolve_glm_usage_url(base_url_override: Option<&str>) -> String {
+    let Some(raw) = base_url_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return DEFAULT_GLM_USAGE_URL.to_string();
+    };
+
+    if raw.ends_with("/api/monitor/usage/quota/limit") || raw.contains("/api/monitor/usage/quota/")
+    {
+        raw.to_string()
+    } else {
+        format!(
+            "{}/api/monitor/usage/quota/limit",
+            raw.trim_end_matches('/')
+        )
     }
 }
 
@@ -970,6 +1070,48 @@ fn parse_kimi_usage_snapshot(
     })
 }
 
+fn parse_glm_usage_snapshot(
+    account_id: &str,
+    account_name: &str,
+    body: &str,
+) -> Result<QuotaSnapshot, ProviderError> {
+    let payload = serde_json::from_str::<serde_json::Value>(body).map_err(|error| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            format!("解析 GLM 使用量响应失败: {error}"),
+        )
+    })?;
+
+    let limits = glm_limits(&payload).ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::MissingHeaders,
+            "GLM 使用量接口没有返回 limits",
+        )
+    })?;
+
+    let session = glm_find_token_limit(limits, 3, true);
+    let weekly = glm_find_token_limit(limits, 6, false);
+    let five_hour =
+        session.map(|limit| glm_limit_to_window(limit, Some(GLM_SESSION_WINDOW_MINUTES)));
+    let seven_day = weekly.map(|limit| glm_limit_to_window(limit, Some(GLM_WEEKLY_WINDOW_MINUTES)));
+
+    if five_hour.is_none() && seven_day.is_none() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::MissingHeaders,
+            "GLM 使用量接口没有返回可识别的额度窗口",
+        ));
+    }
+
+    Ok(QuotaSnapshot {
+        account_id: account_id.to_string(),
+        account_name: account_name.to_string(),
+        five_hour,
+        seven_day,
+        fetched_at: Utc::now(),
+        source: "glm_usage_quota".into(),
+    })
+}
+
 fn parse_minimax_usage_snapshot(
     account_id: &str,
     account_name: &str,
@@ -1081,6 +1223,120 @@ fn parse_minimax_usage_snapshot(
         }
         .into(),
     })
+}
+
+fn glm_limits(payload: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    payload
+        .as_array()
+        .or_else(|| payload.get("limits").and_then(|value| value.as_array()))
+        .or_else(|| {
+            payload
+                .get("data")
+                .and_then(|value| value.as_array().or_else(|| value.get("limits")?.as_array()))
+        })
+        .filter(|items| !items.is_empty())
+}
+
+fn glm_find_token_limit(
+    limits: &[serde_json::Value],
+    unit: i64,
+    allow_unitless_fallback: bool,
+) -> Option<&serde_json::Value> {
+    let mut fallback = None;
+    for item in limits {
+        if !glm_is_token_limit(item) {
+            continue;
+        }
+
+        match item
+            .get("unit")
+            .and_then(json_number)
+            .map(|value| value.round() as i64)
+        {
+            Some(item_unit) if item_unit == unit => return Some(item),
+            None if allow_unitless_fallback && fallback.is_none() => fallback = Some(item),
+            _ => {}
+        }
+    }
+    fallback
+}
+
+fn glm_is_token_limit(item: &serde_json::Value) -> bool {
+    ["type", "name"].iter().any(|key| {
+        item.get(*key)
+            .and_then(|value| value.as_str())
+            .map(|value| value == "TOKENS_LIMIT")
+            .unwrap_or(false)
+    })
+}
+
+fn glm_limit_to_window(limit: &serde_json::Value, window_minutes: Option<u32>) -> QuotaWindow {
+    let used_percent = glm_used_percent(limit);
+    QuotaWindow {
+        used_percent,
+        remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
+        reset_at: glm_reset_at(limit),
+        window_minutes,
+    }
+}
+
+fn glm_used_percent(limit: &serde_json::Value) -> f64 {
+    limit
+        .get("percentage")
+        .and_then(json_number)
+        .or_else(|| {
+            let total = limit.get("usage").and_then(json_number)?;
+            if total <= 0.0 {
+                return None;
+            }
+            let used = limit
+                .get("currentValue")
+                .and_then(json_number)
+                .or_else(|| limit.get("current_value").and_then(json_number))?;
+            Some((used / total) * 100.0)
+        })
+        .unwrap_or(0.0)
+        .clamp(0.0, 100.0)
+}
+
+fn glm_reset_at(limit: &serde_json::Value) -> Option<DateTime<Utc>> {
+    [
+        "nextResetTime",
+        "next_reset_time",
+        "resetTime",
+        "reset_at",
+        "resetAt",
+    ]
+    .iter()
+    .find_map(|key| limit.get(*key).and_then(parse_glm_reset_at_value))
+}
+
+fn parse_glm_reset_at_value(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    match value {
+        serde_json::Value::String(raw) => DateTime::parse_from_rfc3339(raw.trim())
+            .ok()
+            .map(|time| time.with_timezone(&Utc))
+            .or_else(|| {
+                raw.trim()
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(glm_epoch_to_datetime)
+            }),
+        serde_json::Value::Number(_) => json_number(value).and_then(glm_epoch_to_datetime),
+        _ => None,
+    }
+}
+
+fn glm_epoch_to_datetime(raw: f64) -> Option<DateTime<Utc>> {
+    if !raw.is_finite() {
+        return None;
+    }
+    let millis = if raw.abs() < 10_000_000_000.0 {
+        raw * 1000.0
+    } else {
+        raw
+    };
+    Utc.timestamp_millis_opt(millis.round() as i64).single()
 }
 
 fn validate_minimax_base_response(
@@ -1657,5 +1913,75 @@ mod tests {
         assert_eq!(five.remaining_percent, 80.0);
         assert_eq!(five.window_minutes, Some(300));
         assert!(five.reset_at.is_some());
+    }
+
+    #[test]
+    fn glm_usage_response_maps_session_and_weekly_token_limits() {
+        let body = r#"{
+            "code": 200,
+            "data": {
+                "limits": [
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "usage": 800000000,
+                        "currentValue": 1900000,
+                        "percentage": 10,
+                        "nextResetTime": 1738368000000,
+                        "unit": 3,
+                        "number": 5
+                    },
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "usage": 1600000000,
+                        "currentValue": 4800000,
+                        "percentage": 75,
+                        "nextResetTime": 1738972800000,
+                        "unit": 6,
+                        "number": 7
+                    }
+                ]
+            }
+        }"#;
+
+        let snapshot = parse_glm_usage_snapshot("glm-work", "GLM Work", body).unwrap();
+
+        assert_eq!(snapshot.account_id, "glm-work");
+        assert_eq!(snapshot.account_name, "GLM Work");
+        assert_eq!(snapshot.source, "glm_usage_quota");
+        let five = snapshot.five_hour.unwrap();
+        assert_eq!(five.used_percent, 10.0);
+        assert_eq!(five.remaining_percent, 90.0);
+        assert_eq!(five.window_minutes, Some(300));
+        assert_eq!(
+            five.reset_at.unwrap().to_rfc3339(),
+            "2025-02-01T00:00:00+00:00"
+        );
+        let seven = snapshot.seven_day.unwrap();
+        assert_eq!(seven.used_percent, 75.0);
+        assert_eq!(seven.remaining_percent, 25.0);
+        assert_eq!(seven.window_minutes, Some(10080));
+        assert_eq!(
+            seven.reset_at.unwrap().to_rfc3339(),
+            "2025-02-08T00:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn glm_usage_response_accepts_top_level_limits_and_falls_back_by_unitless_token_limit() {
+        let body = r#"[
+            {
+                "type": "TOKENS_LIMIT",
+                "percentage": "40",
+                "nextResetTime": 1738368000000
+            }
+        ]"#;
+
+        let snapshot = parse_glm_usage_snapshot("glm", "GLM", body).unwrap();
+
+        let five = snapshot.five_hour.unwrap();
+        assert_eq!(five.used_percent, 40.0);
+        assert_eq!(five.remaining_percent, 60.0);
+        assert_eq!(five.window_minutes, Some(300));
+        assert!(snapshot.seven_day.is_none());
     }
 }

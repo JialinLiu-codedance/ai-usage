@@ -15,7 +15,7 @@ let mockOAuthCompleteSequence = 0;
 let mockPendingOAuthAccountId: string | null = null;
 
 type OAuthProviderKey = "openai" | "anthropic";
-type MockProviderKey = OAuthProviderKey | "kimi" | "minimax";
+type MockProviderKey = OAuthProviderKey | "kimi" | "glm" | "minimax";
 
 const oauthProviderConfig: Record<
   OAuthProviderKey,
@@ -223,6 +223,50 @@ export async function importKimiAccount(accountName?: string | null, accountId?:
   }
   return invoke("import_kimi_account", {
     accountName: normalizedName,
+    accountId: accountId?.trim() || null,
+  });
+}
+
+export async function importGlmAccount(
+  accountName: string,
+  apiKey: string,
+  accountId?: string | null,
+): Promise<AppSettings> {
+  const normalizedName = accountName.trim() || "GLM Account";
+  const normalizedApiKey = apiKey.trim();
+  if (!normalizedApiKey) {
+    throw new Error("请填写 GLM API Key");
+  }
+  if (!isTauriRuntime) {
+    const nextAccountId = accountId?.trim() || uniqueMockAccountId("glm", normalizedName);
+    const nextAccount = mockAccount(nextAccountId, normalizedName, "glm", "apiKey");
+    const existingIndex = mockSettings.accounts.findIndex((account) => account.account_id === nextAccountId);
+    const accounts =
+      existingIndex >= 0
+        ? mockSettings.accounts.map((account, index) => (index === existingIndex ? nextAccount : account))
+        : [...mockSettings.accounts, nextAccount];
+
+    mockSettings = {
+      ...mockSettings,
+      account_id: nextAccountId,
+      account_name: normalizedName,
+      auth_mode: "apiKey",
+      chatgpt_account_id: null,
+      accounts,
+      secret_configured: true,
+    };
+    mockStatus = {
+      ...mockStatus,
+      accounts: mockAccountStatuses(accounts),
+      snapshot: mockStatus.snapshot
+        ? { ...mockStatus.snapshot, account_id: nextAccountId, account_name: normalizedName }
+        : null,
+    };
+    return mockSettings;
+  }
+  return invoke("import_glm_account", {
+    accountName: normalizedName,
+    apiKey: normalizedApiKey,
     accountId: accountId?.trim() || null,
   });
 }

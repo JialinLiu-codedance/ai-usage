@@ -2,8 +2,8 @@ use crate::{
     errors::{ProviderError, ProviderErrorKind},
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ConnectedAccount,
-        ConnectionTestResult, QuotaSnapshot, SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_KIMI,
-        PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        ConnectionTestResult, QuotaSnapshot, SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_GLM,
+        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     oauth, panel, provider, secrets, settings,
     state::StateStore,
@@ -105,6 +105,34 @@ pub async fn import_kimi_account(
     );
     let tokens = oauth::load_kimi_cli_tokens(account_id.clone())?;
     secrets::save_oauth_tokens(&account_id, &tokens)?;
+    let next_settings = settings::write_settings(&app, &current)?;
+    hydrate_cached_snapshot(&app, &store).await?;
+    Ok(next_settings)
+}
+
+#[tauri::command]
+pub async fn import_glm_account(
+    app: AppHandle,
+    store: State<'_, StateStore>,
+    account_name: Option<String>,
+    api_key: String,
+    account_id: Option<String>,
+) -> Result<AppSettings, String> {
+    let display_name = account_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("GLM Account")
+        .to_string();
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("请填写 GLM API Key".into());
+    }
+
+    let mut current = settings::load_settings(&app)?;
+    let account_id =
+        settings::upsert_api_key_account(&mut current, PROVIDER_GLM, account_id, display_name);
+    secrets::save_account_secret(&account_id, &api_key)?;
     let next_settings = settings::write_settings(&app, &current)?;
     hydrate_cached_snapshot(&app, &store).await?;
     Ok(next_settings)
@@ -354,13 +382,14 @@ fn settings_for_refresh_account(settings: &AppSettings, account: &ConnectedAccou
 fn account_supports_quota_refresh(provider: &str) -> bool {
     matches!(
         provider,
-        PROVIDER_OPENAI | PROVIDER_ANTHROPIC | PROVIDER_KIMI | PROVIDER_MINIMAX
+        PROVIDER_OPENAI | PROVIDER_ANTHROPIC | PROVIDER_KIMI | PROVIDER_GLM | PROVIDER_MINIMAX
     )
 }
 
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         crate::models::PROVIDER_ANTHROPIC => "Anthropic",
+        crate::models::PROVIDER_GLM => "GLM",
         crate::models::PROVIDER_KIMI => "Kimi",
         crate::models::PROVIDER_MINIMAX => "MiniMax",
         _ => "OpenAI",
@@ -733,6 +762,28 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(account_ids, vec!["minimax-work"]);
+    }
+
+    #[test]
+    fn refreshable_accounts_include_glm_accounts() {
+        let settings = AppSettings {
+            accounts: vec![crate::models::ConnectedAccount {
+                account_id: "glm-work".into(),
+                account_name: "GLM Work".into(),
+                provider: crate::models::PROVIDER_GLM.into(),
+                auth_mode: AuthMode::ApiKey,
+                chatgpt_account_id: None,
+                secret_configured: true,
+            }],
+            ..AppSettings::default()
+        };
+
+        let account_ids = refreshable_quota_accounts(&settings)
+            .into_iter()
+            .map(|account| account.account_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(account_ids, vec!["glm-work"]);
     }
 
     #[test]

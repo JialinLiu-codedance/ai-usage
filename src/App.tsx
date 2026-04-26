@@ -20,6 +20,7 @@ import {
   getSettings,
   completeAnthropicOAuth,
   completeOpenAIOAuth,
+  importGlmAccount,
   importKimiAccount,
   importMiniMaxAccount,
   resizePanel,
@@ -43,7 +44,7 @@ import type {
   SaveSettingsInput,
 } from "./lib/types";
 
-type PanelView = "overview" | "settings" | "add-account" | "oauth-auth" | "kimi-auth" | "minimax-auth";
+type PanelView = "overview" | "settings" | "add-account" | "oauth-auth" | "kimi-auth" | "glm-auth" | "minimax-auth";
 type AddAccountBackView = Extract<PanelView, "overview" | "settings">;
 type OAuthProviderKey = "openai" | "anthropic";
 type Tone = "success" | "warning" | "danger" | "muted";
@@ -141,6 +142,9 @@ function defaultProviderAccountName(provider: string): string {
   if (provider === "kimi") {
     return "Kimi Account";
   }
+  if (provider === "glm") {
+    return "GLM Account";
+  }
   if (provider === "minimax") {
     return "MiniMax Account";
   }
@@ -153,6 +157,9 @@ function providerDisplayName(provider: string): string {
   }
   if (provider === "kimi") {
     return "Kimi";
+  }
+  if (provider === "glm") {
+    return "GLM";
   }
   if (provider === "minimax") {
     return "MiniMax";
@@ -172,6 +179,11 @@ function isOAuthProvider(provider: ProviderKey): provider is OAuthProviderKey {
 function nextKimiAccountName(settings: AppSettings): string {
   const existingCount = settings.accounts.filter((account) => account.provider === "kimi").length;
   return existingCount === 0 ? "Kimi Account" : `Kimi Account ${existingCount + 1}`;
+}
+
+function nextGlmAccountName(settings: AppSettings): string {
+  const existingCount = settings.accounts.filter((account) => account.provider === "glm").length;
+  return existingCount === 0 ? "GLM Account" : `GLM Account ${existingCount + 1}`;
 }
 
 function nextMiniMaxAccountName(settings: AppSettings): string {
@@ -195,6 +207,10 @@ export default function App() {
   const [kimiTargetAccountId, setKimiTargetAccountId] = useState<string | null>(null);
   const [kimiAccountName, setKimiAccountName] = useState("Kimi Account");
   const [kimiImporting, setKimiImporting] = useState(false);
+  const [glmTargetAccountId, setGlmTargetAccountId] = useState<string | null>(null);
+  const [glmAccountName, setGlmAccountName] = useState("GLM Account");
+  const [glmApiKey, setGlmApiKey] = useState("");
+  const [glmImporting, setGlmImporting] = useState(false);
   const [minimaxTargetAccountId, setMiniMaxTargetAccountId] = useState<string | null>(null);
   const [minimaxAccountName, setMiniMaxAccountName] = useState("MiniMax Account");
   const [minimaxApiKey, setMiniMaxApiKey] = useState("");
@@ -409,6 +425,15 @@ export default function App() {
     navigateToView("kimi-auth");
   }
 
+  function openGlmImport(accountId: string | null, accountName: string) {
+    setSettingsMessage(null);
+    setGlmTargetAccountId(accountId);
+    setGlmAccountName(accountName.trim() || "GLM Account");
+    setGlmApiKey("");
+    setGlmImporting(false);
+    navigateToView("glm-auth");
+  }
+
   function openMiniMaxImport(accountId: string | null, accountName: string) {
     setSettingsMessage(null);
     setMiniMaxTargetAccountId(accountId);
@@ -442,6 +467,38 @@ export default function App() {
       setSettingsMessage(error instanceof Error ? error.message : "导入 Kimi 账号失败");
     } finally {
       setKimiImporting(false);
+    }
+  }
+
+  async function handleImportGlm() {
+    const trimmedName = glmAccountName.trim();
+    const trimmedApiKey = glmApiKey.trim();
+    if (!trimmedName) {
+      setSettingsMessage("请输入账号名称");
+      return;
+    }
+    if (!trimmedApiKey) {
+      setSettingsMessage("请输入 GLM API Key");
+      return;
+    }
+
+    setGlmImporting(true);
+    setSettingsMessage(null);
+    try {
+      const nextSettings = await importGlmAccount(trimmedName, trimmedApiKey, glmTargetAccountId);
+      applySettings(nextSettings);
+      navigateToView("settings");
+      try {
+        setStatus(await refreshQuota());
+        setSettingsMessage("GLM 账号已添加并刷新额度");
+      } catch (refreshError) {
+        setStatus(await getCurrentQuota());
+        setSettingsMessage(refreshError instanceof Error ? refreshError.message : "GLM 账号已添加，额度刷新失败");
+      }
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "添加 GLM 账号失败");
+    } finally {
+      setGlmImporting(false);
     }
   }
 
@@ -522,6 +579,10 @@ export default function App() {
               openKimiImport(account.account_id, connectedAccountSubtitle(account));
               return;
             }
+            if (account.provider === "glm") {
+              openGlmImport(account.account_id, connectedAccountSubtitle(account));
+              return;
+            }
             if (account.provider === "minimax") {
               openMiniMaxImport(account.account_id, connectedAccountSubtitle(account));
               return;
@@ -544,6 +605,10 @@ export default function App() {
             }
             if (provider === "kimi") {
               openKimiImport(null, nextKimiAccountName(settings));
+              return;
+            }
+            if (provider === "glm") {
+              openGlmImport(null, nextGlmAccountName(settings));
               return;
             }
             if (provider === "minimax") {
@@ -577,6 +642,19 @@ export default function App() {
           onBack={() => navigateToView(kimiTargetAccountId ? "settings" : "add-account")}
           onAccountNameChange={setKimiAccountName}
           onImport={() => void handleImportKimi()}
+        />
+      ) : null}
+
+      {view === "glm-auth" ? (
+        <GlmApiKeyPanel
+          accountName={glmAccountName}
+          apiKey={glmApiKey}
+          importing={glmImporting}
+          message={settingsMessage}
+          onBack={() => navigateToView(glmTargetAccountId ? "settings" : "add-account")}
+          onAccountNameChange={setGlmAccountName}
+          onApiKeyChange={setGlmApiKey}
+          onImport={() => void handleImportGlm()}
         />
       ) : null}
 
@@ -810,13 +888,20 @@ function SettingsPanel({
               </div>
               <div className="account-subtitle">{connectedAccountSubtitle(account)}</div>
               <div className="account-actions">
-                {isOAuthProvider(account.provider as ProviderKey) || account.provider === "kimi" || account.provider === "minimax" ? (
+                {isOAuthProvider(account.provider as ProviderKey) ||
+                account.provider === "kimi" ||
+                account.provider === "glm" ||
+                account.provider === "minimax" ? (
                   <Button
                     variant="secondary"
                     className="account-action-button"
                     onClick={() => onReauthorize(account)}
                   >
-                    {account.provider === "kimi" ? "重新导入" : account.provider === "minimax" ? "更新 Key" : "重新授权"}
+                    {account.provider === "kimi"
+                      ? "重新导入"
+                      : account.provider === "glm" || account.provider === "minimax"
+                        ? "更新 Key"
+                        : "重新授权"}
                   </Button>
                 ) : null}
                 <Button className="account-delete-button" onClick={() => onDeleteAccount(account.account_id)}>
@@ -1097,6 +1182,76 @@ function KimiImportPanel({
 
       <Button className="submit-auth-button" onClick={onImport} disabled={importing || !accountName.trim()}>
         {importing ? "导入中" : "导入账号"}
+      </Button>
+      {message ? <div className="settings-message">{message}</div> : null}
+    </Card>
+  );
+}
+
+function GlmApiKeyPanel({
+  accountName,
+  apiKey,
+  importing,
+  message,
+  onBack,
+  onAccountNameChange,
+  onApiKeyChange,
+  onImport,
+}: {
+  accountName: string;
+  apiKey: string;
+  importing: boolean;
+  message: string | null;
+  onBack: () => void;
+  onAccountNameChange: (value: string) => void;
+  onApiKeyChange: (value: string) => void;
+  onImport: () => void;
+}) {
+  return (
+    <Card className="settings-panel oauth-panel">
+      <div className="add-header">
+        <Button variant="ghost" size="icon-sm" className="icon-button back-button" onClick={onBack} aria-label="返回">
+          <ArrowLeft data-icon="inline-start" />
+        </Button>
+        <h1>GLM 账号添加</h1>
+      </div>
+
+      <p className="auth-subtitle">Z.ai API Key</p>
+      <p className="auth-instruction">使用 GLM / z.ai API Key 读取 Coding Plan 额度。</p>
+
+      <AuthStepCard number={1} title="账号名称">
+        <label className="auth-input-label" htmlFor="glm-account-name">
+          <KeyRound />
+          账号名称
+        </label>
+        <input
+          id="glm-account-name"
+          className="kimi-account-input"
+          value={accountName}
+          onChange={(event) => onAccountNameChange(event.target.value)}
+          placeholder="GLM Work"
+        />
+      </AuthStepCard>
+
+      <AuthStepCard number={2} title="API Key">
+        <label className="auth-input-label" htmlFor="glm-api-key">
+          <KeyRound />
+          GLM API Key
+        </label>
+        <input
+          id="glm-api-key"
+          className="kimi-account-input"
+          type="password"
+          autoComplete="off"
+          value={apiKey}
+          onChange={(event) => onApiKeyChange(event.target.value)}
+          placeholder="输入 GLM / z.ai API Key"
+        />
+        <p className="auth-muted">可添加多个 GLM 账号，每个账号的 API Key 会按账号单独保存。</p>
+      </AuthStepCard>
+
+      <Button className="submit-auth-button" onClick={onImport} disabled={importing || !accountName.trim() || !apiKey.trim()}>
+        {importing ? "保存中" : "添加账号"}
       </Button>
       {message ? <div className="settings-message">{message}</div> : null}
     </Card>

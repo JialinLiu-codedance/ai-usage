@@ -14,7 +14,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder},
     tray::TrayIconBuilder,
-    ActivationPolicy, Emitter, Manager, WindowEvent,
+    ActivationPolicy, Emitter, Manager, Runtime, WindowEvent,
 };
 
 const TRAY_ID: &str = "ai-usage-tray";
@@ -106,6 +106,7 @@ fn main() {
             commands::get_settings,
             commands::save_settings,
             commands::import_kimi_account,
+            commands::import_glm_account,
             commands::import_minimax_account,
             commands::start_openai_oauth,
             commands::start_anthropic_oauth,
@@ -202,9 +203,9 @@ fn build_tray_menu(
             account_lines
         };
         for account_group in lines {
-            let account = disabled_menu_item(app, &account_group[0])?;
-            let five_hour = disabled_menu_item(app, &account_group[1])?;
-            let seven_day = disabled_menu_item(app, &account_group[2])?;
+            let account = account_usage_menu_item(app, &account_group[0])?;
+            let five_hour = account_usage_menu_item(app, &account_group[1])?;
+            let seven_day = account_usage_menu_item(app, &account_group[2])?;
             menu = menu
                 .item(&account)
                 .item(&five_hour)
@@ -233,6 +234,13 @@ fn disabled_menu_item(app: &tauri::AppHandle, text: &str) -> tauri::Result<MenuI
     MenuItemBuilder::new(text).enabled(false).build(app)
 }
 
+fn account_usage_menu_item<R: Runtime, M: Manager<R>>(
+    manager: &M,
+    text: &str,
+) -> tauri::Result<MenuItem<R>> {
+    MenuItemBuilder::new(text).enabled(true).build(manager)
+}
+
 fn should_enable_refresh_menu(settings: &models::AppSettings, _status: &models::AppStatus) -> bool {
     has_refreshable_quota_account(settings)
 }
@@ -254,6 +262,7 @@ fn provider_supports_quota_refresh(provider: &str) -> bool {
         models::PROVIDER_OPENAI
             | models::PROVIDER_ANTHROPIC
             | models::PROVIDER_KIMI
+            | models::PROVIDER_GLM
             | models::PROVIDER_MINIMAX
     )
 }
@@ -305,6 +314,7 @@ fn tray_account_summary_lines(status: &models::AppStatus) -> Vec<[String; 3]> {
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         models::PROVIDER_ANTHROPIC => "Anthropic",
+        models::PROVIDER_GLM => "GLM",
         models::PROVIDER_KIMI => "Kimi",
         models::PROVIDER_MINIMAX => "MiniMax",
         _ => "OpenAI",
@@ -420,6 +430,14 @@ mod tests {
     }
 
     #[test]
+    fn account_usage_menu_items_are_enabled_for_normal_text_color() {
+        let app = tauri::test::mock_app();
+        let item = account_usage_menu_item(app.handle(), "5H    90%").unwrap();
+
+        assert!(item.is_enabled().unwrap());
+    }
+
+    #[test]
     fn refresh_menu_is_disabled_without_bound_account() {
         let mut settings = models::AppSettings::default();
         let mut status = models::AppStatus::default();
@@ -458,6 +476,16 @@ mod tests {
             chatgpt_account_id: None,
             secret_configured: true,
         });
+        assert!(should_enable_refresh_menu(&settings, &status));
+
+        settings.accounts = vec![models::ConnectedAccount {
+            account_id: "glm".into(),
+            account_name: "GLM Work".into(),
+            provider: models::PROVIDER_GLM.into(),
+            auth_mode: models::AuthMode::ApiKey,
+            chatgpt_account_id: None,
+            secret_configured: true,
+        }];
         assert!(should_enable_refresh_menu(&settings, &status));
     }
 
