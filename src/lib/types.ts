@@ -24,6 +24,7 @@ export interface AppSettings {
   auth_mode: AuthMode;
   base_url_override: string | null;
   chatgpt_account_id: string | null;
+  accounts: ConnectedAccount[];
   refresh_interval_minutes: number;
   low_quota_threshold_percent: number;
   notify_on_low_quota: boolean;
@@ -46,8 +47,27 @@ export interface SaveSettingsInput {
   auth_secret?: string | null;
 }
 
+export interface ConnectedAccount {
+  account_id: string;
+  account_name: string;
+  provider: string;
+  auth_mode: AuthMode;
+  chatgpt_account_id: string | null;
+  secret_configured: boolean;
+}
+
+export interface AccountQuotaStatus {
+  account_id: string;
+  account_name: string;
+  five_hour: QuotaWindow | null;
+  seven_day: QuotaWindow | null;
+  fetched_at: string | null;
+  source: "probe_headers" | string | null;
+}
+
 export interface AppStatus {
   snapshot: QuotaSnapshot | null;
+  accounts: AccountQuotaStatus[];
   refresh_status: RefreshStatus;
   last_error: string | null;
   last_refreshed_at: string | null;

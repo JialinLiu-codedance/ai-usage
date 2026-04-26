@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, Rect, Size, WebviewWindow};
 
 const PANEL_GAP: f64 = 0.0;
+const TITLE_BAR_HEIGHT_FALLBACK: f64 = 28.0;
 
 #[derive(Default)]
 pub struct PanelAnchor {
@@ -10,12 +11,6 @@ pub struct PanelAnchor {
 }
 
 impl PanelAnchor {
-    pub fn remember(&self, rect: Rect) {
-        if let Ok(mut guard) = self.rect.lock() {
-            *guard = Some(rect);
-        }
-    }
-
     fn current(&self) -> Option<Rect> {
         self.rect.lock().ok().and_then(|guard| *guard)
     }
@@ -25,13 +20,42 @@ pub fn resize_main_panel(app: &AppHandle, width: f64, height: f64) -> Result<(),
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "找不到主窗口".to_string())?;
+    let metrics = window_metrics(&window);
+    let outer_width = metrics
+        .as_ref()
+        .map(|metrics| width + metrics.chrome_width)
+        .unwrap_or(width);
+    let outer_height = metrics
+        .as_ref()
+        .map(|metrics| height + metrics.chrome_height)
+        .unwrap_or(height);
 
     window
-        .set_size(LogicalSize::new(width, height))
+        .set_size(LogicalSize::new(outer_width, outer_height))
         .map_err(|error| format!("调整窗口尺寸失败: {error}"))?;
-    position_main_panel(app, &window, width, height)?;
+
+    position_main_panel(app, &window, outer_width, outer_height)?;
 
     Ok(())
+}
+
+struct WindowMetrics {
+    chrome_width: f64,
+    chrome_height: f64,
+}
+
+fn window_metrics(window: &WebviewWindow) -> Option<WindowMetrics> {
+    let inner = window.inner_size().ok()?;
+    let outer = window.outer_size().ok()?;
+    let scale_factor = window.scale_factor().ok()?;
+    let inner_width = f64::from(inner.width) / scale_factor;
+    let inner_height = f64::from(inner.height) / scale_factor;
+    let outer_width = f64::from(outer.width) / scale_factor;
+    let outer_height = f64::from(outer.height) / scale_factor;
+    Some(WindowMetrics {
+        chrome_width: (outer_width - inner_width).max(0.0),
+        chrome_height: (outer_height - inner_height).max(TITLE_BAR_HEIGHT_FALLBACK),
+    })
 }
 
 pub fn position_main_panel(

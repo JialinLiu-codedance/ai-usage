@@ -73,6 +73,15 @@ pub fn save_oauth_tokens(account_id: &str, tokens: &StoredOAuthTokens) -> Result
         .map_err(|error| format!("写入 OAuth Keychain 失败: {error}"))
 }
 
+pub fn delete_oauth_tokens(account_id: &str) -> Result<(), String> {
+    let entry = Entry::new(SERVICE_NAME, &oauth_keychain_account(account_id))
+        .map_err(|error| format!("初始化 OAuth Keychain 失败: {error}"))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!("删除 OAuth Keychain 凭证失败: {error}")),
+    }
+}
+
 pub fn oauth_secret_configured(account_id: &str) -> Result<bool, String> {
     Ok(load_oauth_tokens(account_id)?.is_some())
 }

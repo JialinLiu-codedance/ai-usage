@@ -1,5 +1,5 @@
 use crate::{
-    models::{AuthMode, OAuthPhase, OAuthStatus, StoredOAuthTokens},
+    models::{OAuthPhase, OAuthStatus, StoredOAuthTokens},
     secrets, settings,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -27,6 +27,7 @@ static REFRESH_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLoc
 struct OAuthSession {
     state: String,
     code_verifier: String,
+    target_account_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -56,10 +57,16 @@ struct OpenAIAuthClaims {
     chatgpt_account_id: Option<String>,
 }
 
-pub async fn start_openai_oauth(store: &OAuthStore) -> Result<String, String> {
+pub async fn start_openai_oauth(
+    store: &OAuthStore,
+    target_account_id: Option<String>,
+) -> Result<String, String> {
     let session = OAuthSession {
         state: random_hex(32)?,
         code_verifier: random_hex(64)?,
+        target_account_id: target_account_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
     };
     let code_challenge = code_challenge(&session.code_verifier);
     let auth_url = format!(
@@ -120,8 +127,13 @@ pub async fn complete_openai_oauth(
         .and_then(parse_id_token)
         .unwrap_or((None, None));
 
-    let current = settings::load_settings(app)?;
-    let account_id = current.account_id.clone();
+    let mut current = settings::load_settings(app)?;
+    let account_id = settings::upsert_oauth_account(
+        &mut current,
+        session.target_account_id.clone(),
+        email.clone(),
+        chatgpt_account_id.clone(),
+    );
     let stored_tokens = stored_tokens_from_response(
         account_id.clone(),
         token,
@@ -132,21 +144,7 @@ pub async fn complete_openai_oauth(
             .or_else(|| current.chatgpt_account_id.clone()),
     );
     secrets::save_oauth_tokens(&account_id, &stored_tokens)?;
-
-    let updated = crate::models::SaveSettingsInput {
-        account_id,
-        account_name: email.clone().unwrap_or(current.account_name),
-        auth_mode: AuthMode::OAuth,
-        base_url_override: current.base_url_override,
-        chatgpt_account_id: chatgpt_account_id.or(current.chatgpt_account_id),
-        refresh_interval_minutes: current.refresh_interval_minutes,
-        low_quota_threshold_percent: current.low_quota_threshold_percent,
-        notify_on_low_quota: current.notify_on_low_quota,
-        notify_on_reset: current.notify_on_reset,
-        reset_notify_lead_minutes: current.reset_notify_lead_minutes,
-        auth_secret: None,
-    };
-    let _ = settings::save_settings(app, updated)?;
+    let _ = settings::write_settings(app, &current)?;
 
     {
         let mut guard = store.session.write().await;

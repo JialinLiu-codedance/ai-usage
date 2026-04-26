@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AuthMode {
     ApiKey,
@@ -50,6 +50,30 @@ impl Default for RefreshStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectedAccount {
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    pub account_name: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default)]
+    pub auth_mode: AuthMode,
+    pub chatgpt_account_id: Option<String>,
+    #[serde(default)]
+    pub secret_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountQuotaStatus {
+    pub account_id: String,
+    pub account_name: String,
+    pub five_hour: Option<QuotaWindow>,
+    pub seven_day: Option<QuotaWindow>,
+    pub fetched_at: Option<DateTime<Utc>>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default = "default_account_id")]
     pub account_id: String,
@@ -57,6 +81,8 @@ pub struct AppSettings {
     pub auth_mode: AuthMode,
     pub base_url_override: Option<String>,
     pub chatgpt_account_id: Option<String>,
+    #[serde(default)]
+    pub accounts: Vec<ConnectedAccount>,
     pub refresh_interval_minutes: u32,
     pub low_quota_threshold_percent: f64,
     pub notify_on_low_quota: bool,
@@ -73,6 +99,7 @@ impl Default for AppSettings {
             auth_mode: AuthMode::ApiKey,
             base_url_override: None,
             chatgpt_account_id: None,
+            accounts: Vec::new(),
             refresh_interval_minutes: 15,
             low_quota_threshold_percent: 10.0,
             notify_on_low_quota: true,
@@ -103,6 +130,10 @@ pub fn default_account_id() -> String {
     "default".into()
 }
 
+fn default_provider() -> String {
+    "openai".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredOAuthTokens {
     pub account_id: String,
@@ -118,6 +149,8 @@ pub struct StoredOAuthTokens {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppStatus {
     pub snapshot: Option<QuotaSnapshot>,
+    #[serde(default)]
+    pub accounts: Vec<AccountQuotaStatus>,
     pub refresh_status: RefreshStatus,
     pub last_error: Option<String>,
     pub last_refreshed_at: Option<DateTime<Utc>>,
@@ -127,6 +160,7 @@ impl Default for AppStatus {
     fn default() -> Self {
         Self {
             snapshot: None,
+            accounts: Vec::new(),
             refresh_status: RefreshStatus::Idle,
             last_error: None,
             last_refreshed_at: None,

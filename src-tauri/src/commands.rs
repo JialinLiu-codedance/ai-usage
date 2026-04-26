@@ -1,9 +1,10 @@
 use crate::{
     errors::{ProviderError, ProviderErrorKind},
     models::{
-        AppSettings, AppStatus, AuthMode, ConnectionTestResult, QuotaSnapshot, SaveSettingsInput,
+        AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ConnectedAccount,
+        ConnectionTestResult, QuotaSnapshot, SaveSettingsInput,
     },
-    oauth, provider, secrets, settings,
+    oauth, panel, provider, secrets, settings,
     state::StateStore,
     storage,
 };
@@ -83,8 +84,9 @@ pub fn save_settings(app: AppHandle, input: SaveSettingsInput) -> Result<AppSett
 #[tauri::command]
 pub async fn start_openai_oauth(
     oauth_store: State<'_, oauth::OAuthStore>,
+    account_id: Option<String>,
 ) -> Result<String, String> {
-    oauth::start_openai_oauth(&oauth_store).await
+    oauth::start_openai_oauth(&oauth_store, account_id).await
 }
 
 #[tauri::command]
@@ -103,6 +105,25 @@ pub async fn complete_openai_oauth(
     oauth::complete_openai_oauth(&app, &oauth_store, &callback_url).await
 }
 
+#[tauri::command]
+pub async fn delete_openai_account(
+    app: AppHandle,
+    store: State<'_, StateStore>,
+    account_id: String,
+) -> Result<AppSettings, String> {
+    let account_id = settings::normalize_account_id(&account_id);
+    let _ = settings::delete_account(&app, &account_id)?;
+    secrets::delete_oauth_tokens(&account_id)?;
+    delete_account_snapshot(&app, &account_id)?;
+    hydrate_cached_snapshot(&app, &store).await?;
+    settings::load_settings(&app)
+}
+
+#[tauri::command]
+pub fn resize_main_panel(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    panel::resize_main_panel(&app, width, height)
+}
+
 pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), String> {
     let settings = settings::load_settings(app)?;
 
@@ -115,8 +136,10 @@ pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), St
     match fetch_quota_with_oauth_retry(&settings).await {
         Ok(snapshot) => {
             write_account_snapshot(app, &settings.account_id, &snapshot)?;
+            let snapshots = read_account_snapshots(app)?;
             let mut guard = store.inner.write().await;
             guard.snapshot = Some(snapshot);
+            guard.accounts = account_statuses_from_settings_and_snapshots(&settings, &snapshots);
             guard.refresh_status = crate::models::RefreshStatus::Ok;
             guard.last_refreshed_at = Some(Utc::now());
             guard.last_error = None;
@@ -136,11 +159,21 @@ pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), St
 
 pub async fn hydrate_cached_snapshot(app: &AppHandle, store: &StateStore) -> Result<(), String> {
     let settings = settings::load_settings(app)?;
-    let cached = read_account_snapshot(app, &settings.account_id)?;
-    let mut guard = store.inner.write().await;
-    if should_replace_cached_snapshot(&guard.snapshot, &settings.account_id) {
-        guard.snapshot = cached;
+    if !settings.secret_configured {
+        let mut guard = store.inner.write().await;
+        guard.snapshot = None;
+        guard.accounts = Vec::new();
+        guard.refresh_status = crate::models::RefreshStatus::Idle;
+        guard.last_error = None;
+        guard.last_refreshed_at = None;
+        return Ok(());
     }
+
+    let snapshots = read_account_snapshots(app)?;
+    let cached = snapshots.get(&settings.account_id).cloned();
+    let mut guard = store.inner.write().await;
+    guard.snapshot = cached;
+    guard.accounts = account_statuses_from_settings_and_snapshots(&settings, &snapshots);
     Ok(())
 }
 
@@ -219,12 +252,11 @@ fn should_replace_cached_snapshot(current: &Option<QuotaSnapshot>, account_id: &
         .unwrap_or(true)
 }
 
-fn read_account_snapshot(
-    app: &AppHandle,
-    account_id: &str,
-) -> Result<Option<QuotaSnapshot>, String> {
-    let snapshots = storage::read_json::<HashMap<String, QuotaSnapshot>>(app, SNAPSHOTS_FILE)?;
-    Ok(snapshots.and_then(|mut values| values.remove(account_id)))
+fn read_account_snapshots(app: &AppHandle) -> Result<HashMap<String, QuotaSnapshot>, String> {
+    Ok(
+        storage::read_json::<HashMap<String, QuotaSnapshot>>(app, SNAPSHOTS_FILE)?
+            .unwrap_or_default(),
+    )
 }
 
 fn write_account_snapshot(
@@ -238,10 +270,73 @@ fn write_account_snapshot(
     storage::write_json(app, SNAPSHOTS_FILE, &snapshots)
 }
 
+fn delete_account_snapshot(app: &AppHandle, account_id: &str) -> Result<(), String> {
+    let mut snapshots = read_account_snapshots(app)?;
+    snapshots.remove(account_id);
+    storage::write_json(app, SNAPSHOTS_FILE, &snapshots)
+}
+
+fn account_statuses_from_settings_and_snapshots(
+    settings: &AppSettings,
+    snapshots: &HashMap<String, QuotaSnapshot>,
+) -> Vec<AccountQuotaStatus> {
+    accounts_for_status(settings)
+        .into_iter()
+        .map(|account| account_status_from_snapshot(&account, snapshots.get(&account.account_id)))
+        .collect()
+}
+
+fn accounts_for_status(settings: &AppSettings) -> Vec<ConnectedAccount> {
+    if !settings.accounts.is_empty() {
+        return settings.accounts.clone();
+    }
+    if !settings.secret_configured {
+        return Vec::new();
+    }
+    vec![ConnectedAccount {
+        account_id: settings.account_id.clone(),
+        account_name: settings.account_name.clone(),
+        provider: "openai".into(),
+        auth_mode: settings.auth_mode.clone(),
+        chatgpt_account_id: settings.chatgpt_account_id.clone(),
+        secret_configured: settings.secret_configured,
+    }]
+}
+
+fn account_status_from_snapshot(
+    account: &ConnectedAccount,
+    snapshot: Option<&QuotaSnapshot>,
+) -> AccountQuotaStatus {
+    AccountQuotaStatus {
+        account_id: account.account_id.clone(),
+        account_name: display_account_name_for_status(account, snapshot),
+        five_hour: snapshot.and_then(|snapshot| snapshot.five_hour.clone()),
+        seven_day: snapshot.and_then(|snapshot| snapshot.seven_day.clone()),
+        fetched_at: snapshot.map(|snapshot| snapshot.fetched_at),
+        source: snapshot.map(|snapshot| snapshot.source.clone()),
+    }
+}
+
+fn display_account_name_for_status(
+    account: &ConnectedAccount,
+    snapshot: Option<&QuotaSnapshot>,
+) -> String {
+    let account_name = account.account_name.trim();
+    if !account_name.is_empty() {
+        return account_name.to_string();
+    }
+    snapshot
+        .map(|snapshot| snapshot.account_name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("OpenAI Account")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::errors::{ProviderError, ProviderErrorKind};
+    use crate::models::QuotaWindow;
 
     #[test]
     fn unauthorized_retry_happens_once() {
@@ -339,5 +434,61 @@ mod tests {
             source: "probe_headers".into(),
         });
         assert!(should_replace_cached_snapshot(&current, "second"));
+    }
+
+    #[test]
+    fn account_statuses_include_every_connected_account() {
+        let settings = AppSettings {
+            accounts: vec![
+                crate::models::ConnectedAccount {
+                    account_id: "first".into(),
+                    account_name: "first@example.com".into(),
+                    provider: "openai".into(),
+                    auth_mode: AuthMode::OAuth,
+                    chatgpt_account_id: None,
+                    secret_configured: true,
+                },
+                crate::models::ConnectedAccount {
+                    account_id: "second".into(),
+                    account_name: "second@example.com".into(),
+                    provider: "openai".into(),
+                    auth_mode: AuthMode::OAuth,
+                    chatgpt_account_id: None,
+                    secret_configured: true,
+                },
+            ],
+            ..AppSettings::default()
+        };
+        let mut snapshots = HashMap::new();
+        snapshots.insert(
+            "first".into(),
+            QuotaSnapshot {
+                account_id: "first".into(),
+                account_name: "first@example.com".into(),
+                five_hour: Some(QuotaWindow {
+                    used_percent: 4.0,
+                    remaining_percent: 96.0,
+                    reset_at: None,
+                    window_minutes: Some(300),
+                }),
+                seven_day: None,
+                fetched_at: chrono::Utc::now(),
+                source: "probe_headers".into(),
+            },
+        );
+
+        let statuses = account_statuses_from_settings_and_snapshots(&settings, &snapshots);
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].account_name, "first@example.com");
+        assert_eq!(
+            statuses[0]
+                .five_hour
+                .as_ref()
+                .map(|window| window.remaining_percent),
+            Some(96.0)
+        );
+        assert_eq!(statuses[1].account_name, "second@example.com");
+        assert!(statuses[1].five_hour.is_none());
     }
 }

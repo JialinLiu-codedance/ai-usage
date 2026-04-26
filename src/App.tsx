@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, Copy, Info, KeyRound, Link2, RefreshCw, Settings } from "lucide-react";
+import { ArrowLeft, Copy, Inbox, Info, KeyRound, Link2, Plus, RefreshCw, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -13,29 +13,45 @@ import openaiIcon from "../icons/extracted/openai.svg";
 import openrouterIcon from "../icons/extracted/openrouter.svg";
 import qwenIcon from "../icons/extracted/qwen.svg";
 import zhipuIcon from "../icons/extracted/zhipu.svg";
+import aiUsageLogo from "../icons/ai-usage-logo.svg";
 import {
+  deleteOpenAIAccount,
   getCurrentQuota,
   getSettings,
   completeOpenAIOAuth,
+  resizePanel,
   refreshQuota,
   saveSettings,
   startOpenAIOAuth,
 } from "./lib/tauri";
-import type { AppSettings, AppStatus, QuotaWindow, SaveSettingsInput } from "./lib/types";
+import {
+  hasGeneratedOpenAIAuthLink,
+  shouldApplyOAuthStartResult,
+  shouldResetOpenAIAuthDraft,
+} from "./lib/oauth-auth-state";
+import { remainingQuotaProgressValue } from "./lib/quota-display";
+import type {
+  AccountQuotaStatus,
+  AppSettings,
+  AppStatus,
+  ConnectedAccount,
+  QuotaWindow,
+  SaveSettingsInput,
+} from "./lib/types";
 
 type PanelView = "overview" | "settings" | "add-account" | "openai-auth";
+type AddAccountBackView = Extract<PanelView, "overview" | "settings">;
 type Tone = "success" | "warning" | "danger" | "muted";
+const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const PANEL_WIDTH = 420;
 
 const emptyStatus: AppStatus = {
   snapshot: null,
+  accounts: [],
   refresh_status: "idle",
   last_error: null,
   last_refreshed_at: null,
 };
-
-function clampPercent(value: number): number {
-  return Math.max(0, Math.min(100, value));
-}
 
 function quotaTone(value: number, threshold: number): Tone {
   if (value <= threshold) {
@@ -48,29 +64,82 @@ function quotaTone(value: number, threshold: number): Tone {
 }
 
 function formatPercent(window: QuotaWindow | null): string {
-  return `${Math.round(window?.remaining_percent ?? 0)}%`;
+  if (!window) {
+    return "--";
+  }
+  return `${Math.round(window.remaining_percent)}%`;
 }
 
 function accountLabel(settings: AppSettings, status: AppStatus): string {
   return status.snapshot?.account_name || settings.account_name || "OpenAI Account";
 }
 
-function accountType(settings: AppSettings): string {
-  return settings.auth_mode === "oauth" ? "OpenAI" : "OpenAI";
+function hasConnectedAccount(settings: AppSettings, status: AppStatus): boolean {
+  return settings.accounts.some((account) => account.secret_configured) || settings.secret_configured || Boolean(status.snapshot);
 }
 
 function accountSubtitle(settings: AppSettings, status: AppStatus): string {
   const label = accountLabel(settings, status);
-  return label.includes("@") ? label : "john@example.com";
+  return label.trim() || "OpenAI Account";
+}
+
+function connectedAccounts(settings: AppSettings, status: AppStatus): ConnectedAccount[] {
+  const configuredAccounts = settings.accounts.filter((account) => account.secret_configured);
+  if (configuredAccounts.length > 0) {
+    return configuredAccounts;
+  }
+  if (!hasConnectedAccount(settings, status)) {
+    return [];
+  }
+  return [
+    {
+      account_id: settings.account_id,
+      account_name: accountSubtitle(settings, status),
+      provider: "openai",
+      auth_mode: settings.auth_mode,
+      chatgpt_account_id: settings.chatgpt_account_id,
+      secret_configured: settings.secret_configured,
+    },
+  ];
+}
+
+function connectedAccountSubtitle(account: ConnectedAccount): string {
+  return account.account_name.trim() || "OpenAI Account";
+}
+
+function quotaAccounts(settings: AppSettings, status: AppStatus): AccountQuotaStatus[] {
+  if (status.accounts.length > 0) {
+    return status.accounts;
+  }
+  return connectedAccounts(settings, status).map((account) => {
+    const snapshot = status.snapshot?.account_id === account.account_id ? status.snapshot : null;
+    return {
+      account_id: account.account_id,
+      account_name: connectedAccountSubtitle(account),
+      five_hour: snapshot?.five_hour ?? null,
+      seven_day: snapshot?.seven_day ?? null,
+      fetched_at: snapshot?.fetched_at ?? null,
+      source: snapshot?.source ?? null,
+    };
+  });
+}
+
+function quotaAccountSubtitle(account: AccountQuotaStatus): string {
+  return account.account_name.trim() || "OpenAI Account";
 }
 
 export default function App() {
   const panelRootRef = useRef<HTMLElement | null>(null);
+  const lastPanelSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const currentViewRef = useRef<PanelView>("overview");
+  const oauthRequestIdRef = useRef(0);
   const [view, setView] = useState<PanelView>("overview");
+  const [addAccountBackView, setAddAccountBackView] = useState<AddAccountBackView>("settings");
   const [status, setStatus] = useState<AppStatus>(emptyStatus);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [oauthStarting, setOauthStarting] = useState(false);
+  const [oauthTargetAccountId, setOAuthTargetAccountId] = useState<string | null>(null);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [authCode, setAuthCode] = useState("");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
@@ -97,13 +166,53 @@ export default function App() {
     }
 
     void bootstrap();
-    const unlistenPanel = listen("show-main-panel", () => setView("overview"));
-    const unlistenSettings = listen("show-settings-window", () => setView("settings"));
+    if (!isTauriRuntime) {
+      return undefined;
+    }
+    const unlistenPanel = listen("show-main-panel", () => navigateToView("overview"));
     return () => {
       void unlistenPanel.then((dispose) => dispose());
-      void unlistenSettings.then((dispose) => dispose());
     };
   }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime || !panelRootRef.current) {
+      return undefined;
+    }
+
+    const panelRoot = panelRootRef.current;
+    let frameId: number | null = null;
+
+    const scheduleResize = () => {
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+
+      frameId = requestAnimationFrame(() => {
+        frameId = null;
+        const measuredElement = panelRoot.firstElementChild instanceof HTMLElement ? panelRoot.firstElementChild : panelRoot;
+        const nextHeight = Math.ceil(measuredElement.scrollHeight);
+        const lastPanelSize = lastPanelSizeRef.current;
+        if (!nextHeight || (lastPanelSize?.width === PANEL_WIDTH && lastPanelSize.height === nextHeight)) {
+          return;
+        }
+
+        lastPanelSizeRef.current = { width: PANEL_WIDTH, height: nextHeight };
+        void resizePanel(PANEL_WIDTH, nextHeight);
+      });
+    };
+
+    const observer = new ResizeObserver(scheduleResize);
+    observer.observe(panelRoot);
+    scheduleResize();
+
+    return () => {
+      observer.disconnect();
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+    };
+  }, [view, loading]);
 
   function applySettings(nextSettings: AppSettings) {
     setSettings(nextSettings);
@@ -147,20 +256,51 @@ export default function App() {
   }
 
   async function handleOAuth() {
+    const requestId = oauthRequestIdRef.current + 1;
+    oauthRequestIdRef.current = requestId;
     setOauthStarting(true);
     setSettingsMessage(null);
+    const shouldApplyStartResult = () =>
+      shouldApplyOAuthStartResult(currentViewRef.current, oauthRequestIdRef.current, requestId);
     try {
-      const nextAuthUrl = await startOpenAIOAuth();
-      setAuthUrl(nextAuthUrl);
+      const nextAuthUrl = await startOpenAIOAuth(oauthTargetAccountId);
+      if (shouldApplyStartResult()) {
+        setAuthUrl(nextAuthUrl);
+      }
     } catch (error) {
-      setSettingsMessage(error instanceof Error ? error.message : "启动 OAuth 失败");
+      if (shouldApplyStartResult()) {
+        setSettingsMessage(error instanceof Error ? error.message : "启动 OAuth 失败");
+      }
     } finally {
-      setOauthStarting(false);
+      if (shouldApplyStartResult()) {
+        setOauthStarting(false);
+      }
     }
+  }
+
+  function resetOAuthDraft() {
+    oauthRequestIdRef.current += 1;
+    setAuthUrl(null);
+    setAuthCode("");
+    setOauthStarting(false);
+    setOAuthTargetAccountId(null);
+  }
+
+  function navigateToView(nextView: PanelView) {
+    const previousView = currentViewRef.current;
+    currentViewRef.current = nextView;
+    if (shouldResetOpenAIAuthDraft(previousView, nextView)) {
+      resetOAuthDraft();
+    }
+    setView(nextView);
   }
 
   async function handleCompleteOAuth() {
     setSettingsMessage(null);
+    if (!hasGeneratedOpenAIAuthLink(authUrl)) {
+      setSettingsMessage("请先重新生成授权链接");
+      return;
+    }
     if (!authCode.trim()) {
       setSettingsMessage("请先输入授权链接或 Code");
       return;
@@ -170,7 +310,7 @@ export default function App() {
       const result = await completeOpenAIOAuth(authCode.trim());
       if (result.phase === "success") {
         setSettingsMessage(null);
-        setView("settings");
+        navigateToView("settings");
         const [nextStatus, nextSettings] = await Promise.all([getCurrentQuota(), getSettings()]);
         setStatus(nextStatus);
         applySettings(nextSettings);
@@ -179,6 +319,29 @@ export default function App() {
       }
     } catch (error) {
       setSettingsMessage(error instanceof Error ? error.message : "完成授权失败");
+    }
+  }
+
+  function openAddAccount(backView: AddAccountBackView) {
+    setSettingsMessage(null);
+    setAddAccountBackView(backView);
+    navigateToView("add-account");
+  }
+
+  function openOpenAIAuth(accountId: string | null) {
+    setSettingsMessage(null);
+    setOAuthTargetAccountId(accountId);
+    navigateToView("openai-auth");
+  }
+
+  async function handleDeleteOpenAIAccount(accountId: string) {
+    setSettingsMessage(null);
+    try {
+      const nextSettings = await deleteOpenAIAccount(accountId);
+      applySettings(nextSettings);
+      setStatus(await getCurrentQuota());
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "删除账号失败");
     }
   }
 
@@ -197,7 +360,8 @@ export default function App() {
           status={status}
           settings={settings}
           onRefresh={() => void handleRefresh()}
-          onSettings={() => setView("settings")}
+          onSettings={() => navigateToView("settings")}
+          onAddAccount={() => openAddAccount("overview")}
         />
       ) : null}
 
@@ -208,18 +372,21 @@ export default function App() {
           status={status}
           message={settingsMessage}
           onChange={(nextForm) => void updateSettings(nextForm)}
-          onAddAccount={() => setView("add-account")}
+          onBack={() => navigateToView("overview")}
+          onAddAccount={() => openAddAccount("settings")}
+          onReauthorize={(accountId) => openOpenAIAuth(accountId)}
+          onDeleteAccount={(accountId) => void handleDeleteOpenAIAccount(accountId)}
         />
       ) : null}
 
       {view === "add-account" ? (
         <AddAccountPanel
           message={settingsMessage}
-          onBack={() => setView("settings")}
+          onBack={() => navigateToView(addAccountBackView)}
           onNext={(provider) => {
             setSettingsMessage(null);
             if (provider === "openai") {
-              setView("openai-auth");
+              openOpenAIAuth(null);
               return;
             }
             setSettingsMessage("该平台的接入流程尚未实现");
@@ -233,7 +400,7 @@ export default function App() {
           authCode={authCode}
           oauthStarting={oauthStarting}
           message={settingsMessage}
-          onBack={() => setView("add-account")}
+          onBack={() => navigateToView("add-account")}
           onGenerate={() => void handleOAuth()}
           onComplete={() => void handleCompleteOAuth()}
           onCodeChange={setAuthCode}
@@ -248,16 +415,39 @@ function OverviewPanel({
   settings,
   onRefresh,
   onSettings,
+  onAddAccount,
 }: {
   status: AppStatus;
   settings: AppSettings;
   onRefresh: () => void;
   onSettings: () => void;
+  onAddAccount: () => void;
 }) {
-  const five = status.snapshot?.five_hour ?? null;
-  const seven = status.snapshot?.seven_day ?? null;
   const threshold = settings.low_quota_threshold_percent;
   const stale = status.refresh_status === "error" && Boolean(status.snapshot);
+  const accounts = quotaAccounts(settings, status);
+  const hasAccount = accounts.length > 0 || hasConnectedAccount(settings, status);
+
+  if (!hasAccount) {
+    return (
+      <Card className="overview-panel">
+        <PanelHeader
+          isRefreshing={status.refresh_status === "refreshing"}
+          onRefresh={onRefresh}
+          onSettings={onSettings}
+        />
+        <div className="empty-account-state">
+          <Inbox className="empty-account-icon" aria-hidden="true" />
+          <div className="empty-account-title">暂无账号</div>
+          <p>您还没有添加任何账号，点击下方按钮开始添加</p>
+          <Button className="empty-account-button" onClick={onAddAccount}>
+            <Plus data-icon="inline-start" />
+            添加账号
+          </Button>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card className="overview-panel">
@@ -266,18 +456,45 @@ function OverviewPanel({
         onRefresh={onRefresh}
         onSettings={onSettings}
       />
-      <Card className={`quota-card ${status.refresh_status === "error" ? "quota-card-error" : ""}`}>
-        <div className="overview-account-row">
-          <img className="overview-provider-logo" src={openaiIcon} alt="" aria-hidden="true" />
-          <span className="account-subtitle">{accountSubtitle(settings, status)}</span>
-        </div>
+      {accounts.map((account) => (
+        <QuotaAccountCard
+          key={account.account_id}
+          account={account}
+          threshold={threshold}
+          muted={status.refresh_status === "error"}
+          stale={stale}
+          error={status.last_error}
+        />
+      ))}
+    </Card>
+  );
+}
 
-        {status.last_error ? <div className="inline-error">{status.last_error}</div> : null}
-        {stale ? <div className="stale-text">数据来自缓存</div> : null}
+function QuotaAccountCard({
+  account,
+  threshold,
+  muted,
+  stale,
+  error,
+}: {
+  account: AccountQuotaStatus;
+  threshold: number;
+  muted: boolean;
+  stale: boolean;
+  error: string | null;
+}) {
+  return (
+    <Card className={`quota-card ${muted ? "quota-card-error" : ""}`}>
+      <div className="overview-account-row">
+        <img className="overview-provider-logo" src={openaiIcon} alt="" aria-hidden="true" />
+        <span className="account-subtitle">{quotaAccountSubtitle(account)}</span>
+      </div>
 
-        <QuotaRow label="5H" window={five} threshold={threshold} muted={status.refresh_status === "error"} />
-        <QuotaRow label="7D" window={seven} threshold={threshold} muted={status.refresh_status === "error"} />
-      </Card>
+      {error ? <div className="inline-error">{error}</div> : null}
+      {stale ? <div className="stale-text">数据来自缓存</div> : null}
+
+      <QuotaRow label="5H" window={account.five_hour} threshold={threshold} muted={muted || !account.five_hour} />
+      <QuotaRow label="7D" window={account.seven_day} threshold={threshold} muted={muted || !account.seven_day} />
     </Card>
   );
 }
@@ -293,7 +510,9 @@ function PanelHeader({
 }) {
   return (
     <div className="panel-header">
-      <div className="logo-mark">C</div>
+      <div className="logo-mark">
+        <img className="logo-mark-img" src={aiUsageLogo} alt="" aria-hidden="true" />
+      </div>
       <div className="icon-row">
         <Button
           variant="ghost"
@@ -324,16 +543,15 @@ function QuotaRow({
   threshold: number;
   muted: boolean;
 }) {
-  const remaining = clampPercent(window?.remaining_percent ?? 0);
-  const used = clampPercent(window?.used_percent ?? 0);
-  const tone = muted ? "muted" : quotaTone(remaining, threshold);
+  const remaining = remainingQuotaProgressValue(window);
+  const tone = muted || !window ? "muted" : quotaTone(remaining, threshold);
   return (
     <>
       <div className="quota-row-header">
         <span>{label}</span>
         <span className={`quota-value quota-value-${tone}`}>{formatPercent(window)}</span>
       </div>
-      <Progress value={used} className={`quota-progress quota-progress-${tone}`} />
+      <Progress value={remaining} className={`quota-progress quota-progress-${tone}`} />
     </>
   );
 }
@@ -344,14 +562,20 @@ function SettingsPanel({
   status,
   message,
   onChange,
+  onBack,
   onAddAccount,
+  onReauthorize,
+  onDeleteAccount,
 }: {
   form: SaveSettingsInput;
   settings: AppSettings;
   status: AppStatus;
   message: string | null;
   onChange: (nextForm: SaveSettingsInput) => void;
+  onBack: () => void;
   onAddAccount: () => void;
+  onReauthorize: (accountId: string) => void;
+  onDeleteAccount: (accountId: string) => void;
 }) {
   const [thresholdDraft, setThresholdDraft] = useState(String(form.low_quota_threshold_percent));
 
@@ -367,10 +591,16 @@ function SettingsPanel({
       onChange({ ...form, low_quota_threshold_percent: nextValue });
     }
   }
+  const accounts = connectedAccounts(settings, status);
 
   return (
     <Card className="settings-panel">
-      <h1>设置</h1>
+      <div className="add-header">
+        <Button variant="ghost" size="icon-sm" className="icon-button back-button" onClick={onBack} aria-label="返回">
+          <ArrowLeft data-icon="inline-start" />
+        </Button>
+        <h1>设置</h1>
+      </div>
 
       <section className="settings-section">
         <div className="section-header">
@@ -379,19 +609,31 @@ function SettingsPanel({
             添加账号
           </Button>
         </div>
-        <Card className="account-card settings-account-card">
-          <div className="account-line">
-            <span className="account-title">{accountType(settings)}</span>
-            <span className="account-status">已授权</span>
-          </div>
-          <div className="account-subtitle">{accountSubtitle(settings, status)}</div>
-          <div className="account-actions">
-            <Button variant="secondary" className="account-action-button" onClick={onAddAccount}>
-              重新授权
-            </Button>
-            <Button className="account-delete-button">删除</Button>
-          </div>
-        </Card>
+        {accounts.length > 0 ? (
+          accounts.map((account) => (
+            <Card className="account-card settings-account-card" key={account.account_id}>
+              <div className="account-line">
+                <span className="account-title">OpenAI</span>
+                <span className="account-status">已授权</span>
+              </div>
+              <div className="account-subtitle">{connectedAccountSubtitle(account)}</div>
+              <div className="account-actions">
+                <Button
+                  variant="secondary"
+                  className="account-action-button"
+                  onClick={() => onReauthorize(account.account_id)}
+                >
+                  重新授权
+                </Button>
+                <Button className="account-delete-button" onClick={() => onDeleteAccount(account.account_id)}>
+                  删除
+                </Button>
+              </div>
+            </Card>
+          ))
+        ) : (
+          <div className="settings-empty-account">暂无已连接账号</div>
+        )}
       </section>
 
       <div className="separator" />
