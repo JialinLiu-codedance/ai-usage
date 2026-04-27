@@ -1,19 +1,28 @@
 use crate::{
     errors::{ProviderError, ProviderErrorKind},
+    local_usage,
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ConnectedAccount,
-        ConnectionTestResult, QuotaSnapshot, SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_GLM,
-        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        ConnectionTestResult, LocalTokenUsageRange, LocalTokenUsageReport, QuotaSnapshot,
+        SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX,
+        PROVIDER_OPENAI,
     },
-    oauth, panel, provider, secrets, settings,
+    notifications, oauth, panel, provider, secrets, settings,
     state::StateStore,
     storage,
 };
 use chrono::Utc;
-use std::{collections::HashMap, future::Future};
-use tauri::{AppHandle, State};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    sync::atomic::{AtomicBool, Ordering},
+};
+use tauri::{AppHandle, Emitter, State};
 
 const SNAPSHOTS_FILE: &str = "snapshots.json";
+const TOKEN_USAGE_CACHE_FILE: &str = "local-token-usage-cache.json";
+const TOKEN_USAGE_CACHE_UPDATED_EVENT: &str = "local-token-usage-cache-updated";
+static TOKEN_USAGE_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 pub async fn get_current_quota(
@@ -29,7 +38,15 @@ pub async fn refresh_quota(
     app: AppHandle,
     store: State<'_, StateStore>,
 ) -> Result<AppStatus, String> {
-    refresh_inner(&app, &store).await?;
+    if let Err(error) = refresh_inner(&app, &store).await {
+        let status = store.inner.read().await.clone();
+        if status.last_error.is_some()
+            || matches!(status.refresh_status, crate::models::RefreshStatus::Error)
+        {
+            return Ok(status);
+        }
+        return Err(error);
+    }
     Ok(store.inner.read().await.clone())
 }
 
@@ -236,6 +253,99 @@ pub fn resize_main_panel(app: AppHandle, width: f64, height: f64) -> Result<(), 
     panel::resize_main_panel(&app, width, height)
 }
 
+#[tauri::command]
+pub fn get_local_token_usage(
+    app: AppHandle,
+    range: LocalTokenUsageRange,
+) -> Result<LocalTokenUsageReport, String> {
+    let cache = read_local_token_usage_cache(&app)?;
+    let max_age_minutes = settings::load_settings(&app)
+        .map(|settings| i64::from(settings.refresh_interval_minutes))
+        .unwrap_or(15);
+
+    if cache
+        .as_ref()
+        .map(|cache| local_token_usage_cache_is_stale(cache, max_age_minutes))
+        .unwrap_or(true)
+    {
+        start_local_token_usage_cache_refresh(app.clone());
+    }
+
+    if let Some(cache) = cache {
+        return Ok(cache.report(range));
+    }
+
+    Ok(local_usage::empty_report(
+        range,
+        Some("Token 用量缓存正在后台生成，完成后会自动更新".into()),
+    ))
+}
+
+#[tauri::command]
+pub async fn refresh_local_token_usage(
+    app: AppHandle,
+    range: LocalTokenUsageRange,
+) -> Result<LocalTokenUsageReport, String> {
+    let cache = refresh_local_token_usage_cache(app, true).await?;
+    Ok(cache.report(range))
+}
+
+pub fn ensure_local_token_usage_cache(app: &AppHandle, max_age_minutes: i64) {
+    let should_refresh = read_local_token_usage_cache(app)
+        .map(|cache| {
+            cache
+                .as_ref()
+                .map(|cache| local_token_usage_cache_is_stale(cache, max_age_minutes))
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+    if should_refresh {
+        start_local_token_usage_cache_refresh(app.clone());
+    }
+}
+
+fn start_local_token_usage_cache_refresh(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        match refresh_local_token_usage_cache(app, true).await {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Token usage cache refresh failed: {error}");
+            }
+        }
+    });
+}
+
+async fn refresh_local_token_usage_cache(
+    app: AppHandle,
+    emit_update: bool,
+) -> Result<local_usage::LocalTokenUsageCache, String> {
+    let _guard = claim_local_token_usage_refresh()?;
+    let cache = tauri::async_runtime::spawn_blocking(local_usage::build_cache)
+        .await
+        .map_err(|error| format!("Token 用量缓存任务失败: {error}"))??;
+    storage::write_json(&app, TOKEN_USAGE_CACHE_FILE, &cache)?;
+    if emit_update {
+        let _ = app.emit(TOKEN_USAGE_CACHE_UPDATED_EVENT, ());
+    }
+    Ok(cache)
+}
+
+#[derive(Debug)]
+struct LocalTokenUsageRefreshGuard;
+
+impl Drop for LocalTokenUsageRefreshGuard {
+    fn drop(&mut self) {
+        TOKEN_USAGE_CACHE_REFRESHING.store(false, Ordering::Release);
+    }
+}
+
+fn claim_local_token_usage_refresh() -> Result<LocalTokenUsageRefreshGuard, String> {
+    if TOKEN_USAGE_CACHE_REFRESHING.swap(true, Ordering::AcqRel) {
+        return Err("Token 用量正在刷新，请稍后再试".into());
+    }
+    Ok(LocalTokenUsageRefreshGuard)
+}
+
 pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), String> {
     let settings = settings::load_settings(app)?;
 
@@ -260,6 +370,8 @@ pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), St
     }
 
     let mut errors = Vec::new();
+    let mut account_errors = HashMap::new();
+    let mut updated_account_ids = HashSet::new();
     let mut latest_active_snapshot = None;
     for account in accounts {
         let account_settings = settings_for_refresh_account(&settings, &account);
@@ -269,8 +381,10 @@ pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), St
                     latest_active_snapshot = Some(snapshot.clone());
                 }
                 write_account_snapshot(app, &account.account_id, &snapshot)?;
+                updated_account_ids.insert(account.account_id.clone());
             }
             Err(error) => {
+                account_errors.insert(account.account_id.clone(), error.message.clone());
                 errors.push(format!("{}: {}", account.account_name, error.message));
             }
         }
@@ -278,22 +392,36 @@ pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), St
 
     let snapshots = read_account_snapshots(app)?;
     let cached_active_snapshot = snapshots.get(&settings.account_id).cloned();
-    let mut guard = store.inner.write().await;
-    guard.snapshot = latest_active_snapshot.or(cached_active_snapshot);
-    guard.accounts = account_statuses_from_settings_and_snapshots(&settings, &snapshots);
-    guard.last_refreshed_at = Some(Utc::now());
+    let account_statuses =
+        account_statuses_from_settings_snapshots_and_errors(&settings, &snapshots, &account_errors);
+    {
+        let mut guard = store.inner.write().await;
+        guard.snapshot = latest_active_snapshot.or(cached_active_snapshot);
+        guard.accounts = account_statuses.clone();
+        guard.last_refreshed_at = Some(Utc::now());
+
+        if errors.is_empty() {
+            guard.refresh_status = crate::models::RefreshStatus::Ok;
+            guard.last_error = None;
+        } else {
+            guard.refresh_status = crate::models::RefreshStatus::Error;
+            guard.last_error = Some(errors.join("；"));
+        }
+    }
+
+    if !updated_account_ids.is_empty() {
+        let _ = notifications::notify_low_quota_after_refresh(
+            app,
+            &settings,
+            &account_statuses,
+            &updated_account_ids,
+        );
+    }
 
     if errors.is_empty() {
-        guard.refresh_status = crate::models::RefreshStatus::Ok;
-        guard.last_error = None;
         Ok(())
     } else {
-        guard.refresh_status = crate::models::RefreshStatus::Error;
-        guard.last_error = Some(errors.join("；"));
-        Err(guard
-            .last_error
-            .clone()
-            .unwrap_or_else(|| "刷新失败".to_string()))
+        Err(errors.join("；"))
     }
 }
 
@@ -445,6 +573,22 @@ fn read_account_snapshots(app: &AppHandle) -> Result<HashMap<String, QuotaSnapsh
     )
 }
 
+fn read_local_token_usage_cache(
+    app: &AppHandle,
+) -> Result<Option<local_usage::LocalTokenUsageCache>, String> {
+    storage::read_json::<local_usage::LocalTokenUsageCache>(app, TOKEN_USAGE_CACHE_FILE)
+}
+
+fn local_token_usage_cache_is_stale(
+    cache: &local_usage::LocalTokenUsageCache,
+    max_age_minutes: i64,
+) -> bool {
+    if max_age_minutes <= 0 {
+        return true;
+    }
+    (Utc::now() - cache.generated_at).num_minutes() >= max_age_minutes
+}
+
 fn write_account_snapshot(
     app: &AppHandle,
     account_id: &str,
@@ -466,9 +610,23 @@ fn account_statuses_from_settings_and_snapshots(
     settings: &AppSettings,
     snapshots: &HashMap<String, QuotaSnapshot>,
 ) -> Vec<AccountQuotaStatus> {
+    account_statuses_from_settings_snapshots_and_errors(settings, snapshots, &HashMap::new())
+}
+
+fn account_statuses_from_settings_snapshots_and_errors(
+    settings: &AppSettings,
+    snapshots: &HashMap<String, QuotaSnapshot>,
+    errors: &HashMap<String, String>,
+) -> Vec<AccountQuotaStatus> {
     accounts_for_status(settings)
         .into_iter()
-        .map(|account| account_status_from_snapshot(&account, snapshots.get(&account.account_id)))
+        .map(|account| {
+            account_status_from_snapshot(
+                &account,
+                snapshots.get(&account.account_id),
+                errors.get(&account.account_id),
+            )
+        })
         .collect()
 }
 
@@ -492,6 +650,7 @@ fn accounts_for_status(settings: &AppSettings) -> Vec<ConnectedAccount> {
 fn account_status_from_snapshot(
     account: &ConnectedAccount,
     snapshot: Option<&QuotaSnapshot>,
+    last_error: Option<&String>,
 ) -> AccountQuotaStatus {
     AccountQuotaStatus {
         account_id: account.account_id.clone(),
@@ -501,6 +660,7 @@ fn account_status_from_snapshot(
         seven_day: snapshot.and_then(|snapshot| snapshot.seven_day.clone()),
         fetched_at: snapshot.map(|snapshot| snapshot.fetched_at),
         source: snapshot.map(|snapshot| snapshot.source.clone()),
+        last_error: last_error.cloned(),
     }
 }
 
@@ -677,6 +837,54 @@ mod tests {
         );
         assert_eq!(statuses[1].account_name, "second@example.com");
         assert!(statuses[1].five_hour.is_none());
+    }
+
+    #[test]
+    fn account_statuses_attach_refresh_errors_to_matching_accounts() {
+        let settings = AppSettings {
+            accounts: vec![
+                crate::models::ConnectedAccount {
+                    account_id: "first".into(),
+                    account_name: "first@example.com".into(),
+                    provider: "openai".into(),
+                    auth_mode: AuthMode::OAuth,
+                    chatgpt_account_id: None,
+                    secret_configured: true,
+                },
+                crate::models::ConnectedAccount {
+                    account_id: "second".into(),
+                    account_name: "second@example.com".into(),
+                    provider: "openai".into(),
+                    auth_mode: AuthMode::OAuth,
+                    chatgpt_account_id: None,
+                    secret_configured: true,
+                },
+            ],
+            ..AppSettings::default()
+        };
+        let snapshots = HashMap::new();
+        let mut errors = HashMap::new();
+        errors.insert("second".to_string(), "认证失败，请重新授权".to_string());
+
+        let statuses =
+            account_statuses_from_settings_snapshots_and_errors(&settings, &snapshots, &errors);
+
+        assert_eq!(statuses[0].last_error, None);
+        assert_eq!(
+            statuses[1].last_error.as_deref(),
+            Some("认证失败，请重新授权")
+        );
+    }
+
+    #[test]
+    fn local_token_usage_refresh_guard_rejects_parallel_refreshes_and_releases() {
+        let guard = claim_local_token_usage_refresh().unwrap();
+
+        let error = claim_local_token_usage_refresh().unwrap_err();
+
+        assert_eq!(error, "Token 用量正在刷新，请稍后再试");
+        drop(guard);
+        assert!(claim_local_token_usage_refresh().is_ok());
     }
 
     #[test]

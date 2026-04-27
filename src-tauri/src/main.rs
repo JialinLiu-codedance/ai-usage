@@ -1,6 +1,8 @@
 mod commands;
 mod errors;
+mod local_usage;
 mod models;
+mod notifications;
 mod oauth;
 mod panel;
 mod provider;
@@ -25,6 +27,7 @@ const TRAY_USAGE_LINE_WIDTH: usize = 52;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(oauth::OAuthStore::default())
         .manage(panel::PanelAnchor::default())
         .manage(state::StateStore::default())
@@ -64,6 +67,10 @@ fn main() {
                 {
                     let state = handle.state::<state::StateStore>();
                     let _ = commands::hydrate_cached_snapshot(&handle, &state).await;
+                    let token_cache_max_age = settings::load_settings(&handle)
+                        .map(|settings| i64::from(settings.refresh_interval_minutes))
+                        .unwrap_or(15);
+                    commands::ensure_local_token_usage_cache(&handle, token_cache_max_age);
                     refresh_tray_menu_from_state(&handle).await;
                 }
 
@@ -71,6 +78,11 @@ fn main() {
                     let state = handle.state::<state::StateStore>();
                     let maybe_settings = settings::load_settings(&handle);
                     if let Ok(settings) = maybe_settings {
+                        commands::ensure_local_token_usage_cache(
+                            &handle,
+                            i64::from(settings.refresh_interval_minutes),
+                        );
+
                         let should_refresh = {
                             let guard = state.inner.read().await;
                             if matches!(guard.refresh_status, models::RefreshStatus::Refreshing) {
@@ -117,6 +129,8 @@ fn main() {
             commands::delete_openai_account,
             commands::delete_connected_account,
             commands::resize_main_panel,
+            commands::get_local_token_usage,
+            commands::refresh_local_token_usage,
             sync_tray_menu,
         ])
         .build(tauri::generate_context!())
@@ -514,6 +528,7 @@ mod tests {
                     seven_day: None,
                     fetched_at: Some(chrono::Utc::now()),
                     source: Some("probe_headers".into()),
+                    last_error: None,
                 },
                 models::AccountQuotaStatus {
                     account_id: "second".into(),
@@ -528,6 +543,7 @@ mod tests {
                     }),
                     fetched_at: Some(chrono::Utc::now()),
                     source: Some("probe_headers".into()),
+                    last_error: None,
                 },
             ],
             ..models::AppStatus::default()
@@ -593,6 +609,7 @@ mod tests {
                 seven_day: None,
                 fetched_at: Some(chrono::Utc::now()),
                 source: Some("minimax_coding_plan".into()),
+                last_error: None,
             }],
             ..models::AppStatus::default()
         };

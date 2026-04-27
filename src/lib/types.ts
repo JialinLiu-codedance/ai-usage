@@ -64,6 +64,7 @@ export interface AccountQuotaStatus {
   seven_day: QuotaWindow | null;
   fetched_at: string | null;
   source: "probe_headers" | string | null;
+  last_error: string | null;
 }
 
 export interface AppStatus {
@@ -84,4 +85,39 @@ export interface OAuthStatus {
   message: string | null;
   email: string | null;
   auth_url: string | null;
+}
+
+export type LocalTokenUsageRange = "today" | "last3Days" | "thisWeek" | "thisMonth";
+
+export interface LocalTokenUsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  total_tokens: number;
+  cache_hit_rate_percent: number;
+}
+
+export interface LocalTokenUsageDay extends Omit<LocalTokenUsageTotals, "cache_hit_rate_percent"> {
+  date: string;
+  models: LocalTokenUsageModel[];
+}
+
+export interface LocalTokenUsageModel extends Omit<LocalTokenUsageTotals, "cache_hit_rate_percent"> {
+  model: string;
+}
+
+export interface LocalTokenUsageTool extends Omit<LocalTokenUsageTotals, "cache_hit_rate_percent"> {
+  tool: string;
+}
+
+export interface LocalTokenUsageReport {
+  range: LocalTokenUsageRange;
+  totals: LocalTokenUsageTotals;
+  days: LocalTokenUsageDay[];
+  models: LocalTokenUsageModel[];
+  tools: LocalTokenUsageTool[];
+  missing_sources: string[];
+  warnings: string[];
+  generated_at: string;
 }

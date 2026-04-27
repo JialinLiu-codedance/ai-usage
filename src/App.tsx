@@ -16,7 +16,9 @@ import zhipuIcon from "../icons/extracted/zhipu.svg";
 import aiUsageLogo from "../icons/ai-usage-logo.svg";
 import {
   deleteConnectedAccount,
+  ensureNotificationPermission,
   getCurrentQuota,
+  getLocalTokenUsage,
   getSettings,
   completeAnthropicOAuth,
   completeOpenAIOAuth,
@@ -25,6 +27,7 @@ import {
   importMiniMaxAccount,
   resizePanel,
   refreshQuota,
+  refreshLocalTokenUsage,
   saveSettings,
   startAnthropicOAuth,
   startOpenAIOAuth,
@@ -34,12 +37,23 @@ import {
   shouldApplyOAuthStartResult,
   shouldResetOAuthAuthDraft,
 } from "./lib/oauth-auth-state";
-import { quotaDisplayRows, remainingQuotaProgressValue } from "./lib/quota-display";
+import { quotaAccountCardState, quotaDisplayRows, remainingQuotaProgressValue } from "./lib/quota-display";
+import {
+  buildTokenUsageChartLegend,
+  buildTokenUsageChartRows,
+  formatCompactTokens,
+  modelUsageRows,
+  tokenUsageRangeLabels,
+  usageToolLabel,
+} from "./lib/token-usage-display";
 import type {
   AccountQuotaStatus,
   AppSettings,
   AppStatus,
   ConnectedAccount,
+  LocalTokenUsageRange,
+  LocalTokenUsageReport,
+  LocalTokenUsageTotals,
   QuotaWindow,
   SaveSettingsInput,
 } from "./lib/types";
@@ -47,6 +61,7 @@ import type {
 type PanelView = "overview" | "settings" | "add-account" | "oauth-auth" | "kimi-auth" | "glm-auth" | "minimax-auth";
 type AddAccountBackView = Extract<PanelView, "overview" | "settings">;
 type OAuthProviderKey = "openai" | "anthropic";
+type SettingsTab = "quota" | "tokens";
 type Tone = "success" | "warning" | "danger" | "muted";
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const PANEL_WIDTH = 420;
@@ -59,8 +74,8 @@ const emptyStatus: AppStatus = {
   last_refreshed_at: null,
 };
 
-function quotaTone(value: number, threshold: number): Tone {
-  if (value <= threshold) {
+function quotaTone(value: number): Tone {
+  if (value <= 10) {
     return "danger";
   }
   if (value <= 50) {
@@ -74,6 +89,16 @@ function formatPercent(window: QuotaWindow | null): string {
     return "--";
   }
   return `${Math.round(window.remaining_percent)}%`;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  return fallback;
 }
 
 function accountLabel(settings: AppSettings, status: AppStatus): string {
@@ -127,6 +152,7 @@ function quotaAccounts(settings: AppSettings, status: AppStatus): AccountQuotaSt
       seven_day: snapshot?.seven_day ?? null,
       fetched_at: snapshot?.fetched_at ?? null,
       source: snapshot?.source ?? null,
+      last_error: null,
     };
   });
 }
@@ -226,7 +252,7 @@ export default function App() {
     chatgpt_account_id: null,
     refresh_interval_minutes: 15,
     low_quota_threshold_percent: 10,
-    notify_on_low_quota: true,
+    notify_on_low_quota: false,
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     auth_secret: "",
@@ -308,22 +334,42 @@ export default function App() {
   }
 
   async function handleRefresh() {
-    setStatus((current) => ({ ...current, refresh_status: "refreshing", last_error: null }));
+    setStatus((current) => ({
+      ...current,
+      accounts: current.accounts.map((account) => ({ ...account, last_error: null })),
+      refresh_status: "refreshing",
+      last_error: null,
+    }));
     try {
       setStatus(await refreshQuota());
     } catch (error) {
       setStatus((current) => ({
         ...current,
         refresh_status: "error",
-        last_error: error instanceof Error ? error.message : "刷新失败",
+        last_error: errorMessage(error, "刷新失败"),
       }));
     }
   }
 
   async function updateSettings(nextForm: SaveSettingsInput) {
-    setForm(nextForm);
+    const normalizedForm = { ...nextForm, notify_on_reset: false };
+    if (!form.notify_on_low_quota && normalizedForm.notify_on_low_quota) {
+      try {
+        if (!(await ensureNotificationPermission())) {
+          setForm({ ...normalizedForm, notify_on_low_quota: false });
+          setSettingsMessage("需要允许系统通知后才能开启低额度提醒");
+          return;
+        }
+      } catch (error) {
+        setForm({ ...normalizedForm, notify_on_low_quota: false });
+        setSettingsMessage(error instanceof Error ? error.message : "无法请求系统通知权限");
+        return;
+      }
+    }
+
+    setForm(normalizedForm);
     try {
-      applySettings(await saveSettings(nextForm));
+      applySettings(await saveSettings(normalizedForm));
       setSettingsMessage(null);
     } catch (error) {
       setSettingsMessage(error instanceof Error ? error.message : "设置保存失败");
@@ -687,10 +733,10 @@ function OverviewPanel({
   onSettings: () => void;
   onAddAccount: () => void;
 }) {
-  const threshold = settings.low_quota_threshold_percent;
-  const stale = status.refresh_status === "error" && Boolean(status.snapshot);
   const accounts = quotaAccounts(settings, status);
   const hasAccount = accounts.length > 0 || hasConnectedAccount(settings, status);
+  const hasAccountErrors = accounts.some((account) => Boolean(account.last_error));
+  const globalError = status.refresh_status === "error" && !hasAccountErrors ? status.last_error : null;
 
   if (!hasAccount) {
     return (
@@ -720,15 +766,9 @@ function OverviewPanel({
         onRefresh={onRefresh}
         onSettings={onSettings}
       />
+      {globalError ? <div className="inline-error">{globalError}</div> : null}
       {accounts.map((account) => (
-        <QuotaAccountCard
-          key={account.account_id}
-          account={account}
-          threshold={threshold}
-          muted={status.refresh_status === "error"}
-          stale={stale}
-          error={status.last_error}
-        />
+        <QuotaAccountCard key={account.account_id} account={account} />
       ))}
     </Card>
   );
@@ -736,20 +776,13 @@ function OverviewPanel({
 
 function QuotaAccountCard({
   account,
-  threshold,
-  muted,
-  stale,
-  error,
 }: {
   account: AccountQuotaStatus;
-  threshold: number;
-  muted: boolean;
-  stale: boolean;
-  error: string | null;
 }) {
   const icon = providerIconConfig(account.provider);
+  const cardState = quotaAccountCardState(account);
   return (
-    <Card className={`quota-card ${muted ? "quota-card-error" : ""}`}>
+    <Card className={`quota-card ${cardState.muted ? "quota-card-error" : ""}`}>
       <div className="overview-account-row">
         <span className="overview-provider-logo">
           <ProviderIcon icon={icon.icon} iconMode={icon.iconMode} />
@@ -757,16 +790,15 @@ function QuotaAccountCard({
         <span className="account-subtitle">{quotaAccountSubtitle(account)}</span>
       </div>
 
-      {error ? <div className="inline-error">{error}</div> : null}
-      {stale ? <div className="stale-text">数据来自缓存</div> : null}
+      {cardState.error ? <div className="inline-error">{cardState.error}</div> : null}
+      {cardState.stale ? <div className="stale-text">数据来自缓存</div> : null}
 
       {quotaDisplayRows(account).map((row) => (
         <QuotaRow
           key={row.label}
           label={row.label}
           window={row.window}
-          threshold={threshold}
-          muted={muted}
+          muted={cardState.muted}
         />
       ))}
     </Card>
@@ -809,16 +841,14 @@ function PanelHeader({
 function QuotaRow({
   label,
   window,
-  threshold,
   muted,
 }: {
   label: string;
   window: QuotaWindow | null;
-  threshold: number;
   muted: boolean;
 }) {
   const remaining = remainingQuotaProgressValue(window);
-  const tone = muted || !window ? "muted" : quotaTone(remaining, threshold);
+  const tone = muted || !window ? "muted" : quotaTone(remaining);
   return (
     <>
       <div className="quota-row-header">
@@ -852,10 +882,74 @@ function SettingsPanel({
   onDeleteAccount: (accountId: string) => void;
 }) {
   const [thresholdDraft, setThresholdDraft] = useState(String(form.low_quota_threshold_percent));
+  const [activeTab, setActiveTab] = useState<SettingsTab>("quota");
+  const [tokenRange, setTokenRange] = useState<LocalTokenUsageRange>("thisMonth");
+  const [tokenReportsByRange, setTokenReportsByRange] = useState<Partial<Record<LocalTokenUsageRange, LocalTokenUsageReport>>>({});
+  const [tokenLoading, setTokenLoading] = useState(false);
+  const [tokenRefreshing, setTokenRefreshing] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   useEffect(() => {
     setThresholdDraft(String(form.low_quota_threshold_percent));
   }, [form.low_quota_threshold_percent]);
+
+  useEffect(() => {
+    if (activeTab !== "tokens") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const cachedReport = tokenReportsByRange[tokenRange] ?? null;
+    setTokenLoading(!cachedReport);
+    setTokenError(null);
+
+    getLocalTokenUsage(tokenRange)
+      .then((report) => {
+        if (!cancelled) {
+          setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setTokenError(errorMessage(error, "Token 用量读取失败"));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setTokenLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, tokenRange]);
+
+  useEffect(() => {
+    if (!isTauriRuntime || activeTab !== "tokens") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const unlisten = listen("local-token-usage-cache-updated", () => {
+      getLocalTokenUsage(tokenRange)
+        .then((report) => {
+          if (!cancelled) {
+            setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setTokenError(errorMessage(error, "Token 用量读取失败"));
+          }
+        });
+    });
+
+    return () => {
+      cancelled = true;
+      void unlisten.then((dispose) => dispose());
+    };
+  }, [activeTab, tokenRange]);
 
   function commitThreshold(value: string) {
     const parsed = Number.parseInt(value, 10);
@@ -865,7 +959,22 @@ function SettingsPanel({
       onChange({ ...form, low_quota_threshold_percent: nextValue });
     }
   }
+
+  async function handleTokenRefresh() {
+    setTokenRefreshing(true);
+    setTokenError(null);
+    try {
+      const report = await refreshLocalTokenUsage(tokenRange);
+      setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
+    } catch (error) {
+      setTokenError(errorMessage(error, "Token 用量刷新失败"));
+    } finally {
+      setTokenRefreshing(false);
+    }
+  }
+
   const accounts = connectedAccounts(settings, status);
+  const tokenReport = tokenReportsByRange[tokenRange] ?? null;
 
   return (
     <Card className="settings-panel">
@@ -876,6 +985,29 @@ function SettingsPanel({
         <h1>设置</h1>
       </div>
 
+      <div className="settings-tabs" role="tablist" aria-label="设置分类">
+        <button
+          type="button"
+          className={`settings-tab ${activeTab === "quota" ? "settings-tab-active" : ""}`}
+          role="tab"
+          aria-selected={activeTab === "quota"}
+          onClick={() => setActiveTab("quota")}
+        >
+          额度及账号
+        </button>
+        <button
+          type="button"
+          className={`settings-tab ${activeTab === "tokens" ? "settings-tab-active" : ""}`}
+          role="tab"
+          aria-selected={activeTab === "tokens"}
+          onClick={() => setActiveTab("tokens")}
+        >
+          Token 用量统计
+        </button>
+      </div>
+
+      {activeTab === "quota" ? (
+        <>
       <section className="settings-section">
         <div className="section-header">
           <h2>已连接账号</h2>
@@ -981,21 +1113,227 @@ function SettingsPanel({
             <span>%</span>
           </label>
         </div>
-        <div className="split-row">
+        <div className="split-row split-row-disabled">
           <span>重置提醒</span>
           <Switch
             aria-label="重置提醒"
             className="settings-switch"
             size="panel"
-            checked={form.notify_on_reset}
-            onCheckedChange={(checked) => onChange({ ...form, notify_on_reset: checked })}
+            checked={false}
+            disabled
           />
         </div>
       </section>
+        </>
+      ) : (
+        <TokenUsagePanel
+          report={tokenReport}
+          range={tokenRange}
+          loading={tokenLoading}
+          refreshing={tokenRefreshing}
+          error={tokenError}
+          onRangeChange={setTokenRange}
+          onRefresh={handleTokenRefresh}
+        />
+      )}
 
       {message ? <div className="settings-message">{message}</div> : null}
     </Card>
   );
+}
+
+function TokenUsagePanel({
+  report,
+  range,
+  loading,
+  refreshing,
+  error,
+  onRangeChange,
+  onRefresh,
+}: {
+  report: LocalTokenUsageReport | null;
+  range: LocalTokenUsageRange;
+  loading: boolean;
+  refreshing: boolean;
+  error: string | null;
+  onRangeChange: (range: LocalTokenUsageRange) => void;
+  onRefresh: () => void;
+}) {
+  const chartRows = report ? buildTokenUsageChartRows(report) : [];
+  const chartLegend = report ? buildTokenUsageChartLegend(report) : [];
+  const modelRows = report ? modelUsageRows(report, 4) : [];
+  const tools = report?.tools.filter((tool) => tool.total_tokens > 0) ?? [];
+  const notices = [
+    ...(report?.warnings ?? []),
+    ...(report?.missing_sources.map((source) => `未找到 ${source}`) ?? []),
+  ];
+
+  return (
+    <section className="token-usage-panel">
+      <div className="token-range-selector" aria-label="Token 用量时间范围">
+        {tokenUsageRangeOptions.map((option) => (
+          <button
+            key={option}
+            type="button"
+            className={`token-range-button ${range === option ? "token-range-button-active" : ""}`}
+            onClick={() => onRangeChange(option)}
+          >
+            {tokenUsageRangeLabels[option]}
+          </button>
+        ))}
+      </div>
+
+      {error ? <div className="inline-error">{error}</div> : null}
+      {loading && !report ? <div className="token-loading">读取本地日志...</div> : null}
+
+      {report ? (
+        <>
+          <TokenUsageSummary totals={report.totals} />
+          {report.totals.total_tokens === 0 ? <div className="token-empty">当前时间范围暂无 Token 用量数据</div> : null}
+
+          <section className="token-card">
+            <div className="token-section-header">
+              <h2>每日趋势</h2>
+              <div className="token-legend" aria-label="模型图例">
+                {chartLegend.map((item) => (
+                  <span className={`token-legend-item ${item.colorClass}`} key={item.model}>
+                    {item.label}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className={`token-chart token-chart-range-${report.range}`} aria-label="每日 Token 趋势">
+              {chartRows.map((row) => (
+                <div className="token-chart-column" key={row.date}>
+                  <div className="token-chart-bar" title={row.label}>
+                    {row.segments.map((segment) => (
+                      <span
+                        className={`token-chart-segment ${segment.colorClass}`}
+                        key={segment.model}
+                        style={tokenSegmentStyle(segment.height)}
+                        title={`${segment.model} ${formatCompactTokens(segment.totalTokens)}`}
+                      />
+                    ))}
+                  </div>
+                  <span>{row.label}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="token-card">
+            <div className="token-section-header">
+              <h2>模型排行</h2>
+              <span>{modelRows.length} 个模型</span>
+            </div>
+            {modelRows.length > 0 ? (
+              <div className="token-model-list">
+                {modelRows.map((model) => (
+                  <div className="token-model-row" key={model.model}>
+                    <div className="token-model-row-header">
+                      <span>{model.model}</span>
+                      <strong>{model.displayTotal}</strong>
+                    </div>
+                    <div className="token-model-progress">
+                      <span style={{ width: `${model.percent}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="token-empty">暂无模型数据</div>
+            )}
+          </section>
+
+          {tools.length > 0 ? (
+            <section className="token-tool-strip" aria-label="工具来源">
+              {tools.map((tool) => (
+                <span key={tool.tool}>
+                  {usageToolLabel(tool.tool)}
+                  <strong>{formatCompactTokens(tool.total_tokens)}</strong>
+                </span>
+              ))}
+            </section>
+          ) : null}
+
+          {notices.length > 0 ? (
+            <div className="token-warning-list">
+              {notices.slice(0, 4).map((notice) => (
+                <div key={notice}>{notice}</div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="token-footer">
+            <div className="token-generated-at">更新于 {formatGeneratedAt(report.generated_at)}</div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="token-refresh-button"
+              disabled={refreshing}
+              onClick={onRefresh}
+            >
+              <RefreshCw
+                data-icon="inline-start"
+                className={refreshing ? "refresh-icon-spinning" : undefined}
+              />
+              {refreshing ? "计算中" : "刷新用量"}
+            </Button>
+          </div>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function TokenUsageSummary({ totals }: { totals: LocalTokenUsageTotals }) {
+  return (
+    <div className="token-summary-grid">
+      <TokenUsageMetric label="总 Token" value={formatCompactTokens(totals.total_tokens)} />
+      <TokenUsageMetric label="输入" value={formatCompactTokens(totals.input_tokens)} />
+      <TokenUsageMetric label="输出" value={formatCompactTokens(totals.output_tokens)} />
+      <TokenUsageMetric label="缓存命中" value={formatCompactTokens(totals.cache_read_tokens)} tone="green" />
+      <TokenUsageMetric label="缓存写入" value={formatCompactTokens(totals.cache_creation_tokens)} tone="purple" />
+      <TokenUsageMetric label="命中率" value={`${Math.round(totals.cache_hit_rate_percent)}%`} />
+    </div>
+  );
+}
+
+function TokenUsageMetric({
+  label,
+  value,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  tone?: "default" | "green" | "purple";
+}) {
+  return (
+    <div className={`token-metric token-metric-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function tokenSegmentStyle(height: number): CSSProperties {
+  return {
+    height: height > 0 ? `${Math.max(height, 3)}%` : 0,
+  };
+}
+
+function formatGeneratedAt(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function AddAccountPanel({
@@ -1364,6 +1702,8 @@ const refreshIntervalOptions = [
   { value: 30, label: "30 分钟" },
   { value: 60, label: "1 小时" },
 ];
+
+const tokenUsageRangeOptions: LocalTokenUsageRange[] = ["thisMonth", "thisWeek", "last3Days", "today"];
 
 const providers: Array<{ key: ProviderKey; name: string; method: "OAuth" | "API Key" | "Kimi CLI"; icon: string; iconMode?: ProviderIconMode }> = [
   { key: "openai", name: "OpenAI", method: "OAuth", icon: openaiIcon },

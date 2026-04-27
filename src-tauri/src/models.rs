@@ -79,6 +79,7 @@ pub struct AccountQuotaStatus {
     pub seven_day: Option<QuotaWindow>,
     pub fetched_at: Option<DateTime<Utc>>,
     pub source: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,7 +111,7 @@ impl Default for AppSettings {
             accounts: Vec::new(),
             refresh_interval_minutes: 15,
             low_quota_threshold_percent: 10.0,
-            notify_on_low_quota: true,
+            notify_on_low_quota: false,
             notify_on_reset: false,
             reset_notify_lead_minutes: 15,
             secret_configured: false,
@@ -223,4 +224,72 @@ pub struct ProbeCredentials {
     pub auth_mode: AuthMode,
     pub secret: String,
     pub chatgpt_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalTokenUsageRange {
+    Today,
+    Last3Days,
+    ThisWeek,
+    ThisMonth,
+}
+
+impl Default for LocalTokenUsageRange {
+    fn default() -> Self {
+        Self::ThisMonth
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LocalTokenUsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_tokens: u64,
+    pub cache_hit_rate_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalTokenUsageDay {
+    pub date: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_tokens: u64,
+    pub models: Vec<LocalTokenUsageModel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalTokenUsageModel {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalTokenUsageTool {
+    pub tool: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalTokenUsageReport {
+    pub range: LocalTokenUsageRange,
+    pub totals: LocalTokenUsageTotals,
+    pub days: Vec<LocalTokenUsageDay>,
+    pub models: Vec<LocalTokenUsageModel>,
+    pub tools: Vec<LocalTokenUsageTool>,
+    pub missing_sources: Vec<String>,
+    pub warnings: Vec<String>,
+    pub generated_at: DateTime<Utc>,
 }

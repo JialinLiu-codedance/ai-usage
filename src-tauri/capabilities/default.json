@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Default capability for the main window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission"
+  ]
 }

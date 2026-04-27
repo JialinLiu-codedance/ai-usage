@@ -5,6 +5,12 @@ import type {
   AppStatus,
   ConnectedAccount,
   ConnectionTestResult,
+  LocalTokenUsageDay,
+  LocalTokenUsageModel,
+  LocalTokenUsageRange,
+  LocalTokenUsageReport,
+  LocalTokenUsageTotals,
+  LocalTokenUsageTool,
   OAuthStatus,
   SaveSettingsInput,
 } from "./types";
@@ -69,7 +75,7 @@ function initialMockSettings(): AppSettings {
     accounts: [mockAccount("default", "OpenAI Account")],
     refresh_interval_minutes: 15,
     low_quota_threshold_percent: 10,
-    notify_on_low_quota: true,
+    notify_on_low_quota: false,
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     secret_configured: true,
@@ -86,7 +92,7 @@ function emptyMockSettings(): AppSettings {
     accounts: [],
     refresh_interval_minutes: 15,
     low_quota_threshold_percent: 10,
-    notify_on_low_quota: true,
+    notify_on_low_quota: false,
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     secret_configured: false,
@@ -133,6 +139,7 @@ let mockStatus: AppStatus = {
       },
       fetched_at: new Date().toISOString(),
       source: "probe_headers",
+      last_error: null,
     },
   ],
   refresh_status: "ok",
@@ -185,11 +192,25 @@ export async function saveSettings(input: SaveSettingsInput): Promise<AppSetting
     mockSettings = {
       ...mockSettings,
       ...settingsInput,
+      notify_on_reset: false,
       secret_configured: mockSettings.secret_configured || Boolean(authSecret),
     };
     return mockSettings;
   }
   return invoke("save_settings", { input });
+}
+
+export async function ensureNotificationPermission(): Promise<boolean> {
+  if (!isTauriRuntime) {
+    return true;
+  }
+
+  const { isPermissionGranted, requestPermission } = await import("@tauri-apps/plugin-notification");
+  if (await isPermissionGranted()) {
+    return true;
+  }
+
+  return (await requestPermission()) === "granted";
 }
 
 export async function importKimiAccount(accountName?: string | null, accountId?: string | null): Promise<AppSettings> {
@@ -458,6 +479,20 @@ export async function deleteConnectedAccount(accountId: string): Promise<AppSett
   return invoke("delete_connected_account", { accountId });
 }
 
+export async function getLocalTokenUsage(range: LocalTokenUsageRange = "thisMonth"): Promise<LocalTokenUsageReport> {
+  if (!isTauriRuntime) {
+    return mockLocalTokenUsageReport(range);
+  }
+  return invoke("get_local_token_usage", { range });
+}
+
+export async function refreshLocalTokenUsage(range: LocalTokenUsageRange = "thisMonth"): Promise<LocalTokenUsageReport> {
+  if (!isTauriRuntime) {
+    return mockLocalTokenUsageReport(range);
+  }
+  return invoke("refresh_local_token_usage", { range });
+}
+
 function mockStatusWithAccounts(): AppStatus {
   return {
     ...mockStatus,
@@ -476,6 +511,7 @@ function mockAccountStatuses(accounts: ConnectedAccount[]): AccountQuotaStatus[]
       seven_day: snapshot?.seven_day ?? null,
       fetched_at: snapshot?.fetched_at ?? null,
       source: snapshot?.source ?? null,
+      last_error: null,
     };
   });
 }
@@ -505,6 +541,234 @@ function uniqueMockAccountId(provider: MockProviderKey, email: string): string {
       return candidate;
     }
   }
+}
+
+function mockLocalTokenUsageReport(range: LocalTokenUsageRange): LocalTokenUsageReport {
+  const generatedAt = new Date();
+  const bucketDates = mockTokenBucketDates(range, generatedAt);
+  const days = bucketDates.map((date, index) => {
+    const models = mockTokenBucketModels(index);
+    const totals = sumTokenStats(models);
+    return {
+      date: mockTokenBucketKey(range, date),
+      input_tokens: totals.input_tokens,
+      output_tokens: totals.output_tokens,
+      cache_read_tokens: totals.cache_read_tokens,
+      cache_creation_tokens: totals.cache_creation_tokens,
+      total_tokens: totals.total_tokens,
+      models,
+    };
+  });
+  const totals = withCacheHitRate(sumTokenStats(days));
+  const models = aggregateModelStats(days);
+
+  return {
+    range,
+    totals,
+    days,
+    models,
+    tools: mockTokenUsageTools(totals),
+    missing_sources: ["OpenCode: ~/.local/share/opencode/storage/message"],
+    warnings: [],
+    generated_at: generatedAt.toISOString(),
+  };
+}
+
+function mockTokenBucketDates(range: LocalTokenUsageRange, now: Date): Date[] {
+  const starts: Date[] = [];
+  const start = startOfLocalDay(now);
+  let cursor: Date;
+  let end: Date;
+  let stepHours = 24;
+
+  if (range === "thisMonth") {
+    cursor = startOfLocalMonth(now);
+    end = start;
+  } else if (range === "thisWeek") {
+    cursor = startOfLocalWeek(now);
+    end = start;
+  } else if (range === "last3Days") {
+    cursor = addLocalDays(start, -2);
+    end = floorLocalHour(now, 3);
+    stepHours = 3;
+  } else {
+    cursor = start;
+    end = floorLocalHour(now, 1);
+    stepHours = 1;
+  }
+
+  while (cursor.getTime() <= end.getTime()) {
+    starts.push(new Date(cursor));
+    cursor = addLocalHours(cursor, stepHours);
+  }
+
+  return starts;
+}
+
+function mockTokenBucketKey(range: LocalTokenUsageRange, date: Date): string {
+  if (range === "today" || range === "last3Days") {
+    return `${localDateKey(date)}T${String(date.getHours()).padStart(2, "0")}:00:00Z`;
+  }
+  return localDateKey(date);
+}
+
+function mockTokenBucketModels(index: number): LocalTokenUsageModel[] {
+  return [
+    mockTokenModel("gpt-5.3-codex", index, 14_000, 4_200, 9_000, 0),
+    mockTokenModel("claude-sonnet-4-5", index, 11_000, 3_300, 6_400, 2_600),
+    mockTokenModel("kimi-cli", index, 6_400, 1_700, 2_800, 500),
+    mockTokenModel("opencode/claude-3.5", index, 4_200, 1_200, 2_100, 700),
+  ];
+}
+
+function mockTokenModel(
+  model: string,
+  index: number,
+  inputBase: number,
+  outputBase: number,
+  cacheReadBase: number,
+  cacheCreationBase: number,
+): LocalTokenUsageModel {
+  const wave = 1 + (index % 6) * 0.08 + Math.floor(index / 6) * 0.05;
+  const input = Math.round(inputBase * wave);
+  const output = Math.round(outputBase * wave);
+  const cacheRead = Math.round(cacheReadBase * wave);
+  const cacheCreation = Math.round(cacheCreationBase * (index % 3 === 0 ? 1.35 : wave));
+  return {
+    model,
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_tokens: cacheRead,
+    cache_creation_tokens: cacheCreation,
+    total_tokens: input + output + cacheRead + cacheCreation,
+  };
+}
+
+function aggregateModelStats(days: LocalTokenUsageDay[]): LocalTokenUsageModel[] {
+  const byModel = new Map<string, LocalTokenUsageModel>();
+  for (const day of days) {
+    for (const model of day.models) {
+      const current = byModel.get(model.model);
+      if (!current) {
+        byModel.set(model.model, { ...model });
+        continue;
+      }
+      current.input_tokens += model.input_tokens;
+      current.output_tokens += model.output_tokens;
+      current.cache_read_tokens += model.cache_read_tokens;
+      current.cache_creation_tokens += model.cache_creation_tokens;
+      current.total_tokens += model.total_tokens;
+    }
+  }
+  return [...byModel.values()].sort((a, b) => b.total_tokens - a.total_tokens || a.model.localeCompare(b.model));
+}
+
+function sumTokenStats(items: Array<Omit<LocalTokenUsageTotals, "cache_hit_rate_percent">>): Omit<LocalTokenUsageTotals, "cache_hit_rate_percent"> {
+  return items.reduce(
+    (acc, item) => ({
+      input_tokens: acc.input_tokens + item.input_tokens,
+      output_tokens: acc.output_tokens + item.output_tokens,
+      cache_read_tokens: acc.cache_read_tokens + item.cache_read_tokens,
+      cache_creation_tokens: acc.cache_creation_tokens + item.cache_creation_tokens,
+      total_tokens: acc.total_tokens + item.total_tokens,
+    }),
+    {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      total_tokens: 0,
+    },
+  );
+}
+
+function withCacheHitRate(totals: Omit<LocalTokenUsageTotals, "cache_hit_rate_percent">): LocalTokenUsageTotals {
+  return {
+    ...totals,
+    cache_hit_rate_percent:
+      totals.input_tokens + totals.cache_read_tokens === 0
+        ? 0
+        : (totals.cache_read_tokens / (totals.input_tokens + totals.cache_read_tokens)) * 100,
+  };
+}
+
+function mockTokenUsageTools(totals: LocalTokenUsageTotals): LocalTokenUsageTool[] {
+  return [
+      {
+        tool: "codex",
+        input_tokens: Math.round(totals.input_tokens * 0.42),
+        output_tokens: Math.round(totals.output_tokens * 0.43),
+        cache_read_tokens: Math.round(totals.cache_read_tokens * 0.48),
+        cache_creation_tokens: 0,
+        total_tokens: Math.round(totals.total_tokens * 0.42),
+      },
+      {
+        tool: "claude",
+        input_tokens: Math.round(totals.input_tokens * 0.34),
+        output_tokens: Math.round(totals.output_tokens * 0.32),
+        cache_read_tokens: Math.round(totals.cache_read_tokens * 0.31),
+        cache_creation_tokens: Math.round(totals.cache_creation_tokens * 0.72),
+        total_tokens: Math.round(totals.total_tokens * 0.34),
+      },
+      {
+        tool: "kimi",
+        input_tokens: Math.round(totals.input_tokens * 0.14),
+        output_tokens: Math.round(totals.output_tokens * 0.15),
+        cache_read_tokens: Math.round(totals.cache_read_tokens * 0.11),
+        cache_creation_tokens: Math.round(totals.cache_creation_tokens * 0.1),
+        total_tokens: Math.round(totals.total_tokens * 0.13),
+      },
+      {
+        tool: "opencode",
+        input_tokens: Math.round(totals.input_tokens * 0.1),
+        output_tokens: Math.round(totals.output_tokens * 0.1),
+        cache_read_tokens: Math.round(totals.cache_read_tokens * 0.1),
+        cache_creation_tokens: Math.round(totals.cache_creation_tokens * 0.18),
+        total_tokens: Math.round(totals.total_tokens * 0.11),
+      },
+    ];
+}
+
+function startOfLocalDay(date: Date): Date {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function startOfLocalMonth(date: Date): Date {
+  const next = startOfLocalDay(date);
+  next.setDate(1);
+  return next;
+}
+
+function startOfLocalWeek(date: Date): Date {
+  const next = startOfLocalDay(date);
+  const offset = (next.getDay() + 6) % 7;
+  next.setDate(next.getDate() - offset);
+  return next;
+}
+
+function floorLocalHour(date: Date, stepHours: number): Date {
+  const next = new Date(date);
+  next.setMinutes(0, 0, 0);
+  next.setHours(next.getHours() - (next.getHours() % stepHours));
+  return next;
+}
+
+function addLocalDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addLocalHours(date: Date, hours: number): Date {
+  const next = new Date(date);
+  next.setHours(next.getHours() + hours);
+  return next;
+}
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 export async function resizePanel(width: number, height: number): Promise<void> {

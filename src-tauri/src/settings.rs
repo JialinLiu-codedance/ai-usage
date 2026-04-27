@@ -19,25 +19,13 @@ pub fn load_settings(app: &AppHandle) -> Result<AppSettings, String> {
 
 pub fn save_settings(app: &AppHandle, input: SaveSettingsInput) -> Result<AppSettings, String> {
     let existing = load_settings(app)?;
-    let mut settings = AppSettings {
-        account_id: sanitize_account_id(input.account_id),
-        account_name: input.account_name,
-        auth_mode: input.auth_mode,
-        base_url_override: sanitize_optional(input.base_url_override),
-        chatgpt_account_id: sanitize_optional(input.chatgpt_account_id),
-        accounts: existing.accounts,
-        refresh_interval_minutes: input.refresh_interval_minutes.max(1),
-        low_quota_threshold_percent: input.low_quota_threshold_percent.clamp(0.0, 100.0),
-        notify_on_low_quota: input.notify_on_low_quota,
-        notify_on_reset: input.notify_on_reset,
-        reset_notify_lead_minutes: input.reset_notify_lead_minutes.max(1),
-        secret_configured: false,
-    };
-
-    if let Some(secret) = input
+    let auth_secret = input
         .auth_secret
-        .and_then(|value| sanitize_optional(Some(value)))
-    {
+        .as_ref()
+        .and_then(|value| sanitize_optional(Some(value.clone())));
+    let mut settings = settings_from_save_input(existing, input);
+
+    if let Some(secret) = auth_secret {
         secrets::save_secret(&secret)?;
     }
 
@@ -45,7 +33,11 @@ pub fn save_settings(app: &AppHandle, input: SaveSettingsInput) -> Result<AppSet
         sync_active_account_metadata(&mut settings);
     }
 
-    write_settings(app, &settings)
+    let next_settings = write_settings(app, &settings)?;
+    if !next_settings.notify_on_low_quota {
+        let _ = crate::notifications::clear_low_quota_notification_state(app);
+    }
+    Ok(next_settings)
 }
 
 pub fn delete_account(app: &AppHandle, account_id: &str) -> Result<AppSettings, String> {
@@ -61,6 +53,23 @@ pub fn write_settings(app: &AppHandle, settings: &AppSettings) -> Result<AppSett
 
 pub fn normalize_account_id(input: &str) -> String {
     sanitize_account_id(input.to_string())
+}
+
+fn settings_from_save_input(existing: AppSettings, input: SaveSettingsInput) -> AppSettings {
+    AppSettings {
+        account_id: sanitize_account_id(input.account_id),
+        account_name: input.account_name,
+        auth_mode: input.auth_mode,
+        base_url_override: sanitize_optional(input.base_url_override),
+        chatgpt_account_id: sanitize_optional(input.chatgpt_account_id),
+        accounts: existing.accounts,
+        refresh_interval_minutes: input.refresh_interval_minutes.max(1),
+        low_quota_threshold_percent: input.low_quota_threshold_percent.clamp(0.0, 100.0),
+        notify_on_low_quota: input.notify_on_low_quota,
+        notify_on_reset: false,
+        reset_notify_lead_minutes: input.reset_notify_lead_minutes.max(1),
+        secret_configured: false,
+    }
 }
 
 pub(crate) fn upsert_oauth_account(
@@ -730,5 +739,27 @@ mod tests {
         assert!(matches!(settings.auth_mode, AuthMode::ApiKey));
         assert_eq!(settings.refresh_interval_minutes, 60);
         assert!(settings.accounts.is_empty());
+    }
+
+    #[test]
+    fn save_settings_forces_reset_notification_off() {
+        let settings = settings_from_save_input(
+            AppSettings::default(),
+            SaveSettingsInput {
+                account_id: default_account_id(),
+                account_name: "OpenAI Account".into(),
+                auth_mode: AuthMode::ApiKey,
+                base_url_override: None,
+                chatgpt_account_id: None,
+                refresh_interval_minutes: 30,
+                low_quota_threshold_percent: 15.0,
+                notify_on_low_quota: true,
+                notify_on_reset: true,
+                reset_notify_lead_minutes: 30,
+                auth_secret: None,
+            },
+        );
+
+        assert!(!settings.notify_on_reset);
     }
 }

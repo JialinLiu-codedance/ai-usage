@@ -5,9 +5,20 @@ export interface QuotaDisplayRowsInput {
   seven_day: QuotaWindow | null;
 }
 
+export interface QuotaAccountCardStateInput extends QuotaDisplayRowsInput {
+  fetched_at?: string | null;
+  last_error?: string | null;
+}
+
 export interface QuotaDisplayRow {
   label: string;
   window: QuotaWindow;
+}
+
+export interface QuotaAccountCardState {
+  error: string | null;
+  muted: boolean;
+  stale: boolean;
 }
 
 export function remainingQuotaProgressValue(window: QuotaWindow | null): number {
@@ -15,6 +26,17 @@ export function remainingQuotaProgressValue(window: QuotaWindow | null): number 
     return 0;
   }
   return Math.max(0, Math.min(100, window.remaining_percent));
+}
+
+export function quotaAccountCardState(account: QuotaAccountCardStateInput): QuotaAccountCardState {
+  const error = account.last_error?.trim() ? account.last_error : null;
+  const hasCachedQuota = Boolean(account.fetched_at || account.five_hour || account.seven_day);
+
+  return {
+    error,
+    muted: Boolean(error),
+    stale: Boolean(error && hasCachedQuota),
+  };
 }
 
 export function quotaDisplayRows(account: QuotaDisplayRowsInput): QuotaDisplayRow[] {

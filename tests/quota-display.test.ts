@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { quotaDisplayRows, remainingQuotaProgressValue } from "../src/lib/quota-display.ts";
+import {
+  quotaAccountCardState,
+  quotaDisplayRows,
+  remainingQuotaProgressValue,
+} from "../src/lib/quota-display.ts";
 
 test("quota progress uses remaining quota percent instead of used percent", () => {
   assert.equal(
@@ -68,4 +72,40 @@ test("quota display rows hide only the missing quota window", () => {
     }),
     [{ label: "7D", window: sevenDay }],
   );
+});
+
+test("quota card state shows errors only on the failed account", () => {
+  const successful = quotaAccountCardState({
+    five_hour: {
+      used_percent: 4,
+      remaining_percent: 96,
+      reset_at: null,
+      window_minutes: 300,
+    },
+    seven_day: null,
+    fetched_at: "2026-04-27T01:07:13Z",
+    last_error: null,
+  });
+  const failed = quotaAccountCardState({
+    five_hour: {
+      used_percent: 13,
+      remaining_percent: 87,
+      reset_at: null,
+      window_minutes: 10080,
+    },
+    seven_day: null,
+    fetched_at: "2026-04-27T01:07:13Z",
+    last_error: "Kimi OAuth 认证失败，请重新导入",
+  });
+
+  assert.deepEqual(successful, {
+    error: null,
+    muted: false,
+    stale: false,
+  });
+  assert.deepEqual(failed, {
+    error: "Kimi OAuth 认证失败，请重新导入",
+    muted: true,
+    stale: true,
+  });
 });
