@@ -1,5 +1,6 @@
 mod commands;
 mod errors;
+mod git_usage;
 mod local_usage;
 mod models;
 mod notifications;
@@ -71,6 +72,7 @@ fn main() {
                         .map(|settings| i64::from(settings.refresh_interval_minutes))
                         .unwrap_or(15);
                     commands::ensure_local_token_usage_cache(&handle, token_cache_max_age);
+                    commands::ensure_git_usage_cache(&handle, token_cache_max_age);
                     refresh_tray_menu_from_state(&handle).await;
                 }
 
@@ -79,6 +81,10 @@ fn main() {
                     let maybe_settings = settings::load_settings(&handle);
                     if let Ok(settings) = maybe_settings {
                         commands::ensure_local_token_usage_cache(
+                            &handle,
+                            i64::from(settings.refresh_interval_minutes),
+                        );
+                        commands::ensure_git_usage_cache(
                             &handle,
                             i64::from(settings.refresh_interval_minutes),
                         );
@@ -131,6 +137,8 @@ fn main() {
             commands::resize_main_panel,
             commands::get_local_token_usage,
             commands::refresh_local_token_usage,
+            commands::get_git_usage,
+            commands::refresh_git_usage,
             sync_tray_menu,
         ])
         .build(tauri::generate_context!())

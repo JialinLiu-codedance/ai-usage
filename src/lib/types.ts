@@ -121,3 +121,23 @@ export interface LocalTokenUsageReport {
   warnings: string[];
   generated_at: string;
 }
+
+export interface GitUsageTotals {
+  added_lines: number;
+  deleted_lines: number;
+  changed_files: number;
+}
+
+export interface GitUsageBucket extends GitUsageTotals {
+  date: string;
+}
+
+export interface GitUsageReport {
+  range: LocalTokenUsageRange;
+  totals: GitUsageTotals;
+  buckets: GitUsageBucket[];
+  repository_count: number;
+  missing_sources: string[];
+  warnings: string[];
+  generated_at: string;
+}

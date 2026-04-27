@@ -22,11 +22,13 @@ import {
   getSettings,
   completeAnthropicOAuth,
   completeOpenAIOAuth,
+  getGitUsage,
   importGlmAccount,
   importKimiAccount,
   importMiniMaxAccount,
   resizePanel,
   refreshQuota,
+  refreshGitUsage,
   refreshLocalTokenUsage,
   saveSettings,
   startAnthropicOAuth,
@@ -38,6 +40,11 @@ import {
   shouldResetOAuthAuthDraft,
 } from "./lib/oauth-auth-state";
 import { quotaAccountCardState, quotaDisplayRows, remainingQuotaProgressValue } from "./lib/quota-display";
+import {
+  buildGitUsageChartRows,
+  formatCompactLines,
+  gitUsageSummaryMetrics,
+} from "./lib/git-usage-display";
 import {
   buildTokenUsageChartLegend,
   buildTokenUsageChartRows,
@@ -51,6 +58,7 @@ import type {
   AppSettings,
   AppStatus,
   ConnectedAccount,
+  GitUsageReport,
   LocalTokenUsageRange,
   LocalTokenUsageReport,
   LocalTokenUsageTotals,
@@ -883,11 +891,15 @@ function SettingsPanel({
 }) {
   const [thresholdDraft, setThresholdDraft] = useState(String(form.low_quota_threshold_percent));
   const [activeTab, setActiveTab] = useState<SettingsTab>("quota");
-  const [tokenRange, setTokenRange] = useState<LocalTokenUsageRange>("thisMonth");
+  const [usageRange, setUsageRange] = useState<LocalTokenUsageRange>("thisMonth");
   const [tokenReportsByRange, setTokenReportsByRange] = useState<Partial<Record<LocalTokenUsageRange, LocalTokenUsageReport>>>({});
+  const [gitReportsByRange, setGitReportsByRange] = useState<Partial<Record<LocalTokenUsageRange, GitUsageReport>>>({});
   const [tokenLoading, setTokenLoading] = useState(false);
+  const [gitLoading, setGitLoading] = useState(false);
   const [tokenRefreshing, setTokenRefreshing] = useState(false);
+  const [gitRefreshing, setGitRefreshing] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const [gitError, setGitError] = useState<string | null>(null);
 
   useEffect(() => {
     setThresholdDraft(String(form.low_quota_threshold_percent));
@@ -899,11 +911,11 @@ function SettingsPanel({
     }
 
     let cancelled = false;
-    const cachedReport = tokenReportsByRange[tokenRange] ?? null;
+    const cachedReport = tokenReportsByRange[usageRange] ?? null;
     setTokenLoading(!cachedReport);
     setTokenError(null);
 
-    getLocalTokenUsage(tokenRange)
+    getLocalTokenUsage(usageRange)
       .then((report) => {
         if (!cancelled) {
           setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
@@ -923,7 +935,39 @@ function SettingsPanel({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, tokenRange]);
+  }, [activeTab, usageRange]);
+
+  useEffect(() => {
+    if (activeTab !== "tokens") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const cachedReport = gitReportsByRange[usageRange] ?? null;
+    setGitLoading(!cachedReport);
+    setGitError(null);
+
+    getGitUsage(usageRange)
+      .then((report) => {
+        if (!cancelled) {
+          setGitReportsByRange((current) => ({ ...current, [report.range]: report }));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setGitError(errorMessage(error, "Git 统计读取失败"));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setGitLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, usageRange]);
 
   useEffect(() => {
     if (!isTauriRuntime || activeTab !== "tokens") {
@@ -932,7 +976,7 @@ function SettingsPanel({
 
     let cancelled = false;
     const unlisten = listen("local-token-usage-cache-updated", () => {
-      getLocalTokenUsage(tokenRange)
+      getLocalTokenUsage(usageRange)
         .then((report) => {
           if (!cancelled) {
             setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
@@ -949,7 +993,33 @@ function SettingsPanel({
       cancelled = true;
       void unlisten.then((dispose) => dispose());
     };
-  }, [activeTab, tokenRange]);
+  }, [activeTab, usageRange]);
+
+  useEffect(() => {
+    if (!isTauriRuntime || activeTab !== "tokens") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const unlisten = listen("git-usage-cache-updated", () => {
+      getGitUsage(usageRange)
+        .then((report) => {
+          if (!cancelled) {
+            setGitReportsByRange((current) => ({ ...current, [report.range]: report }));
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setGitError(errorMessage(error, "Git 统计读取失败"));
+          }
+        });
+    });
+
+    return () => {
+      cancelled = true;
+      void unlisten.then((dispose) => dispose());
+    };
+  }, [activeTab, usageRange]);
 
   function commitThreshold(value: string) {
     const parsed = Number.parseInt(value, 10);
@@ -964,7 +1034,7 @@ function SettingsPanel({
     setTokenRefreshing(true);
     setTokenError(null);
     try {
-      const report = await refreshLocalTokenUsage(tokenRange);
+      const report = await refreshLocalTokenUsage(usageRange);
       setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
     } catch (error) {
       setTokenError(errorMessage(error, "Token 用量刷新失败"));
@@ -973,8 +1043,22 @@ function SettingsPanel({
     }
   }
 
+  async function handleGitRefresh() {
+    setGitRefreshing(true);
+    setGitError(null);
+    try {
+      const report = await refreshGitUsage(usageRange);
+      setGitReportsByRange((current) => ({ ...current, [report.range]: report }));
+    } catch (error) {
+      setGitError(errorMessage(error, "Git 统计刷新失败"));
+    } finally {
+      setGitRefreshing(false);
+    }
+  }
+
   const accounts = connectedAccounts(settings, status);
-  const tokenReport = tokenReportsByRange[tokenRange] ?? null;
+  const tokenReport = tokenReportsByRange[usageRange] ?? null;
+  const gitReport = gitReportsByRange[usageRange] ?? null;
 
   return (
     <Card className="settings-panel">
@@ -1002,7 +1086,7 @@ function SettingsPanel({
           aria-selected={activeTab === "tokens"}
           onClick={() => setActiveTab("tokens")}
         >
-          Token 用量统计
+          统计
         </button>
       </div>
 
@@ -1128,12 +1212,17 @@ function SettingsPanel({
       ) : (
         <TokenUsagePanel
           report={tokenReport}
-          range={tokenRange}
+          gitReport={gitReport}
+          range={usageRange}
           loading={tokenLoading}
+          gitLoading={gitLoading}
           refreshing={tokenRefreshing}
+          gitRefreshing={gitRefreshing}
           error={tokenError}
-          onRangeChange={setTokenRange}
+          gitError={gitError}
+          onRangeChange={setUsageRange}
           onRefresh={handleTokenRefresh}
+          onGitRefresh={handleGitRefresh}
         />
       )}
 
@@ -1144,20 +1233,30 @@ function SettingsPanel({
 
 function TokenUsagePanel({
   report,
+  gitReport,
   range,
   loading,
+  gitLoading,
   refreshing,
+  gitRefreshing,
   error,
+  gitError,
   onRangeChange,
   onRefresh,
+  onGitRefresh,
 }: {
   report: LocalTokenUsageReport | null;
+  gitReport: GitUsageReport | null;
   range: LocalTokenUsageRange;
   loading: boolean;
+  gitLoading: boolean;
   refreshing: boolean;
+  gitRefreshing: boolean;
   error: string | null;
+  gitError: string | null;
   onRangeChange: (range: LocalTokenUsageRange) => void;
   onRefresh: () => void;
+  onGitRefresh: () => void;
 }) {
   const chartRows = report ? buildTokenUsageChartRows(report) : [];
   const chartLegend = report ? buildTokenUsageChartLegend(report) : [];
@@ -1283,6 +1382,121 @@ function TokenUsagePanel({
           </div>
         </>
       ) : null}
+
+      <GitUsageSection
+        report={gitReport}
+        loading={gitLoading}
+        refreshing={gitRefreshing}
+        error={gitError}
+        onRefresh={onGitRefresh}
+      />
+    </section>
+  );
+}
+
+function GitUsageSection({
+  report,
+  loading,
+  refreshing,
+  error,
+  onRefresh,
+}: {
+  report: GitUsageReport | null;
+  loading: boolean;
+  refreshing: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const chartRows = report ? buildGitUsageChartRows(report) : [];
+  const metrics = report ? gitUsageSummaryMetrics(report) : [];
+  const notices = [
+    ...(report?.warnings ?? []),
+    ...(report?.missing_sources.map((source) => `未找到 ${source}`) ?? []),
+  ];
+
+  return (
+    <section className="git-usage-section">
+      <div className="git-section-title">
+        <h2>Git 提交统计</h2>
+        {report ? <span>{report.repository_count} 个仓库</span> : null}
+      </div>
+
+      {error ? <div className="inline-error">{error}</div> : null}
+      {loading && !report ? <div className="token-loading">读取 Git 统计缓存...</div> : null}
+
+      {report ? (
+        <>
+          <div className="git-summary-grid">
+            {metrics.map((metric) => (
+              <TokenUsageMetric
+                key={metric.label}
+                label={metric.label}
+                value={metric.value}
+                tone={metric.tone}
+              />
+            ))}
+          </div>
+
+          {report.totals.added_lines + report.totals.deleted_lines === 0 ? (
+            <div className="token-empty">当前时间范围暂无 Git 提交统计</div>
+          ) : null}
+
+          <section className="token-card">
+            <div className="token-section-header">
+              <h2>代码行数趋势</h2>
+              <div className="token-legend" aria-label="代码行数图例">
+                <span className="token-legend-item git-added-legend">新增</span>
+                <span className="token-legend-item git-deleted-legend">删除</span>
+              </div>
+            </div>
+            <div className={`git-chart git-chart-range-${report.range}`} aria-label="代码行数趋势">
+              {chartRows.map((row) => (
+                <div className="git-chart-column" key={row.date}>
+                  <div className="git-chart-bars" title={row.label}>
+                    <span
+                      className="git-chart-bar git-chart-added"
+                      style={gitBarStyle(row.addedHeight)}
+                      title={`新增 ${formatCompactLines(row.addedLines)}`}
+                    />
+                    <span
+                      className="git-chart-bar git-chart-deleted"
+                      style={gitBarStyle(row.deletedHeight)}
+                      title={`删除 ${formatCompactLines(row.deletedLines)}`}
+                    />
+                  </div>
+                  <span>{row.label}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {notices.length > 0 ? (
+            <div className="token-warning-list">
+              {notices.slice(0, 4).map((notice) => (
+                <div key={notice}>{notice}</div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="token-footer">
+            <div className="token-generated-at">更新于 {formatGeneratedAt(report.generated_at)}</div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="token-refresh-button"
+              disabled={refreshing}
+              onClick={onRefresh}
+            >
+              <RefreshCw
+                data-icon="inline-start"
+                className={refreshing ? "refresh-icon-spinning" : undefined}
+              />
+              {refreshing ? "计算中" : "刷新 Git 统计"}
+            </Button>
+          </div>
+        </>
+      ) : null}
     </section>
   );
 }
@@ -1307,7 +1521,7 @@ function TokenUsageMetric({
 }: {
   label: string;
   value: string;
-  tone?: "default" | "green" | "purple";
+  tone?: "default" | "green" | "purple" | "red" | "blue";
 }) {
   return (
     <div className={`token-metric token-metric-${tone}`}>
@@ -1318,6 +1532,12 @@ function TokenUsageMetric({
 }
 
 function tokenSegmentStyle(height: number): CSSProperties {
+  return {
+    height: height > 0 ? `${Math.max(height, 3)}%` : 0,
+  };
+}
+
+function gitBarStyle(height: number): CSSProperties {
   return {
     height: height > 0 ? `${Math.max(height, 3)}%` : 0,
   };

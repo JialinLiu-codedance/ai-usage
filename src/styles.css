@@ -630,6 +630,14 @@ textarea {
   color: #8b5cf6;
 }
 
+.token-metric-red strong {
+  color: #ef4444;
+}
+
+.token-metric-blue strong {
+  color: #2563eb;
+}
+
 .token-card {
   display: flex;
   flex-direction: column;
@@ -824,6 +832,138 @@ textarea {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #18181b 0%, #8b5cf6 100%);
+}
+
+.git-usage-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding-top: 2px;
+}
+
+.git-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.git-section-title h2 {
+  color: #09090b;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.git-section-title span {
+  color: #71717a;
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.git-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.git-summary-grid .token-metric {
+  min-height: 64px;
+}
+
+.git-summary-grid .token-metric strong {
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.git-chart {
+  display: grid;
+  grid-auto-columns: minmax(32px, 1fr);
+  grid-auto-flow: column;
+  align-items: end;
+  gap: 6px;
+  min-height: 146px;
+  overflow-x: auto;
+  padding-top: 4px;
+}
+
+.git-chart-column {
+  display: flex;
+  min-width: 32px;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-chart-column > span {
+  color: #71717a;
+  font-size: 10px;
+  line-height: 12px;
+  white-space: nowrap;
+}
+
+.git-chart-bars {
+  display: flex;
+  width: 24px;
+  height: 112px;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+  border-radius: 6px;
+  background: #f4f4f5;
+  padding: 0 3px;
+}
+
+.git-chart-bar {
+  display: block;
+  width: 7px;
+  min-height: 0;
+  border-radius: 999px 999px 0 0;
+}
+
+.git-chart-added,
+.git-added-legend::before {
+  background: #22c55e;
+}
+
+.git-chart-deleted,
+.git-deleted-legend::before {
+  background: #ef4444;
+}
+
+.git-chart-range-thisMonth {
+  grid-auto-columns: minmax(16px, 1fr);
+  gap: 3px;
+}
+
+.git-chart-range-thisMonth .git-chart-column {
+  min-width: 16px;
+}
+
+.git-chart-range-thisMonth .git-chart-bars {
+  width: 16px;
+  gap: 2px;
+  padding-inline: 2px;
+}
+
+.git-chart-range-thisMonth .git-chart-bar {
+  width: 5px;
+}
+
+.git-chart-range-today,
+.git-chart-range-last3Days {
+  grid-auto-columns: minmax(22px, 1fr);
+}
+
+.git-chart-range-today .git-chart-column,
+.git-chart-range-last3Days .git-chart-column {
+  min-width: 22px;
+}
+
+.git-chart-range-today .git-chart-bars,
+.git-chart-range-last3Days .git-chart-bars {
+  width: 20px;
 }
 
 .token-tool-strip {

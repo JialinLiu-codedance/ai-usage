@@ -293,3 +293,29 @@ pub struct LocalTokenUsageReport {
     pub warnings: Vec<String>,
     pub generated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitUsageTotals {
+    pub added_lines: u64,
+    pub deleted_lines: u64,
+    pub changed_files: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitUsageBucket {
+    pub date: String,
+    pub added_lines: u64,
+    pub deleted_lines: u64,
+    pub changed_files: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitUsageReport {
+    pub range: LocalTokenUsageRange,
+    pub totals: GitUsageTotals,
+    pub buckets: Vec<GitUsageBucket>,
+    pub repository_count: usize,
+    pub missing_sources: Vec<String>,
+    pub warnings: Vec<String>,
+    pub generated_at: DateTime<Utc>,
+}

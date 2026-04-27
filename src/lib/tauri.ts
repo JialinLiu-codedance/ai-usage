@@ -5,6 +5,9 @@ import type {
   AppStatus,
   ConnectedAccount,
   ConnectionTestResult,
+  GitUsageBucket,
+  GitUsageReport,
+  GitUsageTotals,
   LocalTokenUsageDay,
   LocalTokenUsageModel,
   LocalTokenUsageRange,
@@ -493,6 +496,20 @@ export async function refreshLocalTokenUsage(range: LocalTokenUsageRange = "this
   return invoke("refresh_local_token_usage", { range });
 }
 
+export async function getGitUsage(range: LocalTokenUsageRange = "thisMonth"): Promise<GitUsageReport> {
+  if (!isTauriRuntime) {
+    return mockGitUsageReport(range);
+  }
+  return invoke("get_git_usage", { range });
+}
+
+export async function refreshGitUsage(range: LocalTokenUsageRange = "thisMonth"): Promise<GitUsageReport> {
+  if (!isTauriRuntime) {
+    return mockGitUsageReport(range);
+  }
+  return invoke("refresh_git_usage", { range });
+}
+
 function mockStatusWithAccounts(): AppStatus {
   return {
     ...mockStatus,
@@ -569,6 +586,29 @@ function mockLocalTokenUsageReport(range: LocalTokenUsageRange): LocalTokenUsage
     models,
     tools: mockTokenUsageTools(totals),
     missing_sources: ["OpenCode: ~/.local/share/opencode/storage/message"],
+    warnings: [],
+    generated_at: generatedAt.toISOString(),
+  };
+}
+
+function mockGitUsageReport(range: LocalTokenUsageRange): GitUsageReport {
+  const generatedAt = new Date();
+  const bucketDates = mockTokenBucketDates(range, generatedAt);
+  const buckets = bucketDates.map((date, index) => {
+    const stats = mockGitBucketStats(index);
+    return {
+      date: mockTokenBucketKey(range, date),
+      ...stats,
+    };
+  });
+  const totals = sumGitStats(buckets);
+
+  return {
+    range,
+    totals,
+    buckets,
+    repository_count: 8,
+    missing_sources: [],
     warnings: [],
     generated_at: generatedAt.toISOString(),
   };
@@ -727,6 +767,34 @@ function mockTokenUsageTools(totals: LocalTokenUsageTotals): LocalTokenUsageTool
         total_tokens: Math.round(totals.total_tokens * 0.11),
       },
     ];
+}
+
+function mockGitBucketStats(index: number): GitUsageTotals {
+  const wave = 1 + (index % 7) * 0.16 + Math.floor(index / 7) * 0.04;
+  const quiet = index % 9 === 3 ? 0.18 : 1;
+  const added = Math.round((160 + (index % 4) * 54) * wave * quiet);
+  const deleted = Math.round((42 + (index % 5) * 18) * wave * quiet);
+  const changed = Math.max(1, Math.round((3 + (index % 6)) * quiet));
+  return {
+    added_lines: added,
+    deleted_lines: deleted,
+    changed_files: changed,
+  };
+}
+
+function sumGitStats(items: GitUsageBucket[]): GitUsageTotals {
+  return items.reduce(
+    (acc, item) => ({
+      added_lines: acc.added_lines + item.added_lines,
+      deleted_lines: acc.deleted_lines + item.deleted_lines,
+      changed_files: acc.changed_files + item.changed_files,
+    }),
+    {
+      added_lines: 0,
+      deleted_lines: 0,
+      changed_files: 0,
+    },
+  );
 }
 
 function startOfLocalDay(date: Date): Date {

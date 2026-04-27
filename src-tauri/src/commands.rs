@@ -1,11 +1,11 @@
 use crate::{
     errors::{ProviderError, ProviderErrorKind},
-    local_usage,
+    git_usage, local_usage,
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ConnectedAccount,
-        ConnectionTestResult, LocalTokenUsageRange, LocalTokenUsageReport, QuotaSnapshot,
-        SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX,
-        PROVIDER_OPENAI,
+        ConnectionTestResult, GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport,
+        QuotaSnapshot, SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_GLM, PROVIDER_KIMI,
+        PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     notifications, oauth, panel, provider, secrets, settings,
     state::StateStore,
@@ -22,7 +22,10 @@ use tauri::{AppHandle, Emitter, State};
 const SNAPSHOTS_FILE: &str = "snapshots.json";
 const TOKEN_USAGE_CACHE_FILE: &str = "local-token-usage-cache.json";
 const TOKEN_USAGE_CACHE_UPDATED_EVENT: &str = "local-token-usage-cache-updated";
+const GIT_USAGE_CACHE_FILE: &str = "git-usage-cache.json";
+const GIT_USAGE_CACHE_UPDATED_EVENT: &str = "git-usage-cache-updated";
 static TOKEN_USAGE_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
+static GIT_USAGE_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 pub async fn get_current_quota(
@@ -290,6 +293,43 @@ pub async fn refresh_local_token_usage(
     Ok(cache.report(range))
 }
 
+#[tauri::command]
+pub fn get_git_usage(
+    app: AppHandle,
+    range: LocalTokenUsageRange,
+) -> Result<GitUsageReport, String> {
+    let cache = read_git_usage_cache(&app)?;
+    let max_age_minutes = settings::load_settings(&app)
+        .map(|settings| i64::from(settings.refresh_interval_minutes))
+        .unwrap_or(15);
+
+    if cache
+        .as_ref()
+        .map(|cache| git_usage_cache_is_stale(cache, max_age_minutes))
+        .unwrap_or(true)
+    {
+        start_git_usage_cache_refresh(app.clone());
+    }
+
+    if let Some(cache) = cache {
+        return Ok(cache.report(range));
+    }
+
+    Ok(git_usage::empty_report(
+        range,
+        Some("Git 统计缓存正在后台生成，完成后会自动更新".into()),
+    ))
+}
+
+#[tauri::command]
+pub async fn refresh_git_usage(
+    app: AppHandle,
+    range: LocalTokenUsageRange,
+) -> Result<GitUsageReport, String> {
+    let cache = refresh_git_usage_cache(app, true).await?;
+    Ok(cache.report(range))
+}
+
 pub fn ensure_local_token_usage_cache(app: &AppHandle, max_age_minutes: i64) {
     let should_refresh = read_local_token_usage_cache(app)
         .map(|cache| {
@@ -304,12 +344,37 @@ pub fn ensure_local_token_usage_cache(app: &AppHandle, max_age_minutes: i64) {
     }
 }
 
+pub fn ensure_git_usage_cache(app: &AppHandle, max_age_minutes: i64) {
+    let should_refresh = read_git_usage_cache(app)
+        .map(|cache| {
+            cache
+                .as_ref()
+                .map(|cache| git_usage_cache_is_stale(cache, max_age_minutes))
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+    if should_refresh {
+        start_git_usage_cache_refresh(app.clone());
+    }
+}
+
 fn start_local_token_usage_cache_refresh(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         match refresh_local_token_usage_cache(app, true).await {
             Ok(_) => {}
             Err(error) => {
                 eprintln!("Token usage cache refresh failed: {error}");
+            }
+        }
+    });
+}
+
+fn start_git_usage_cache_refresh(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        match refresh_git_usage_cache(app, true).await {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Git usage cache refresh failed: {error}");
             }
         }
     });
@@ -330,6 +395,21 @@ async fn refresh_local_token_usage_cache(
     Ok(cache)
 }
 
+async fn refresh_git_usage_cache(
+    app: AppHandle,
+    emit_update: bool,
+) -> Result<git_usage::GitUsageCache, String> {
+    let _guard = claim_git_usage_refresh()?;
+    let cache = tauri::async_runtime::spawn_blocking(git_usage::build_cache)
+        .await
+        .map_err(|error| format!("Git 统计缓存任务失败: {error}"))??;
+    storage::write_json(&app, GIT_USAGE_CACHE_FILE, &cache)?;
+    if emit_update {
+        let _ = app.emit(GIT_USAGE_CACHE_UPDATED_EVENT, ());
+    }
+    Ok(cache)
+}
+
 #[derive(Debug)]
 struct LocalTokenUsageRefreshGuard;
 
@@ -344,6 +424,22 @@ fn claim_local_token_usage_refresh() -> Result<LocalTokenUsageRefreshGuard, Stri
         return Err("Token 用量正在刷新，请稍后再试".into());
     }
     Ok(LocalTokenUsageRefreshGuard)
+}
+
+#[derive(Debug)]
+struct GitUsageRefreshGuard;
+
+impl Drop for GitUsageRefreshGuard {
+    fn drop(&mut self) {
+        GIT_USAGE_CACHE_REFRESHING.store(false, Ordering::Release);
+    }
+}
+
+fn claim_git_usage_refresh() -> Result<GitUsageRefreshGuard, String> {
+    if GIT_USAGE_CACHE_REFRESHING.swap(true, Ordering::AcqRel) {
+        return Err("Git 统计正在刷新，请稍后再试".into());
+    }
+    Ok(GitUsageRefreshGuard)
 }
 
 pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), String> {
@@ -579,10 +675,21 @@ fn read_local_token_usage_cache(
     storage::read_json::<local_usage::LocalTokenUsageCache>(app, TOKEN_USAGE_CACHE_FILE)
 }
 
+fn read_git_usage_cache(app: &AppHandle) -> Result<Option<git_usage::GitUsageCache>, String> {
+    storage::read_json::<git_usage::GitUsageCache>(app, GIT_USAGE_CACHE_FILE)
+}
+
 fn local_token_usage_cache_is_stale(
     cache: &local_usage::LocalTokenUsageCache,
     max_age_minutes: i64,
 ) -> bool {
+    if max_age_minutes <= 0 {
+        return true;
+    }
+    (Utc::now() - cache.generated_at).num_minutes() >= max_age_minutes
+}
+
+fn git_usage_cache_is_stale(cache: &git_usage::GitUsageCache, max_age_minutes: i64) -> bool {
     if max_age_minutes <= 0 {
         return true;
     }
@@ -885,6 +992,17 @@ mod tests {
         assert_eq!(error, "Token 用量正在刷新，请稍后再试");
         drop(guard);
         assert!(claim_local_token_usage_refresh().is_ok());
+    }
+
+    #[test]
+    fn git_usage_refresh_guard_rejects_parallel_refreshes_and_releases() {
+        let guard = claim_git_usage_refresh().unwrap();
+
+        let error = claim_git_usage_refresh().unwrap_err();
+
+        assert_eq!(error, "Git 统计正在刷新，请稍后再试");
+        drop(guard);
+        assert!(claim_git_usage_refresh().is_ok());
     }
 
     #[test]
