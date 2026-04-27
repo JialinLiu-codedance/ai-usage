@@ -177,17 +177,19 @@ fn existing_roots(
     roots: &[PathBuf],
     missing_sources: &mut Vec<String>,
 ) -> Vec<PathBuf> {
-    roots
+    let existing = roots
         .iter()
-        .filter_map(|root| {
-            if root.is_dir() {
-                Some(root.clone())
-            } else {
-                missing_sources.push(format!("{label}: {}", root.display()));
-                None
-            }
-        })
-        .collect()
+        .filter(|root| root.is_dir())
+        .cloned()
+        .collect::<Vec<_>>();
+    if existing.is_empty() {
+        missing_sources.extend(
+            roots
+                .iter()
+                .map(|root| format!("{label}: {}", root.display())),
+        );
+    }
+    existing
 }
 
 fn claude_projects_roots() -> Vec<PathBuf> {
@@ -991,6 +993,24 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn existing_roots_skips_missing_candidates_when_at_least_one_exists() {
+        let root = temp_dir("existing-root-candidates");
+        let missing = root.join("missing");
+        let existing = root.join("existing");
+        fs::create_dir_all(&existing).unwrap();
+        let mut missing_sources = Vec::new();
+
+        let roots = existing_roots(
+            "Claude Code",
+            &[missing.clone(), existing.clone()],
+            &mut missing_sources,
+        );
+
+        assert_eq!(roots, vec![existing]);
+        assert!(missing_sources.is_empty());
     }
 
     #[test]
