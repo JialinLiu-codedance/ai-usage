@@ -1,5 +1,6 @@
 use crate::models::{
     GitUsageBucket, GitUsageReport, GitUsageRepository, GitUsageTotals, LocalTokenUsageRange,
+    CUSTOM_USAGE_WINDOW_DAYS,
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,20 @@ pub struct GitUsageCache {
     pub last3_days: GitUsageReport,
     pub this_week: GitUsageReport,
     pub this_month: GitUsageReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_window_start: Option<NaiveDate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_window_end: Option<NaiveDate>,
+    #[serde(default)]
+    pub custom_days: Vec<GitUsageCachedDay>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitUsageCachedDay {
+    pub date: String,
+    pub totals: GitUsageTotals,
+    #[serde(default)]
+    pub repositories: Vec<GitUsageRepository>,
 }
 
 impl GitUsageCache {
@@ -53,11 +68,104 @@ impl GitUsageCache {
             LocalTokenUsageRange::Last3Days => self.last3_days.clone(),
             LocalTokenUsageRange::ThisWeek => self.this_week.clone(),
             LocalTokenUsageRange::ThisMonth => self.this_month.clone(),
+            LocalTokenUsageRange::Custom => {
+                let mut report = self.this_month.clone();
+                report.range = LocalTokenUsageRange::Custom;
+                report.start_date = None;
+                report.end_date = None;
+                report
+            }
         };
         report
             .warnings
             .retain(|warning| !is_stale_worktree_warning(warning));
         report
+    }
+
+    pub fn covers_custom_range(&self, start_date: NaiveDate, end_date: NaiveDate) -> bool {
+        matches!(
+            (self.custom_window_start, self.custom_window_end),
+            (Some(window_start), Some(window_end))
+                if start_date >= window_start && end_date <= window_end && !self.custom_days.is_empty()
+        )
+    }
+
+    pub fn custom_report(&self, start_date: NaiveDate, end_date: NaiveDate) -> GitUsageReport {
+        let days_by_date = self
+            .custom_days
+            .iter()
+            .map(|day| (day.date.as_str(), day))
+            .collect::<HashMap<_, _>>();
+        let mut current = start_date;
+        let mut totals = GitUsageTotals::default();
+        let mut repositories_by_path = HashMap::<String, GitUsageRepository>::new();
+        let mut buckets = Vec::new();
+
+        while current <= end_date {
+            let date = current.format("%Y-%m-%d").to_string();
+            let cached_day = days_by_date.get(date.as_str());
+            let day_totals = cached_day.map(|day| day.totals.clone()).unwrap_or_default();
+            totals.added_lines = totals.added_lines.saturating_add(day_totals.added_lines);
+            totals.deleted_lines = totals
+                .deleted_lines
+                .saturating_add(day_totals.deleted_lines);
+            totals.changed_files = totals
+                .changed_files
+                .saturating_add(day_totals.changed_files);
+
+            for repository in cached_day
+                .map(|day| day.repositories.iter())
+                .into_iter()
+                .flatten()
+            {
+                let entry = repositories_by_path
+                    .entry(repository.path.clone())
+                    .or_insert_with(|| GitUsageRepository {
+                        name: repository.name.clone(),
+                        path: repository.path.clone(),
+                        added_lines: 0,
+                        deleted_lines: 0,
+                        changed_files: 0,
+                    });
+                entry.added_lines = entry.added_lines.saturating_add(repository.added_lines);
+                entry.deleted_lines = entry.deleted_lines.saturating_add(repository.deleted_lines);
+                entry.changed_files = entry.changed_files.saturating_add(repository.changed_files);
+            }
+
+            buckets.push(GitUsageBucket {
+                date,
+                added_lines: day_totals.added_lines,
+                deleted_lines: day_totals.deleted_lines,
+                changed_files: day_totals.changed_files,
+            });
+            current += Duration::days(1);
+        }
+
+        let mut repositories = repositories_by_path
+            .into_values()
+            .filter(|repository| {
+                repository
+                    .added_lines
+                    .saturating_add(repository.deleted_lines)
+                    .saturating_add(repository.changed_files)
+                    > 0
+            })
+            .collect::<Vec<_>>();
+        sort_repositories(&mut repositories);
+
+        GitUsageReport {
+            range: LocalTokenUsageRange::Custom,
+            start_date: Some(start_date.format("%Y-%m-%d").to_string()),
+            end_date: Some(end_date.format("%Y-%m-%d").to_string()),
+            pending: false,
+            totals,
+            buckets,
+            repositories,
+            repository_count: self.this_month.repository_count,
+            missing_sources: Vec::new(),
+            warnings: filter_stale_worktree_warnings(self.this_month.warnings.clone()),
+            generated_at: self.generated_at,
+        }
     }
 }
 
@@ -68,7 +176,7 @@ pub fn build_cache(root: PathBuf) -> Result<GitUsageCache, String> {
         Ok(repositories) => (repositories, Vec::new()),
         Err(error) => (Vec::new(), vec![error]),
     };
-    let since = earliest_range_start(now);
+    let since = earliest_cached_start(now);
     let mut stats = Vec::new();
 
     for repository in &repositories {
@@ -88,6 +196,17 @@ pub fn build_cache(root: PathBuf) -> Result<GitUsageCache, String> {
 }
 
 pub fn empty_report(range: LocalTokenUsageRange, warning: Option<String>) -> GitUsageReport {
+    if range == LocalTokenUsageRange::Custom {
+        let today = Utc::now().date_naive();
+        return aggregate_custom_git_stats(
+            Utc::now(),
+            today,
+            today,
+            Vec::new(),
+            0,
+            warning.into_iter().collect(),
+        );
+    }
     aggregate_git_stats(
         range,
         Utc::now(),
@@ -95,6 +214,29 @@ pub fn empty_report(range: LocalTokenUsageRange, warning: Option<String>) -> Git
         0,
         warning.into_iter().collect(),
     )
+}
+
+pub fn pending_report(range: LocalTokenUsageRange, warning: Option<String>) -> GitUsageReport {
+    let mut report = empty_report(range, warning);
+    report.pending = true;
+    report
+}
+
+pub fn pending_custom_report(
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    warning: Option<String>,
+) -> GitUsageReport {
+    let mut report = aggregate_custom_git_stats(
+        Utc::now(),
+        start_date,
+        end_date,
+        Vec::new(),
+        0,
+        warning.into_iter().collect(),
+    );
+    report.pending = true;
+    report
 }
 
 fn build_cache_from_stats(
@@ -105,6 +247,7 @@ fn build_cache_from_stats(
     warnings: Vec<String>,
 ) -> GitUsageCache {
     let stats = dedupe_git_stats_by_commit_hash(stats);
+    let (custom_window_start, custom_window_end, custom_days) = build_custom_days(now, &stats);
     GitUsageCache {
         root_path,
         generated_at: now,
@@ -136,10 +279,84 @@ fn build_cache_from_stats(
             repository_count,
             warnings,
         ),
+        custom_window_start: Some(custom_window_start),
+        custom_window_end: Some(custom_window_end),
+        custom_days,
     }
 }
 
-fn discover_git_repositories(root: &Path) -> Result<Vec<PathBuf>, String> {
+fn build_custom_days(
+    now: DateTime<Utc>,
+    stats: &[GitCommitStat],
+) -> (NaiveDate, NaiveDate, Vec<GitUsageCachedDay>) {
+    let window_end = now.date_naive();
+    let window_start = window_end - Duration::days(CUSTOM_USAGE_WINDOW_DAYS - 1);
+    let start = Utc.from_utc_datetime(&window_start.and_hms_opt(0, 0, 0).unwrap());
+    let end = Utc.from_utc_datetime(&window_end.and_hms_opt(23, 59, 59).unwrap());
+    let mut by_day = HashMap::<String, GitBucketStats>::new();
+    let mut repositories_by_day = HashMap::<String, HashMap<String, GitUsageRepository>>::new();
+
+    for stat in stats {
+        if stat.timestamp < start || stat.timestamp > end {
+            continue;
+        }
+        let date = bucket_key(
+            BucketGranularity::Day,
+            bucket_start_for_event(BucketGranularity::Day, stat.timestamp),
+        );
+        add_stat_to_bucket(by_day.entry(date.clone()).or_default(), stat);
+        let repository_key = if stat.repository_path.is_empty() {
+            "unknown".to_string()
+        } else {
+            stat.repository_path.clone()
+        };
+        let repository = repositories_by_day
+            .entry(date)
+            .or_default()
+            .entry(repository_key.clone())
+            .or_insert_with(|| GitUsageRepository {
+                name: if stat.repository_name.is_empty() {
+                    "repository".to_string()
+                } else {
+                    stat.repository_name.clone()
+                },
+                path: repository_key,
+                added_lines: 0,
+                deleted_lines: 0,
+                changed_files: 0,
+            });
+        repository.added_lines = repository.added_lines.saturating_add(stat.added_lines);
+        repository.deleted_lines = repository.deleted_lines.saturating_add(stat.deleted_lines);
+        repository.changed_files = repository.changed_files.saturating_add(stat.changed_files);
+    }
+
+    let mut days = Vec::new();
+    let mut current = window_start;
+    while current <= window_end {
+        let date = current.format("%Y-%m-%d").to_string();
+        let day_totals = by_day.remove(&date).unwrap_or_default();
+        let mut repositories = repositories_by_day
+            .remove(&date)
+            .unwrap_or_default()
+            .into_values()
+            .collect::<Vec<_>>();
+        sort_repositories(&mut repositories);
+        days.push(GitUsageCachedDay {
+            date,
+            totals: GitUsageTotals {
+                added_lines: day_totals.added_lines,
+                deleted_lines: day_totals.deleted_lines,
+                changed_files: day_totals.changed_files,
+            },
+            repositories,
+        });
+        current += Duration::days(1);
+    }
+
+    (window_start, window_end, days)
+}
+
+pub fn discover_git_repositories(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut repositories = Vec::new();
     let mut seen = HashSet::new();
     discover_git_repositories_inner(root, &mut repositories, &mut seen, true)?;
@@ -449,6 +666,64 @@ fn aggregate_git_stats(
     let granularity = bucket_granularity(range);
     let starts = range_bucket_starts(range, now);
     let start = range_start(range, now);
+    aggregate_git_stats_for_window(
+        range,
+        now,
+        start,
+        now,
+        granularity,
+        starts,
+        None,
+        None,
+        stats,
+        repository_count,
+        warnings,
+    )
+}
+
+fn aggregate_custom_git_stats(
+    now: DateTime<Utc>,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    stats: Vec<GitCommitStat>,
+    repository_count: usize,
+    warnings: Vec<String>,
+) -> GitUsageReport {
+    let start = Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap());
+    let inclusive_end = Utc.from_utc_datetime(&end_date.and_hms_opt(23, 59, 59).unwrap());
+    let end = if inclusive_end > now {
+        now
+    } else {
+        inclusive_end
+    };
+    aggregate_git_stats_for_window(
+        LocalTokenUsageRange::Custom,
+        now,
+        start,
+        end,
+        BucketGranularity::Day,
+        day_bucket_starts(start_date, end_date),
+        Some(start_date.format("%Y-%m-%d").to_string()),
+        Some(end_date.format("%Y-%m-%d").to_string()),
+        stats,
+        repository_count,
+        warnings,
+    )
+}
+
+fn aggregate_git_stats_for_window(
+    range: LocalTokenUsageRange,
+    now: DateTime<Utc>,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    granularity: BucketGranularity,
+    starts: Vec<DateTime<Utc>>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    stats: Vec<GitCommitStat>,
+    repository_count: usize,
+    warnings: Vec<String>,
+) -> GitUsageReport {
     let mut buckets_by_key = starts
         .iter()
         .map(|timestamp| {
@@ -462,7 +737,7 @@ fn aggregate_git_stats(
     let mut repositories_by_path = HashMap::<String, GitUsageRepository>::new();
 
     for stat in stats {
-        if stat.timestamp < start || stat.timestamp > now {
+        if stat.timestamp < start || stat.timestamp > end {
             continue;
         }
         let key = bucket_key(
@@ -523,23 +798,19 @@ fn aggregate_git_stats(
                 > 0
         })
         .collect::<Vec<_>>();
-    repositories.sort_by(|a, b| {
-        let a_total = a.added_lines.saturating_add(a.deleted_lines);
-        let b_total = b.added_lines.saturating_add(b.deleted_lines);
-        b_total
-            .cmp(&a_total)
-            .then_with(|| b.changed_files.cmp(&a.changed_files))
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    sort_repositories(&mut repositories);
 
     GitUsageReport {
         range,
+        start_date,
+        end_date,
+        pending: false,
         totals,
         buckets,
         repositories,
         repository_count,
         missing_sources: Vec::new(),
-        warnings,
+        warnings: filter_stale_worktree_warnings(warnings),
         generated_at: now,
     }
 }
@@ -550,7 +821,23 @@ fn add_stat_to_bucket(bucket: &mut GitBucketStats, stat: &GitCommitStat) {
     bucket.changed_files = bucket.changed_files.saturating_add(stat.changed_files);
 }
 
-fn earliest_range_start(now: DateTime<Utc>) -> DateTime<Utc> {
+fn sort_repositories(repositories: &mut [GitUsageRepository]) {
+    repositories.sort_by(|a, b| {
+        let a_total = a.added_lines.saturating_add(a.deleted_lines);
+        let b_total = b.added_lines.saturating_add(b.deleted_lines);
+        b_total
+            .cmp(&a_total)
+            .then_with(|| b.changed_files.cmp(&a.changed_files))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+}
+
+fn filter_stale_worktree_warnings(mut warnings: Vec<String>) -> Vec<String> {
+    warnings.retain(|warning| !is_stale_worktree_warning(warning));
+    warnings
+}
+
+fn earliest_cached_start(now: DateTime<Utc>) -> DateTime<Utc> {
     [
         LocalTokenUsageRange::Today,
         LocalTokenUsageRange::Last3Days,
@@ -559,6 +846,13 @@ fn earliest_range_start(now: DateTime<Utc>) -> DateTime<Utc> {
     ]
     .into_iter()
     .map(|range| range_start(range, now))
+    .chain(std::iter::once(
+        Utc.from_utc_datetime(
+            &(now.date_naive() - Duration::days(CUSTOM_USAGE_WINDOW_DAYS - 1))
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        ),
+    ))
     .min()
     .unwrap_or_else(|| range_start(LocalTokenUsageRange::ThisMonth, now))
 }
@@ -574,6 +868,7 @@ fn range_start(range: LocalTokenUsageRange, now: DateTime<Utc>) -> DateTime<Utc>
         LocalTokenUsageRange::ThisMonth => {
             NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today)
         }
+        LocalTokenUsageRange::Custom => today,
     };
     Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
 }
@@ -582,7 +877,9 @@ fn bucket_granularity(range: LocalTokenUsageRange) -> BucketGranularity {
     match range {
         LocalTokenUsageRange::Today => BucketGranularity::Hour,
         LocalTokenUsageRange::Last3Days => BucketGranularity::ThreeHours,
-        LocalTokenUsageRange::ThisWeek | LocalTokenUsageRange::ThisMonth => BucketGranularity::Day,
+        LocalTokenUsageRange::ThisWeek
+        | LocalTokenUsageRange::ThisMonth
+        | LocalTokenUsageRange::Custom => BucketGranularity::Day,
     }
 }
 
@@ -594,10 +891,38 @@ fn range_bucket_starts(range: LocalTokenUsageRange, now: DateTime<Utc>) -> Vec<D
         BucketGranularity::ThreeHours => Duration::hours(3),
     };
     let mut current = range_start(range, now);
+    let end = match range {
+        LocalTokenUsageRange::Today => current + Duration::hours(23),
+        LocalTokenUsageRange::ThisWeek => current + Duration::days(6),
+        LocalTokenUsageRange::ThisMonth => {
+            let month_end = month_end_date(now.date_naive());
+            Utc.from_utc_datetime(&month_end.and_hms_opt(0, 0, 0).unwrap())
+        }
+        _ => now,
+    };
     let mut starts = Vec::new();
-    while current <= now {
+    while current <= end {
         starts.push(current);
         current = current + step;
+    }
+    starts
+}
+
+fn month_end_date(date: NaiveDate) -> NaiveDate {
+    let (next_year, next_month) = if date.month() == 12 {
+        (date.year() + 1, 1)
+    } else {
+        (date.year(), date.month() + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(date) - Duration::days(1)
+}
+
+fn day_bucket_starts(start_date: NaiveDate, end_date: NaiveDate) -> Vec<DateTime<Utc>> {
+    let mut current = start_date;
+    let mut starts = Vec::new();
+    while current <= end_date {
+        starts.push(Utc.from_utc_datetime(&current.and_hms_opt(0, 0, 0).unwrap()));
+        current = current + Duration::days(1);
     }
     starts
 }
@@ -833,6 +1158,9 @@ mod tests {
             last3_days: empty_report(LocalTokenUsageRange::Last3Days, None),
             this_week: empty_report(LocalTokenUsageRange::ThisWeek, None),
             this_month: empty_report(LocalTokenUsageRange::ThisMonth, Some(stale_warning)),
+            custom_window_start: None,
+            custom_window_end: None,
+            custom_days: vec![],
         };
 
         let report = cache.report(LocalTokenUsageRange::ThisMonth);
@@ -935,8 +1263,9 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         );
         assert_eq!(
             today.buckets.last().map(|bucket| bucket.date.as_str()),
-            Some("2026-04-27T07:00:00Z")
+            Some("2026-04-27T23:00:00Z")
         );
+        assert_eq!(today.buckets.len(), 24);
 
         let last3_days = aggregate_git_stats(
             LocalTokenUsageRange::Last3Days,
@@ -972,7 +1301,15 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
                 .iter()
                 .map(|bucket| bucket.date.as_str())
                 .collect::<Vec<_>>(),
-            vec!["2026-04-27"]
+            vec![
+                "2026-04-27",
+                "2026-04-28",
+                "2026-04-29",
+                "2026-04-30",
+                "2026-05-01",
+                "2026-05-02",
+                "2026-05-03",
+            ]
         );
 
         let this_month =
@@ -986,13 +1323,46 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         );
         assert_eq!(
             this_month.buckets.last().map(|bucket| bucket.date.as_str()),
-            Some("2026-04-27")
+            Some("2026-04-30")
         );
+        assert_eq!(this_month.buckets.len(), 30);
         assert_eq!(this_month.totals.added_lines, 37);
         assert_eq!(this_month.repository_count, 3);
         assert_eq!(this_month.repositories.len(), 1);
         assert_eq!(this_month.repositories[0].name, "ai-usage");
         assert_eq!(this_month.repositories[0].added_lines, 37);
+    }
+
+    #[test]
+    fn aggregate_custom_git_stats_returns_daily_buckets_for_inclusive_dates() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 27, 7, 30, 0).unwrap();
+        let start = NaiveDate::from_ymd_opt(2026, 4, 20).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 4, 22).unwrap();
+        let stats = vec![
+            git_stat("2026-04-19T23:59:00Z", 999, 999, 999),
+            git_stat("2026-04-20T00:00:00Z", 10, 2, 1),
+            git_stat("2026-04-22T23:59:00Z", 20, 5, 2),
+            git_stat("2026-04-23T00:00:00Z", 999, 999, 999),
+        ];
+
+        let report = aggregate_custom_git_stats(now, start, end, stats, 3, vec![]);
+
+        assert_eq!(report.range, LocalTokenUsageRange::Custom);
+        assert_eq!(report.start_date.as_deref(), Some("2026-04-20"));
+        assert_eq!(report.end_date.as_deref(), Some("2026-04-22"));
+        assert_eq!(report.totals.added_lines, 30);
+        assert_eq!(report.totals.deleted_lines, 7);
+        assert_eq!(report.totals.changed_files, 3);
+        assert_eq!(
+            report
+                .buckets
+                .iter()
+                .map(|bucket| bucket.date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-04-20", "2026-04-21", "2026-04-22"]
+        );
+        assert_eq!(report.repositories.len(), 1);
+        assert_eq!(report.repositories[0].added_lines, 30);
     }
 
     #[test]
@@ -1029,6 +1399,80 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
             cache.report(LocalTokenUsageRange::ThisWeek).generated_at,
             now
         );
+        assert_eq!(
+            cache.custom_window_start,
+            Some(NaiveDate::from_ymd_opt(2026, 1, 28).unwrap())
+        );
+        assert_eq!(
+            cache.custom_window_end,
+            Some(NaiveDate::from_ymd_opt(2026, 4, 27).unwrap())
+        );
+        assert_eq!(cache.custom_days.len(), 90);
+    }
+
+    #[test]
+    fn custom_report_aggregates_cached_daily_rows() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 28, 7, 30, 0).unwrap();
+        let cache = GitUsageCache {
+            root_path: "/tmp/workspace".into(),
+            generated_at: now,
+            today: empty_report(LocalTokenUsageRange::Today, None),
+            last3_days: empty_report(LocalTokenUsageRange::Last3Days, None),
+            this_week: empty_report(LocalTokenUsageRange::ThisWeek, None),
+            this_month: empty_report(LocalTokenUsageRange::ThisMonth, None),
+            custom_window_start: Some(NaiveDate::from_ymd_opt(2026, 1, 29).unwrap()),
+            custom_window_end: Some(NaiveDate::from_ymd_opt(2026, 4, 28).unwrap()),
+            custom_days: vec![
+                GitUsageCachedDay {
+                    date: "2026-04-20".into(),
+                    totals: GitUsageTotals {
+                        added_lines: 10,
+                        deleted_lines: 3,
+                        changed_files: 1,
+                    },
+                    repositories: vec![GitUsageRepository {
+                        name: "repo-a".into(),
+                        path: "/tmp/repo-a".into(),
+                        added_lines: 10,
+                        deleted_lines: 3,
+                        changed_files: 1,
+                    }],
+                },
+                GitUsageCachedDay {
+                    date: "2026-04-21".into(),
+                    totals: GitUsageTotals::default(),
+                    repositories: vec![],
+                },
+                GitUsageCachedDay {
+                    date: "2026-04-22".into(),
+                    totals: GitUsageTotals {
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 2,
+                    },
+                    repositories: vec![GitUsageRepository {
+                        name: "repo-b".into(),
+                        path: "/tmp/repo-b".into(),
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 2,
+                    }],
+                },
+            ],
+        };
+
+        let report = cache.custom_report(
+            NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 4, 22).unwrap(),
+        );
+
+        assert_eq!(report.range, LocalTokenUsageRange::Custom);
+        assert_eq!(report.start_date.as_deref(), Some("2026-04-20"));
+        assert_eq!(report.end_date.as_deref(), Some("2026-04-22"));
+        assert_eq!(report.totals.added_lines, 30);
+        assert_eq!(report.buckets.len(), 3);
+        assert_eq!(report.repositories.len(), 2);
+        assert_eq!(report.repositories[0].name, "repo-b");
     }
 
     #[test]

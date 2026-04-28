@@ -56,6 +56,13 @@ const report: GitUsageReport = {
       deleted_lines: 200,
       changed_files: 5,
     },
+    {
+      name: "small-tool",
+      path: "/Users/test/small-tool",
+      added_lines: 25,
+      deleted_lines: 5,
+      changed_files: 1,
+    },
   ],
 };
 
@@ -73,17 +80,49 @@ test("gitUsageSummaryMetrics formats added, deleted, and changed file totals", (
   ]);
 });
 
-test("buildGitUsageChartRows scales added, deleted, and changed file series against max bucket", () => {
+test("buildGitUsageChartRows scales added and deleted line series against max bucket", () => {
   assert.deepEqual(
     buildGitUsageChartRows(report).map((row) => ({
       label: row.label,
       addedHeight: row.addedHeight,
       deletedHeight: row.deletedHeight,
-      changedHeight: row.changedHeight,
     })),
     [
-      { label: "00", addedHeight: 25, deletedHeight: 6, changedHeight: 1 },
-      { label: "03", addedHeight: 100, deletedHeight: 20, changedHeight: 1 },
+      { label: "00", addedHeight: 25, deletedHeight: 6 },
+      { label: "03", addedHeight: 100, deletedHeight: 20 },
+    ],
+  );
+});
+
+test("buildGitUsageChartRows scales only line-count series", () => {
+  const lineOnlyReport: GitUsageReport = {
+    ...report,
+    range: "thisMonth",
+    buckets: [
+      {
+        date: "2026-04-27",
+        added_lines: 10,
+        deleted_lines: 5,
+        changed_files: 500,
+      },
+      {
+        date: "2026-04-28",
+        added_lines: 20,
+        deleted_lines: 10,
+        changed_files: 1,
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    buildGitUsageChartRows(lineOnlyReport).map((row) => ({
+      label: row.label,
+      addedHeight: row.addedHeight,
+      deletedHeight: row.deletedHeight,
+    })),
+    [
+      { label: "27", addedHeight: 50, deletedHeight: 25 },
+      { label: "28", addedHeight: 100, deletedHeight: 50 },
     ],
   );
 });
@@ -119,14 +158,28 @@ test("repositoryUsageRows sorts repositories and scales bars against the highest
         addedPercent: 29,
         deletedPercent: 8,
       },
+      {
+        name: "small-tool",
+        displayAdded: "+25",
+        displayDeleted: "-5",
+        addedPercent: 2,
+        deletedPercent: 0,
+      },
     ],
+  );
+});
+
+test("repositoryUsageRows returns all counted repositories by default", () => {
+  assert.deepEqual(
+    repositoryUsageRows(report).map((row) => row.name),
+    ["ai-usage", "backend-api", "docs-site", "small-tool"],
   );
 });
 
 test("mock getGitUsage returns a complete visible report outside Tauri", async () => {
   resetMockTauriStateForTests();
 
-  const mock = await getGitUsage("thisWeek");
+  const mock = await getGitUsage({ kind: "preset", range: "thisWeek" });
 
   assert.equal(mock.range, "thisWeek");
   assert.ok(mock.repository_count > 0);
@@ -136,3 +189,53 @@ test("mock getGitUsage returns a complete visible report outside Tauri", async (
   assert.ok(mock.buckets.length > 0);
   assert.ok(mock.repositories.length > 0);
 });
+
+test("mock getGitUsage supports a daily custom date range", async () => {
+  resetMockTauriStateForTests();
+
+  const mock = await getGitUsage({
+    kind: "custom",
+    startDate: "2026-04-20",
+    endDate: "2026-04-22",
+  });
+
+  assert.equal(mock.range, "custom");
+  assert.equal(mock.start_date, "2026-04-20");
+  assert.equal(mock.end_date, "2026-04-22");
+  assert.deepEqual(
+    mock.buckets.map((bucket) => bucket.date),
+    ["2026-04-20", "2026-04-21", "2026-04-22"],
+  );
+  assert.deepEqual(
+    buildGitUsageChartRows(mock).map((row) => row.label),
+    ["04/20", "04/21", "04/22"],
+  );
+});
+
+test("mock getGitUsage returns every hour for today's full day", async () => {
+  resetMockTauriStateForTests();
+
+  const mock = await getGitUsage({ kind: "preset", range: "today" });
+
+  assert.equal(mock.buckets.length, 24);
+  assert.deepEqual(
+    buildGitUsageChartRows(mock).map((row) => row.label),
+    Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, "0")),
+  );
+});
+
+test("mock getGitUsage returns every day for the selected week and month", async () => {
+  resetMockTauriStateForTests();
+
+  const week = await getGitUsage({ kind: "preset", range: "thisWeek" });
+  const month = await getGitUsage({ kind: "preset", range: "thisMonth" });
+
+  assert.equal(week.buckets.length, 7);
+  assert.equal(month.buckets.length, daysInMonth(month.buckets[0].date));
+  assert.equal(month.buckets[0].date.endsWith("-01"), true);
+});
+
+function daysInMonth(dateKey: string): number {
+  const [year, month] = dateKey.split("-").map((part) => Number.parseInt(part, 10));
+  return new Date(year, month, 0).getDate();
+}

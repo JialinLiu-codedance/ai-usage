@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, Copy, FolderOpen, Inbox, Info, KeyRound, Link2, Plus, RefreshCw, Settings } from "lucide-react";
+import { ArrowLeft, Copy, FileText, FolderOpen, Inbox, Info, KeyRound, Link2, Plus, RefreshCw, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -25,11 +25,13 @@ import {
   completeAnthropicOAuth,
   completeOpenAIOAuth,
   getGitUsage,
+  getPrKpi,
   importCopilotAccount,
   importGlmAccount,
   importKimiAccount,
   importMiniMaxAccount,
   resizePanel,
+  refreshPrKpi,
   refreshQuota,
   refreshGitUsage,
   refreshLocalTokenUsage,
@@ -57,17 +59,37 @@ import {
   tokenUsageRangeLabels,
   usageToolLabel,
 } from "./lib/token-usage-display";
+import {
+  buildPrKpiRadarModel,
+  formatPrKpiOutputRatio,
+  formatPrKpiOverviewValue,
+  prKpiAxisAnchor,
+  prKpiMetricDescriptions,
+  prKpiOutputRatioTone,
+} from "./lib/pr-kpi-display";
+import {
+  applyCustomRangeDraft,
+  createUsageRangeUiState,
+  customUsageWindowBounds,
+  resolveVisibleReportState,
+  selectUsageRangeOption,
+  updateCustomRangeDraft,
+  usageRangeSelectionKey,
+  validateCustomUsageRangeSelection,
+} from "./lib/usage-range";
+import type { UsageRangeOption } from "./lib/usage-range";
 import type {
   AccountQuotaStatus,
   AppSettings,
   AppStatus,
   ConnectedAccount,
   GitUsageReport,
-  LocalTokenUsageRange,
   LocalTokenUsageReport,
   LocalTokenUsageTotals,
+  PrKpiReport,
   QuotaWindow,
   SaveSettingsInput,
+  UsageRangeSelection,
 } from "./lib/types";
 
 type PanelView =
@@ -82,10 +104,12 @@ type PanelView =
 type AddAccountBackView = Extract<PanelView, "overview" | "settings">;
 type OAuthProviderKey = "openai" | "anthropic";
 type SettingsTab = "quota" | "tokens";
-type SettingsUsageTab = "token" | "git";
+type SettingsUsageTab = "token" | "git" | "kpi";
 type Tone = "success" | "warning" | "danger" | "muted";
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const PANEL_WIDTH = 420;
+const PANEL_HEIGHT_MARGIN = 72;
+const PANEL_MIN_HEIGHT = 240;
 
 const emptyStatus: AppStatus = {
   snapshot: null,
@@ -329,7 +353,10 @@ export default function App() {
       frameId = requestAnimationFrame(() => {
         frameId = null;
         const measuredElement = panelRoot.firstElementChild instanceof HTMLElement ? panelRoot.firstElementChild : panelRoot;
-        const nextHeight = Math.ceil(measuredElement.scrollHeight);
+        const maxHeight = panelMaxHeight();
+        panelRoot.style.setProperty("--panel-max-height", `${maxHeight}px`);
+        const contentHeight = Math.ceil(measuredElement.scrollHeight);
+        const nextHeight = Math.min(contentHeight, maxHeight);
         const lastPanelSize = lastPanelSizeRef.current;
         if (!nextHeight || (lastPanelSize?.width === PANEL_WIDTH && lastPanelSize.height === nextHeight)) {
           return;
@@ -351,6 +378,11 @@ export default function App() {
       }
     };
   }, [view, loading]);
+
+  function panelMaxHeight(): number {
+    const availableHeight = window.screen?.availHeight || window.innerHeight || PANEL_MIN_HEIGHT;
+    return Math.max(PANEL_MIN_HEIGHT, Math.floor(availableHeight - PANEL_HEIGHT_MARGIN));
+  }
 
   function applySettings(nextSettings: AppSettings) {
     setSettings(nextSettings);
@@ -980,17 +1012,52 @@ function SettingsPanel({
   const [thresholdDraft, setThresholdDraft] = useState(String(form.low_quota_threshold_percent));
   const [activeTab, setActiveTab] = useState<SettingsTab>("quota");
   const [activeUsageTab, setActiveUsageTab] = useState<SettingsUsageTab>("token");
-  const [usageRange, setUsageRange] = useState<LocalTokenUsageRange>("thisMonth");
-  const [tokenReportsByRange, setTokenReportsByRange] = useState<Partial<Record<LocalTokenUsageRange, LocalTokenUsageReport>>>({});
-  const [gitReportsByRange, setGitReportsByRange] = useState<Partial<Record<LocalTokenUsageRange, GitUsageReport>>>({});
+  const [usageRangeUiState, setUsageRangeUiState] = useState(() => createUsageRangeUiState());
+  const [tokenReportsByRange, setTokenReportsByRange] = useState<Partial<Record<string, LocalTokenUsageReport>>>({});
+  const [gitReportsByRange, setGitReportsByRange] = useState<Partial<Record<string, GitUsageReport>>>({});
+  const [kpiReportsByRange, setKpiReportsByRange] = useState<Partial<Record<string, PrKpiReport>>>({});
+  const [lastReadyTokenRangeKey, setLastReadyTokenRangeKey] = useState<string | null>("thisMonth");
+  const [lastReadyGitRangeKey, setLastReadyGitRangeKey] = useState<string | null>("thisMonth");
+  const [lastReadyKpiRangeKey, setLastReadyKpiRangeKey] = useState<string | null>("thisMonth");
   const [tokenLoading, setTokenLoading] = useState(false);
   const [gitLoading, setGitLoading] = useState(false);
+  const [kpiLoading, setKpiLoading] = useState(false);
   const [tokenRefreshing, setTokenRefreshing] = useState(false);
   const [gitRefreshing, setGitRefreshing] = useState(false);
+  const [kpiRefreshing, setKpiRefreshing] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
+  const [kpiError, setKpiError] = useState<string | null>(null);
   const [gitRootDraft, setGitRootDraft] = useState(form.git_usage_root);
   const [gitRootPicking, setGitRootPicking] = useState(false);
+  const usageRangeSelection = usageRangeUiState.appliedSelection;
+  const usageRangeKey = usageRangeSelectionKey(usageRangeSelection);
+  const selectedRangeOption = usageRangeUiState.selectedOption;
+  const customRangeDraft = usageRangeUiState.customDraft;
+  const usageRangeError =
+    selectedRangeOption === "custom" ? validateCustomUsageRangeSelection(customRangeDraft) : null;
+  const customRangeBounds = customUsageWindowBounds();
+
+  function updateTokenReport(rangeKey: string, report: LocalTokenUsageReport) {
+    setTokenReportsByRange((current) => ({ ...current, [rangeKey]: report }));
+    if (!report.pending) {
+      setLastReadyTokenRangeKey(rangeKey);
+    }
+  }
+
+  function updateGitReport(rangeKey: string, report: GitUsageReport) {
+    setGitReportsByRange((current) => ({ ...current, [rangeKey]: report }));
+    if (!report.pending) {
+      setLastReadyGitRangeKey(rangeKey);
+    }
+  }
+
+  function updateKpiReport(rangeKey: string, report: PrKpiReport) {
+    setKpiReportsByRange((current) => ({ ...current, [rangeKey]: report }));
+    if (!report.pending) {
+      setLastReadyKpiRangeKey(rangeKey);
+    }
+  }
 
   useEffect(() => {
     setThresholdDraft(String(form.low_quota_threshold_percent));
@@ -1006,14 +1073,22 @@ function SettingsPanel({
     }
 
     let cancelled = false;
-    const cachedReport = tokenReportsByRange[usageRange] ?? null;
-    setTokenLoading(!cachedReport);
+    const cachedReport = tokenReportsByRange[usageRangeKey] ?? null;
+    const lastReadyReport =
+      lastReadyTokenRangeKey ? tokenReportsByRange[lastReadyTokenRangeKey] ?? null : null;
+    const visibleState = resolveVisibleReportState(
+      usageRangeKey,
+      cachedReport,
+      lastReadyTokenRangeKey,
+      lastReadyReport,
+    );
+    setTokenLoading(!visibleState.visibleKey);
     setTokenError(null);
 
-    getLocalTokenUsage(usageRange)
+    getLocalTokenUsage(usageRangeSelection)
       .then((report) => {
         if (!cancelled) {
-          setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
+          updateTokenReport(usageRangeKey, report);
         }
       })
       .catch((error) => {
@@ -1030,7 +1105,7 @@ function SettingsPanel({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, activeUsageTab, usageRange]);
+  }, [activeTab, activeUsageTab, usageRangeKey, usageRangeSelection]);
 
   useEffect(() => {
     if (activeTab !== "tokens" || activeUsageTab !== "git") {
@@ -1038,14 +1113,21 @@ function SettingsPanel({
     }
 
     let cancelled = false;
-    const cachedReport = gitReportsByRange[usageRange] ?? null;
-    setGitLoading(!cachedReport);
+    const cachedReport = gitReportsByRange[usageRangeKey] ?? null;
+    const lastReadyReport = lastReadyGitRangeKey ? gitReportsByRange[lastReadyGitRangeKey] ?? null : null;
+    const visibleState = resolveVisibleReportState(
+      usageRangeKey,
+      cachedReport,
+      lastReadyGitRangeKey,
+      lastReadyReport,
+    );
+    setGitLoading(!visibleState.visibleKey);
     setGitError(null);
 
-    getGitUsage(usageRange)
+    getGitUsage(usageRangeSelection)
       .then((report) => {
         if (!cancelled) {
-          setGitReportsByRange((current) => ({ ...current, [report.range]: report }));
+          updateGitReport(usageRangeKey, report);
         }
       })
       .catch((error) => {
@@ -1062,7 +1144,46 @@ function SettingsPanel({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, activeUsageTab, usageRange, form.git_usage_root]);
+  }, [activeTab, activeUsageTab, usageRangeKey, usageRangeSelection, form.git_usage_root]);
+
+  useEffect(() => {
+    if (activeTab !== "tokens" || activeUsageTab !== "kpi") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const cachedReport = kpiReportsByRange[usageRangeKey] ?? null;
+    const lastReadyReport = lastReadyKpiRangeKey ? kpiReportsByRange[lastReadyKpiRangeKey] ?? null : null;
+    const visibleState = resolveVisibleReportState(
+      usageRangeKey,
+      cachedReport,
+      lastReadyKpiRangeKey,
+      lastReadyReport,
+    );
+    setKpiLoading(!visibleState.visibleKey);
+    setKpiError(null);
+
+    getPrKpi(usageRangeSelection)
+      .then((report) => {
+        if (!cancelled) {
+          updateKpiReport(usageRangeKey, report);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setKpiError(errorMessage(error, "KPI 分析读取失败"));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setKpiLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, activeUsageTab, usageRangeKey, usageRangeSelection, form.git_usage_root]);
 
   useEffect(() => {
     if (!isTauriRuntime || activeTab !== "tokens" || activeUsageTab !== "token") {
@@ -1071,10 +1192,10 @@ function SettingsPanel({
 
     let cancelled = false;
     const unlisten = listen("local-token-usage-cache-updated", () => {
-      getLocalTokenUsage(usageRange)
+      getLocalTokenUsage(usageRangeSelection)
         .then((report) => {
           if (!cancelled) {
-            setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
+            updateTokenReport(usageRangeKey, report);
           }
         })
         .catch((error) => {
@@ -1088,7 +1209,7 @@ function SettingsPanel({
       cancelled = true;
       void unlisten.then((dispose) => dispose());
     };
-  }, [activeTab, activeUsageTab, usageRange]);
+  }, [activeTab, activeUsageTab, usageRangeKey, usageRangeSelection]);
 
   useEffect(() => {
     if (!isTauriRuntime || activeTab !== "tokens" || activeUsageTab !== "git") {
@@ -1097,10 +1218,10 @@ function SettingsPanel({
 
     let cancelled = false;
     const unlisten = listen("git-usage-cache-updated", () => {
-      getGitUsage(usageRange)
+      getGitUsage(usageRangeSelection)
         .then((report) => {
           if (!cancelled) {
-            setGitReportsByRange((current) => ({ ...current, [report.range]: report }));
+            updateGitReport(usageRangeKey, report);
           }
         })
         .catch((error) => {
@@ -1114,7 +1235,33 @@ function SettingsPanel({
       cancelled = true;
       void unlisten.then((dispose) => dispose());
     };
-  }, [activeTab, activeUsageTab, usageRange]);
+  }, [activeTab, activeUsageTab, usageRangeKey, usageRangeSelection]);
+
+  useEffect(() => {
+    if (!isTauriRuntime || activeTab !== "tokens" || activeUsageTab !== "kpi") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const unlisten = listen("pr-kpi-cache-updated", () => {
+      getPrKpi(usageRangeSelection)
+        .then((report) => {
+          if (!cancelled) {
+            updateKpiReport(usageRangeKey, report);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setKpiError(errorMessage(error, "KPI 分析读取失败"));
+          }
+        });
+    });
+
+    return () => {
+      cancelled = true;
+      void unlisten.then((dispose) => dispose());
+    };
+  }, [activeTab, activeUsageTab, usageRangeKey, usageRangeSelection]);
 
   function commitThreshold(value: string) {
     const parsed = Number.parseInt(value, 10);
@@ -1130,6 +1277,7 @@ function SettingsPanel({
     setGitRootDraft(nextValue);
     if (nextValue && nextValue !== form.git_usage_root) {
       setGitReportsByRange({});
+      setKpiReportsByRange({});
       onChange({ ...form, git_usage_root: nextValue });
     }
   }
@@ -1142,6 +1290,7 @@ function SettingsPanel({
       if (selected) {
         setGitRootDraft(selected);
         setGitReportsByRange({});
+        setKpiReportsByRange({});
         onChange({ ...form, git_usage_root: selected });
       }
     } catch (error) {
@@ -1155,8 +1304,8 @@ function SettingsPanel({
     setTokenRefreshing(true);
     setTokenError(null);
     try {
-      const report = await refreshLocalTokenUsage(usageRange);
-      setTokenReportsByRange((current) => ({ ...current, [report.range]: report }));
+      const report = await refreshLocalTokenUsage(usageRangeSelection);
+      updateTokenReport(usageRangeKey, report);
     } catch (error) {
       setTokenError(errorMessage(error, "Token 用量刷新失败"));
     } finally {
@@ -1168,8 +1317,8 @@ function SettingsPanel({
     setGitRefreshing(true);
     setGitError(null);
     try {
-      const report = await refreshGitUsage(usageRange);
-      setGitReportsByRange((current) => ({ ...current, [report.range]: report }));
+      const report = await refreshGitUsage(usageRangeSelection);
+      updateGitReport(usageRangeKey, report);
     } catch (error) {
       setGitError(errorMessage(error, "Git 统计刷新失败"));
     } finally {
@@ -1177,9 +1326,65 @@ function SettingsPanel({
     }
   }
 
+  async function handleKpiRefresh() {
+    setKpiRefreshing(true);
+    setKpiError(null);
+    try {
+      const report = await refreshPrKpi(usageRangeSelection);
+      updateKpiReport(usageRangeKey, report);
+    } catch (error) {
+      setKpiError(errorMessage(error, "KPI 分析刷新失败"));
+    } finally {
+      setKpiRefreshing(false);
+    }
+  }
+
+  function handleUsageRangeChange(option: UsageRangeOption) {
+    setUsageRangeUiState((current) => selectUsageRangeOption(current, option));
+  }
+
+  function handleCustomRangeChange(field: "startDate" | "endDate", value: string) {
+    setUsageRangeUiState((current) => updateCustomRangeDraft(current, field, value));
+  }
+
+  function handleCustomRangeApply() {
+    if (usageRangeError) {
+      return;
+    }
+    setUsageRangeUiState((current) => applyCustomRangeDraft(current));
+  }
+
   const accounts = connectedAccounts(settings, status);
-  const tokenReport = tokenReportsByRange[usageRange] ?? null;
-  const gitReport = gitReportsByRange[usageRange] ?? null;
+  const requestedTokenReport = tokenReportsByRange[usageRangeKey] ?? null;
+  const requestedGitReport = gitReportsByRange[usageRangeKey] ?? null;
+  const requestedKpiReport = kpiReportsByRange[usageRangeKey] ?? null;
+  const lastReadyTokenReport = lastReadyTokenRangeKey ? tokenReportsByRange[lastReadyTokenRangeKey] ?? null : null;
+  const lastReadyGitReport = lastReadyGitRangeKey ? gitReportsByRange[lastReadyGitRangeKey] ?? null : null;
+  const lastReadyKpiReport = lastReadyKpiRangeKey ? kpiReportsByRange[lastReadyKpiRangeKey] ?? null : null;
+  const tokenVisibleState = resolveVisibleReportState(
+    usageRangeKey,
+    requestedTokenReport,
+    lastReadyTokenRangeKey,
+    lastReadyTokenReport,
+  );
+  const gitVisibleState = resolveVisibleReportState(
+    usageRangeKey,
+    requestedGitReport,
+    lastReadyGitRangeKey,
+    lastReadyGitReport,
+  );
+  const kpiVisibleState = resolveVisibleReportState(
+    usageRangeKey,
+    requestedKpiReport,
+    lastReadyKpiRangeKey,
+    lastReadyKpiReport,
+  );
+  const tokenReport = tokenVisibleState.visibleKey ? tokenReportsByRange[tokenVisibleState.visibleKey] ?? null : null;
+  const gitReport = gitVisibleState.visibleKey ? gitReportsByRange[gitVisibleState.visibleKey] ?? null : null;
+  const kpiReport = kpiVisibleState.visibleKey ? kpiReportsByRange[kpiVisibleState.visibleKey] ?? null : null;
+  const tokenPreparing = Boolean(requestedTokenReport?.pending) || tokenVisibleState.showingFallback;
+  const gitPreparing = Boolean(requestedGitReport?.pending) || gitVisibleState.showingFallback;
+  const kpiPreparing = Boolean(requestedKpiReport?.pending) || kpiVisibleState.showingFallback;
 
   return (
     <Card className="settings-panel">
@@ -1337,23 +1542,36 @@ function SettingsPanel({
         <TokenUsagePanel
           report={tokenReport}
           gitReport={gitReport}
-          range={usageRange}
+          kpiReport={kpiReport}
+          selectedRangeOption={selectedRangeOption}
+          customRangeDraft={customRangeDraft}
+          customRangeBounds={customRangeBounds}
+          rangeError={usageRangeError}
           activeUsageTab={activeUsageTab}
           gitUsageRoot={gitRootDraft}
           gitRootPicking={gitRootPicking}
           loading={tokenLoading}
           gitLoading={gitLoading}
+          kpiLoading={kpiLoading}
+          preparing={tokenPreparing}
+          gitPreparing={gitPreparing}
+          kpiPreparing={kpiPreparing}
           refreshing={tokenRefreshing}
           gitRefreshing={gitRefreshing}
+          kpiRefreshing={kpiRefreshing}
           error={tokenError}
           gitError={gitError}
-          onRangeChange={setUsageRange}
+          kpiError={kpiError}
+          onRangeChange={handleUsageRangeChange}
+          onCustomRangeChange={handleCustomRangeChange}
+          onCustomRangeApply={handleCustomRangeApply}
           onUsageTabChange={setActiveUsageTab}
           onGitUsageRootDraftChange={setGitRootDraft}
           onGitUsageRootCommit={commitGitUsageRoot}
           onGitUsageRootPick={handlePickGitUsageRoot}
           onRefresh={handleTokenRefresh}
           onGitRefresh={handleGitRefresh}
+          onKpiRefresh={handleKpiRefresh}
         />
       )}
 
@@ -1365,48 +1583,73 @@ function SettingsPanel({
 function TokenUsagePanel({
   report,
   gitReport,
-  range,
+  kpiReport,
+  selectedRangeOption,
+  customRangeDraft,
+  customRangeBounds,
+  rangeError,
   activeUsageTab,
   gitUsageRoot,
   gitRootPicking,
   loading,
   gitLoading,
+  kpiLoading,
+  preparing,
+  gitPreparing,
+  kpiPreparing,
   refreshing,
   gitRefreshing,
+  kpiRefreshing,
   error,
   gitError,
+  kpiError,
   onRangeChange,
+  onCustomRangeChange,
+  onCustomRangeApply,
   onUsageTabChange,
   onGitUsageRootDraftChange,
   onGitUsageRootCommit,
   onGitUsageRootPick,
   onRefresh,
   onGitRefresh,
+  onKpiRefresh,
 }: {
   report: LocalTokenUsageReport | null;
   gitReport: GitUsageReport | null;
-  range: LocalTokenUsageRange;
+  kpiReport: PrKpiReport | null;
+  selectedRangeOption: UsageRangeOption;
+  customRangeDraft: Extract<UsageRangeSelection, { kind: "custom" }>;
+  customRangeBounds: { minDate: string; maxDate: string };
+  rangeError: string | null;
   activeUsageTab: SettingsUsageTab;
   gitUsageRoot: string;
   gitRootPicking: boolean;
   loading: boolean;
   gitLoading: boolean;
+  kpiLoading: boolean;
+  preparing: boolean;
+  gitPreparing: boolean;
+  kpiPreparing: boolean;
   refreshing: boolean;
   gitRefreshing: boolean;
+  kpiRefreshing: boolean;
   error: string | null;
   gitError: string | null;
-  onRangeChange: (range: LocalTokenUsageRange) => void;
+  kpiError: string | null;
+  onRangeChange: (range: UsageRangeOption) => void;
+  onCustomRangeChange: (field: "startDate" | "endDate", value: string) => void;
+  onCustomRangeApply: () => void;
   onUsageTabChange: (tab: SettingsUsageTab) => void;
   onGitUsageRootDraftChange: (value: string) => void;
   onGitUsageRootCommit: (value: string) => void;
   onGitUsageRootPick: () => void;
   onRefresh: () => void;
   onGitRefresh: () => void;
+  onKpiRefresh: () => void;
 }) {
   const chartRows = report ? buildTokenUsageChartRows(report) : [];
-  const visibleChartRows = chartRows.length > 7 ? chartRows.slice(-7) : chartRows;
-  const chartLegend = report ? buildTokenUsageChartLegend(report, 3) : [];
-  const modelRows = report ? modelUsageRows(report, 3) : [];
+  const chartLegend = report ? buildTokenUsageChartLegend(report) : [];
+  const modelRows = report ? modelUsageRows(report) : [];
   const tools = report?.tools.filter((tool) => tool.total_tokens > 0) ?? [];
   const notices = [
     ...(report?.warnings ?? []),
@@ -1420,13 +1663,47 @@ function TokenUsagePanel({
           <button
             key={option}
             type="button"
-            className={`token-range-button ${range === option ? "token-range-button-active" : ""}`}
+            className={`token-range-button ${selectedRangeOption === option ? "token-range-button-active" : ""}`}
             onClick={() => onRangeChange(option)}
           >
             {tokenUsageRangeLabels[option]}
           </button>
         ))}
       </div>
+
+      {selectedRangeOption === "custom" ? (
+        <div className="usage-custom-range-row">
+          <input
+            type="date"
+            aria-label="开始日期"
+            value={customRangeDraft.startDate}
+            min={customRangeBounds.minDate}
+            max={customRangeDraft.endDate}
+            onChange={(event) => onCustomRangeChange("startDate", event.target.value)}
+          />
+          <span>至</span>
+          <input
+            type="date"
+            aria-label="结束日期"
+            value={customRangeDraft.endDate}
+            min={customRangeDraft.startDate}
+            max={customRangeBounds.maxDate}
+            onChange={(event) => onCustomRangeChange("endDate", event.target.value)}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="usage-apply-button"
+            disabled={Boolean(rangeError)}
+            onClick={onCustomRangeApply}
+          >
+            查询
+          </Button>
+        </div>
+      ) : null}
+
+      {rangeError ? <div className="inline-error">{rangeError}</div> : null}
 
       <div className="usage-subtabs" role="tablist" aria-label="统计类型">
         <button
@@ -1448,17 +1725,30 @@ function TokenUsagePanel({
         >
           Git 提交统计
         </button>
+        <span className="usage-subtab-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className={`usage-subtab ${activeUsageTab === "kpi" ? "usage-subtab-active" : ""}`}
+          role="tab"
+          aria-selected={activeUsageTab === "kpi"}
+          onClick={() => onUsageTabChange("kpi")}
+        >
+          KPI 分析
+        </button>
       </div>
 
       {activeUsageTab === "token" ? (
         <>
           {error ? <div className="inline-error">{error}</div> : null}
+          {preparing ? <div className="usage-preparing">正在准备所选时间范围，当前先展示最近一次可用结果</div> : null}
           {loading && !report ? <div className="token-loading">读取本地日志...</div> : null}
 
           {report ? (
             <>
               <TokenUsageSummary totals={report.totals} />
-              {report.totals.total_tokens === 0 ? <div className="token-empty">当前时间范围暂无 Token 用量数据</div> : null}
+              {report.totals.total_tokens === 0 && !report.pending ? (
+                <div className="token-empty">当前时间范围暂无 Token 用量数据</div>
+              ) : null}
 
           <section className="usage-section">
             <div className="token-section-header">
@@ -1471,8 +1761,12 @@ function TokenUsagePanel({
                 ))}
               </div>
             </div>
-            <div className={`token-chart token-chart-range-${report.range}`} aria-label="每日 Token 趋势">
-              {visibleChartRows.map((row) => (
+            <div
+              className={`token-chart token-chart-range-${report.range}`}
+              style={chartColumnCountStyle(chartRows.length)}
+              aria-label="每日 Token 趋势"
+            >
+              {chartRows.map((row) => (
                 <div className="token-chart-column" key={row.date}>
                   <div className="token-chart-bar" title={row.label}>
                     {row.segments.map((segment) => (
@@ -1504,6 +1798,24 @@ function TokenUsagePanel({
                     </div>
                     <div className="token-model-progress">
                       <span style={{ width: `${model.percent}%` }} />
+                    </div>
+                    <div className="token-model-breakdown" aria-label={`${model.model} Token 构成`}>
+                      <span>
+                        输入
+                        <strong>{model.displayInput}</strong>
+                      </span>
+                      <span>
+                        输出
+                        <strong>{model.displayOutput}</strong>
+                      </span>
+                      <span>
+                        缓存命中
+                        <strong>{model.displayCacheRead}</strong>
+                      </span>
+                      <span>
+                        存储缓存
+                        <strong>{model.displayCacheCreation}</strong>
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -1552,18 +1864,28 @@ function TokenUsagePanel({
             </>
           ) : null}
         </>
-      ) : (
+      ) : activeUsageTab === "git" ? (
         <GitUsageSection
           report={gitReport}
           gitUsageRoot={gitUsageRoot}
           gitRootPicking={gitRootPicking}
           loading={gitLoading}
+          preparing={gitPreparing}
           refreshing={gitRefreshing}
           error={gitError}
           onGitUsageRootDraftChange={onGitUsageRootDraftChange}
           onGitUsageRootCommit={onGitUsageRootCommit}
           onGitUsageRootPick={onGitUsageRootPick}
           onRefresh={onGitRefresh}
+        />
+      ) : (
+        <KpiUsageSection
+          report={kpiReport}
+          loading={kpiLoading}
+          preparing={kpiPreparing}
+          refreshing={kpiRefreshing}
+          error={kpiError}
+          onRefresh={onKpiRefresh}
         />
       )}
     </section>
@@ -1575,6 +1897,7 @@ function GitUsageSection({
   gitUsageRoot,
   gitRootPicking,
   loading,
+  preparing,
   refreshing,
   error,
   onGitUsageRootDraftChange,
@@ -1586,6 +1909,7 @@ function GitUsageSection({
   gitUsageRoot: string;
   gitRootPicking: boolean;
   loading: boolean;
+  preparing: boolean;
   refreshing: boolean;
   error: string | null;
   onGitUsageRootDraftChange: (value: string) => void;
@@ -1594,9 +1918,8 @@ function GitUsageSection({
   onRefresh: () => void;
 }) {
   const chartRows = report ? buildGitUsageChartRows(report) : [];
-  const visibleChartRows = chartRows.length > 7 ? chartRows.slice(-7) : chartRows;
   const metrics = report ? gitUsageSummaryMetrics(report) : [];
-  const repositoryRows = report ? repositoryUsageRows(report, 3) : [];
+  const repositoryRows = report ? repositoryUsageRows(report) : [];
   const notices = [
     ...(report?.warnings ?? []),
     ...(report?.missing_sources.map((source) => `未找到 ${source}`) ?? []),
@@ -1604,35 +1927,8 @@ function GitUsageSection({
 
   return (
     <section className="git-usage-section">
-      <div className="git-root-field">
-        <label htmlFor="git-usage-root">统计路径</label>
-        <div className="git-root-control">
-          <input
-            id="git-usage-root"
-            value={gitUsageRoot}
-            onChange={(event) => onGitUsageRootDraftChange(event.target.value)}
-            onBlur={() => onGitUsageRootCommit(gitUsageRoot)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.currentTarget.blur();
-              }
-            }}
-          />
-          <Button
-            type="button"
-            variant="secondary"
-            size="icon-sm"
-            className="git-root-pick-button"
-            aria-label="选择 Git 统计路径"
-            disabled={gitRootPicking}
-            onClick={onGitUsageRootPick}
-          >
-            <FolderOpen />
-          </Button>
-        </div>
-      </div>
-
       {error ? <div className="inline-error">{error}</div> : null}
+      {preparing ? <div className="usage-preparing">正在准备所选时间范围，当前先展示最近一次可用结果</div> : null}
       {loading && !report ? <div className="token-loading">读取 Git 统计缓存...</div> : null}
 
       {report ? (
@@ -1651,7 +1947,7 @@ function GitUsageSection({
             </div>
           </section>
 
-          {report.totals.added_lines + report.totals.deleted_lines === 0 ? (
+          {report.totals.added_lines + report.totals.deleted_lines === 0 && !report.pending ? (
             <div className="token-empty">当前时间范围暂无 Git 提交统计</div>
           ) : null}
 
@@ -1661,11 +1957,14 @@ function GitUsageSection({
               <div className="token-legend" aria-label="代码行数图例">
                 <span className="token-legend-item git-added-legend">新增</span>
                 <span className="token-legend-item git-deleted-legend">删除</span>
-                <span className="token-legend-item git-changed-legend">修改文件</span>
               </div>
             </div>
-            <div className={`git-chart git-chart-range-${report.range}`} aria-label="代码行数趋势">
-              {visibleChartRows.map((row) => (
+            <div
+              className={`git-chart git-chart-range-${report.range}`}
+              style={chartColumnCountStyle(chartRows.length)}
+              aria-label="代码行数趋势"
+            >
+              {chartRows.map((row) => (
                 <div className="git-chart-column" key={row.date}>
                   <div className="git-chart-bars" title={row.label}>
                     <span
@@ -1677,11 +1976,6 @@ function GitUsageSection({
                       className="git-chart-bar git-chart-deleted"
                       style={gitBarStyle(row.deletedHeight)}
                       title={`删除 ${formatCompactLines(row.deletedLines)}`}
-                    />
-                    <span
-                      className="git-chart-bar git-chart-changed"
-                      style={gitBarStyle(row.changedHeight)}
-                      title={`修改文件 ${formatCompactLines(row.changedFiles)}`}
                     />
                   </div>
                   <span>{row.label}</span>
@@ -1729,6 +2023,34 @@ function GitUsageSection({
             </div>
           ) : null}
 
+          <div className="git-root-field">
+            <label htmlFor="git-usage-root">统计路径</label>
+            <div className="git-root-control">
+              <input
+                id="git-usage-root"
+                value={gitUsageRoot}
+                onChange={(event) => onGitUsageRootDraftChange(event.target.value)}
+                onBlur={() => onGitUsageRootCommit(gitUsageRoot)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon-sm"
+                className="git-root-pick-button"
+                aria-label="选择 Git 统计路径"
+                disabled={gitRootPicking}
+                onClick={onGitUsageRootPick}
+              >
+                <FolderOpen />
+              </Button>
+            </div>
+          </div>
+
           <div className="token-footer">
             <div className="token-generated-at">更新于 {formatGeneratedAt(report.generated_at)}</div>
             <Button
@@ -1744,6 +2066,181 @@ function GitUsageSection({
                 className={refreshing ? "refresh-icon-spinning" : undefined}
               />
               {refreshing ? "计算中" : "刷新 Git 统计"}
+            </Button>
+          </div>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function KpiUsageSection({
+  report,
+  loading,
+  preparing,
+  refreshing,
+  error,
+  onRefresh,
+}: {
+  report: PrKpiReport | null;
+  loading: boolean;
+  preparing: boolean;
+  refreshing: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const radar = report ? buildPrKpiRadarModel(report) : null;
+  const notices = [
+    ...(report?.warnings ?? []),
+    ...(report?.missing_sources.map((source) => `未找到 ${source}`) ?? []),
+  ];
+
+  return (
+    <section className="kpi-usage-section">
+      {error ? <div className="inline-error">{error}</div> : null}
+      {preparing ? <div className="usage-preparing">正在准备所选时间范围，当前先展示最近一次可用结果</div> : null}
+      {loading && !report ? <div className="token-loading">读取 KPI 分析缓存...</div> : null}
+
+      {report ? (
+        <>
+          <section className="token-card kpi-summary-card">
+            <div className="kpi-summary-heading">
+              <h2>效率概览</h2>
+              <div className="kpi-summary-help">
+                <button
+                  type="button"
+                  className="kpi-summary-help-trigger"
+                  aria-label="查看效率概览说明"
+                  aria-describedby="kpi-summary-tooltip"
+                >
+                  <Info />
+                </button>
+                <div id="kpi-summary-tooltip" role="tooltip" className="kpi-summary-tooltip">
+                  <div>代码行数 = 代码增行数 + 代码减行数</div>
+                  <div>产出比 = 代码净增行数 / Token 用量(千)</div>
+                </div>
+              </div>
+            </div>
+            <div className="kpi-summary-grid">
+              <TokenUsageMetric
+                label="Token 总用量"
+                value={formatPrKpiOverviewValue(report.overview.token_total)}
+              />
+              <TokenUsageMetric
+                label="代码行数"
+                value={formatPrKpiOverviewValue(report.overview.code_lines)}
+              />
+              <TokenUsageMetric
+                label="产出比"
+                value={formatPrKpiOutputRatio(report.overview.output_ratio)}
+                tone={prKpiOutputRatioTone(report.overview.output_ratio)}
+              />
+            </div>
+          </section>
+
+          <section className="token-card kpi-radar-card">
+            <div className="kpi-radar-heading">
+              <h2>PR 质量雷达</h2>
+              <div className="kpi-radar-help">
+                <button
+                  type="button"
+                  className="kpi-radar-help-trigger"
+                  aria-label="查看 PR 质量雷达指标说明"
+                  aria-describedby="kpi-radar-tooltip"
+                >
+                  <FileText />
+                </button>
+                <div id="kpi-radar-tooltip" role="tooltip" className="kpi-radar-tooltip">
+                  {report.metrics.map((metric) => (
+                    <div key={metric.key}>{`• ${metric.label}：${prKpiMetricDescriptions[metric.key]}`}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {radar ? (
+              <div className="kpi-radar-wrap">
+                <svg
+                  className="kpi-radar-svg"
+                  viewBox="0 0 280 280"
+                  role="img"
+                  aria-label="PR 质量雷达图"
+                >
+                  {radar.gridPolygons.map((points, index) => (
+                    <polygon
+                      key={points}
+                      points={points}
+                      className={`kpi-radar-grid kpi-radar-grid-${index}`}
+                    />
+                  ))}
+                  {radar.axes.map((axis) => (
+                    <line
+                      key={`axis-${axis.key}`}
+                      x1={radar.center}
+                      y1={radar.center}
+                      x2={radar.center + Math.cos(axis.angle) * radar.radius}
+                      y2={radar.center + Math.sin(axis.angle) * radar.radius}
+                      className="kpi-radar-axis"
+                    />
+                  ))}
+                  <polygon points={radar.polygonPoints} className="kpi-radar-shape" />
+                  {radar.axes.map((axis) => (
+                    <circle
+                      key={`point-${axis.key}`}
+                      cx={axis.pointX}
+                      cy={axis.pointY}
+                      r={axis.is_missing ? 3 : 4}
+                      className={`kpi-radar-point ${axis.is_missing ? "kpi-radar-point-missing" : ""}`}
+                    >
+                      <title>{`${axis.label}: ${axis.display_value}`}</title>
+                    </circle>
+                  ))}
+                  {radar.axes.map((axis) => (
+                    <text
+                      key={`label-${axis.key}`}
+                      x={axis.labelX}
+                      y={axis.labelY}
+                      textAnchor={prKpiAxisAnchor(axis.labelX, radar.center)}
+                      className="kpi-radar-label"
+                    >
+                      <tspan x={axis.labelX} dy="0">
+                        {axis.label}
+                      </tspan>
+                      <tspan x={axis.labelX} dy="14" className="kpi-radar-label-subtle">
+                        {axis.displayValue}
+                      </tspan>
+                    </text>
+                  ))}
+                </svg>
+              </div>
+            ) : null}
+            {radar?.overallScoreLabel ? (
+              <div className="kpi-overall-note">综合分仅基于有数据的维度计算：{radar.overallScoreLabel}</div>
+            ) : null}
+          </section>
+
+          {notices.length > 0 ? (
+            <div className="token-warning-list">
+              {notices.slice(0, 4).map((notice) => (
+                <div key={notice}>{notice}</div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="token-footer">
+            <div className="token-generated-at">更新于 {formatGeneratedAt(report.generated_at)}</div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="token-refresh-button"
+              disabled={refreshing}
+              onClick={onRefresh}
+            >
+              <RefreshCw
+                data-icon="inline-start"
+                className={refreshing ? "refresh-icon-spinning" : undefined}
+              />
+              {refreshing ? "计算中" : "刷新 KPI"}
             </Button>
           </div>
         </>
@@ -1794,6 +2291,12 @@ function tokenSegmentStyle(height: number): CSSProperties {
 function gitBarStyle(height: number): CSSProperties {
   return {
     height: height > 0 ? `${Math.max(height, 3)}%` : 0,
+  };
+}
+
+function chartColumnCountStyle(count: number): CSSProperties & { "--usage-chart-columns": number } {
+  return {
+    "--usage-chart-columns": Math.max(count, 1),
   };
 }
 
@@ -2247,7 +2750,7 @@ const refreshIntervalOptions = [
   { value: 60, label: "1 小时" },
 ];
 
-const tokenUsageRangeOptions: LocalTokenUsageRange[] = ["thisMonth", "thisWeek", "last3Days", "today"];
+const tokenUsageRangeOptions: UsageRangeOption[] = ["thisMonth", "thisWeek", "today", "custom"];
 
 const providers: Array<{
   key: ProviderKey;

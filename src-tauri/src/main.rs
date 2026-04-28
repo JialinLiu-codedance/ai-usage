@@ -6,6 +6,7 @@ mod models;
 mod notifications;
 mod oauth;
 mod panel;
+mod pr_kpi;
 mod provider;
 mod secrets;
 mod settings;
@@ -77,6 +78,11 @@ fn main() {
                         token_cache_max_age,
                         &initial_settings.git_usage_root,
                     );
+                    commands::ensure_pr_kpi_cache(
+                        &handle,
+                        token_cache_max_age,
+                        &initial_settings.git_usage_root,
+                    );
                     refresh_tray_menu_from_state(&handle).await;
                 }
 
@@ -89,6 +95,11 @@ fn main() {
                             i64::from(settings.refresh_interval_minutes),
                         );
                         commands::ensure_git_usage_cache(
+                            &handle,
+                            i64::from(settings.refresh_interval_minutes),
+                            &settings.git_usage_root,
+                        );
+                        commands::ensure_pr_kpi_cache(
                             &handle,
                             i64::from(settings.refresh_interval_minutes),
                             &settings.git_usage_root,
@@ -145,6 +156,8 @@ fn main() {
             commands::refresh_local_token_usage,
             commands::get_git_usage,
             commands::refresh_git_usage,
+            commands::get_pr_kpi,
+            commands::refresh_pr_kpi,
             sync_tray_menu,
         ])
         .build(tauri::generate_context!())

@@ -90,7 +90,11 @@ export interface OAuthStatus {
   auth_url: string | null;
 }
 
-export type LocalTokenUsageRange = "today" | "last3Days" | "thisWeek" | "thisMonth";
+export type PresetUsageRange = "today" | "last3Days" | "thisWeek" | "thisMonth";
+export type LocalTokenUsageRange = PresetUsageRange | "last3Days" | "custom";
+export type UsageRangeSelection =
+  | { kind: "preset"; range: PresetUsageRange }
+  | { kind: "custom"; startDate: string; endDate: string };
 
 export interface LocalTokenUsageTotals {
   input_tokens: number;
@@ -116,6 +120,9 @@ export interface LocalTokenUsageTool extends Omit<LocalTokenUsageTotals, "cache_
 
 export interface LocalTokenUsageReport {
   range: LocalTokenUsageRange;
+  start_date?: string | null;
+  end_date?: string | null;
+  pending?: boolean;
   totals: LocalTokenUsageTotals;
   days: LocalTokenUsageDay[];
   models: LocalTokenUsageModel[];
@@ -142,10 +149,49 @@ export interface GitUsageRepository extends GitUsageTotals {
 
 export interface GitUsageReport {
   range: LocalTokenUsageRange;
+  start_date?: string | null;
+  end_date?: string | null;
+  pending?: boolean;
   totals: GitUsageTotals;
   buckets: GitUsageBucket[];
   repositories: GitUsageRepository[];
   repository_count: number;
+  missing_sources: string[];
+  warnings: string[];
+  generated_at: string;
+}
+
+export type PrKpiMetricKey =
+  | "cycle_time_ai"
+  | "merged_ai_prs_per_week"
+  | "review_comments_per_pr"
+  | "test_added_ratio"
+  | "7d_rework_rate"
+  | "7d_retention_rate";
+
+export interface PrKpiOverview {
+  token_total: number;
+  code_lines: number;
+  output_ratio: number | null;
+}
+
+export interface PrKpiMetric {
+  key: PrKpiMetricKey;
+  label: string;
+  score: number | null;
+  raw_value: number | null;
+  display_value: string;
+  is_missing: boolean;
+}
+
+export interface PrKpiReport {
+  range: LocalTokenUsageRange;
+  start_date?: string | null;
+  end_date?: string | null;
+  pending?: boolean;
+  overview: PrKpiOverview;
+  metrics: PrKpiMetric[];
+  overall_score: number | null;
   missing_sources: string[];
   warnings: string[];
   generated_at: string;

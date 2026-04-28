@@ -27,6 +27,10 @@ export interface TokenUsageChartLegendItem {
 
 export interface ModelUsageDisplayRow extends LocalTokenUsageModel {
   displayTotal: string;
+  displayInput: string;
+  displayOutput: string;
+  displayCacheRead: string;
+  displayCacheCreation: string;
   percent: number;
 }
 
@@ -35,7 +39,11 @@ export const tokenUsageRangeLabels: Record<LocalTokenUsageRange, string> = {
   thisWeek: "本周",
   last3Days: "近3天",
   today: "今天",
+  custom: "自定义",
 };
+
+const TOKEN_CHART_PRIMARY_MODEL_LIMIT = 5;
+const TOKEN_CHART_OTHER_MODEL = "__other__";
 
 export function formatCompactTokens(value: number): string {
   if (value >= 1_000_000_000) {
@@ -50,22 +58,32 @@ export function formatCompactTokens(value: number): string {
   return `${Math.round(value)}`;
 }
 
-export function modelUsageRows(report: LocalTokenUsageReport, limit = 3): ModelUsageDisplayRow[] {
+export function modelUsageRows(report: LocalTokenUsageReport, limit?: number): ModelUsageDisplayRow[] {
   const maxTotal = Math.max(...report.models.map((model) => model.total_tokens), 0);
-  return [...report.models]
-    .sort((a, b) => b.total_tokens - a.total_tokens || a.model.localeCompare(b.model))
-    .slice(0, limit)
-    .map((model) => ({
-      ...model,
-      displayTotal: formatCompactTokens(model.total_tokens),
-      percent: maxTotal > 0 ? Math.max(4, Math.round((model.total_tokens / maxTotal) * 100)) : 0,
-    }));
+  const sorted = [...report.models]
+    .sort((a, b) => b.total_tokens - a.total_tokens || a.model.localeCompare(b.model));
+  const rows = typeof limit === "number" ? sorted.slice(0, limit) : sorted;
+  return rows.map((model) => ({
+    ...model,
+    displayTotal: formatCompactTokens(model.total_tokens),
+    displayInput: formatCompactTokens(model.input_tokens),
+    displayOutput: formatCompactTokens(model.output_tokens),
+    displayCacheRead: formatCompactTokens(model.cache_read_tokens),
+    displayCacheCreation: formatCompactTokens(model.cache_creation_tokens),
+    percent: maxTotal > 0 ? Math.max(4, Math.round((model.total_tokens / maxTotal) * 100)) : 0,
+  }));
 }
 
 export function buildTokenUsageChartRows(report: LocalTokenUsageReport): TokenUsageChartRow[] {
   const days = report.days.length > 0 ? report.days : emptyRecentDays();
   const maxTotal = Math.max(...days.map((day) => day.total_tokens), 0);
   const legend = buildTokenUsageChartLegend(report);
+  const primaryModels = new Set(
+    legend
+      .filter((item) => item.model !== TOKEN_CHART_OTHER_MODEL)
+      .map((item) => item.model),
+  );
+  const hasOther = legend.some((item) => item.model === TOKEN_CHART_OTHER_MODEL);
   return days.map((day) => {
     const totalHeight = maxTotal > 0 ? Math.round((day.total_tokens / maxTotal) * 100) : 0;
     const modelTotals = new Map((day.models ?? []).map((model) => [model.model, model.total_tokens]));
@@ -74,7 +92,9 @@ export function buildTokenUsageChartRows(report: LocalTokenUsageReport): TokenUs
       label: formatBucketLabel(day.date, report.range),
       totalHeight,
       segments: legend.map((item) => {
-        const totalTokens = modelTotals.get(item.model) ?? 0;
+        const totalTokens = item.model === TOKEN_CHART_OTHER_MODEL
+          ? otherModelTotal(day.models ?? [], primaryModels, hasOther)
+          : modelTotals.get(item.model) ?? 0;
         return {
           model: item.model,
           height: scaledSegment(totalTokens, maxTotal),
@@ -86,16 +106,28 @@ export function buildTokenUsageChartRows(report: LocalTokenUsageReport): TokenUs
   });
 }
 
-export function buildTokenUsageChartLegend(report: LocalTokenUsageReport, limit = 4): TokenUsageChartLegendItem[] {
+export function buildTokenUsageChartLegend(
+  report: LocalTokenUsageReport,
+  primaryLimit = TOKEN_CHART_PRIMARY_MODEL_LIMIT,
+): TokenUsageChartLegendItem[] {
   const models = report.models.length > 0 ? report.models : uniqueDayModels(report.days);
-  return [...models]
-    .sort((a, b) => b.total_tokens - a.total_tokens || a.model.localeCompare(b.model))
-    .slice(0, limit)
+  const sorted = [...models]
+    .sort((a, b) => b.total_tokens - a.total_tokens || a.model.localeCompare(b.model));
+  const primaryModels = sorted.slice(0, primaryLimit);
+  const items = primaryModels
     .map((model, index) => ({
       model: model.model,
       label: model.model,
       colorClass: chartModelColorClass(index),
     }));
+  if (sorted.length > primaryLimit) {
+    items.push({
+      model: TOKEN_CHART_OTHER_MODEL,
+      label: "其他",
+      colorClass: chartModelColorClass(primaryModels.length),
+    });
+  }
+  return items;
 }
 
 export function usageToolLabel(tool: string): string {
@@ -119,6 +151,19 @@ function scaledSegment(value: number, maxTotal: number): number {
     return 0;
   }
   return Math.round((value / maxTotal) * 100);
+}
+
+function otherModelTotal(
+  models: LocalTokenUsageModel[],
+  primaryModels: Set<string>,
+  hasOther: boolean,
+): number {
+  if (!hasOther) {
+    return 0;
+  }
+  return models
+    .filter((model) => !primaryModels.has(model.model))
+    .reduce((sum, model) => sum + model.total_tokens, 0);
 }
 
 function formatBucketLabel(date: string, range: LocalTokenUsageRange): string {
@@ -172,7 +217,7 @@ function uniqueDayModels(days: LocalTokenUsageDay[]): LocalTokenUsageModel[] {
 }
 
 function chartModelColorClass(index: number): string {
-  return `token-model-color-${index % 4}`;
+  return `token-model-color-${index % 6}`;
 }
 
 function trimTrailingZero(value: number, integerAt = 10): string {

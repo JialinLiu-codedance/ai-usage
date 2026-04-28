@@ -1,6 +1,6 @@
 use crate::models::{
     LocalTokenUsageDay, LocalTokenUsageModel, LocalTokenUsageRange, LocalTokenUsageReport,
-    LocalTokenUsageTool, LocalTokenUsageTotals,
+    LocalTokenUsageTool, LocalTokenUsageTotals, CUSTOM_USAGE_WINDOW_DAYS,
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,22 @@ pub struct LocalTokenUsageCache {
     pub last3_days: LocalTokenUsageReport,
     pub this_week: LocalTokenUsageReport,
     pub this_month: LocalTokenUsageReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_window_start: Option<NaiveDate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_window_end: Option<NaiveDate>,
+    #[serde(default)]
+    pub custom_days: Vec<LocalTokenUsageCachedDay>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LocalTokenUsageCachedDay {
+    pub date: String,
+    pub totals: LocalTokenUsageTotals,
+    #[serde(default)]
+    pub models: Vec<LocalTokenUsageModel>,
+    #[serde(default)]
+    pub tools: Vec<LocalTokenUsageTool>,
 }
 
 impl LocalTokenUsageCache {
@@ -71,6 +87,154 @@ impl LocalTokenUsageCache {
             LocalTokenUsageRange::Last3Days => self.last3_days.clone(),
             LocalTokenUsageRange::ThisWeek => self.this_week.clone(),
             LocalTokenUsageRange::ThisMonth => self.this_month.clone(),
+            LocalTokenUsageRange::Custom => {
+                let mut report = self.this_month.clone();
+                report.range = LocalTokenUsageRange::Custom;
+                report.start_date = None;
+                report.end_date = None;
+                report
+            }
+        }
+    }
+
+    pub fn covers_custom_range(&self, start_date: NaiveDate, end_date: NaiveDate) -> bool {
+        matches!(
+            (self.custom_window_start, self.custom_window_end),
+            (Some(window_start), Some(window_end))
+                if start_date >= window_start && end_date <= window_end && !self.custom_days.is_empty()
+        )
+    }
+
+    pub fn custom_report(
+        &self,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> LocalTokenUsageReport {
+        let days_by_date = self
+            .custom_days
+            .iter()
+            .map(|day| (day.date.as_str(), day))
+            .collect::<HashMap<_, _>>();
+        let mut current = start_date;
+        let mut totals = TokenStats::default();
+        let mut by_model = HashMap::<String, TokenStats>::new();
+        let mut by_tool = HashMap::<String, TokenStats>::new();
+        let mut days = Vec::new();
+
+        while current <= end_date {
+            let date = current.format("%Y-%m-%d").to_string();
+            let cached_day = days_by_date.get(date.as_str());
+            let day_totals = cached_day.map(|day| &day.totals);
+            let input_tokens = day_totals.map(|totals| totals.input_tokens).unwrap_or(0);
+            let output_tokens = day_totals.map(|totals| totals.output_tokens).unwrap_or(0);
+            let cache_read_tokens = day_totals
+                .map(|totals| totals.cache_read_tokens)
+                .unwrap_or(0);
+            let cache_creation_tokens = day_totals
+                .map(|totals| totals.cache_creation_tokens)
+                .unwrap_or(0);
+            let total_tokens = input_tokens
+                .saturating_add(output_tokens)
+                .saturating_add(cache_read_tokens)
+                .saturating_add(cache_creation_tokens);
+            let models = cached_day.map(|day| day.models.clone()).unwrap_or_default();
+
+            totals.input_tokens = totals.input_tokens.saturating_add(input_tokens);
+            totals.output_tokens = totals.output_tokens.saturating_add(output_tokens);
+            totals.cache_read_tokens = totals.cache_read_tokens.saturating_add(cache_read_tokens);
+            totals.cache_creation_tokens = totals
+                .cache_creation_tokens
+                .saturating_add(cache_creation_tokens);
+
+            for model in &models {
+                let current_model = by_model.entry(model.model.clone()).or_default();
+                current_model.input_tokens = current_model
+                    .input_tokens
+                    .saturating_add(model.input_tokens);
+                current_model.output_tokens = current_model
+                    .output_tokens
+                    .saturating_add(model.output_tokens);
+                current_model.cache_read_tokens = current_model
+                    .cache_read_tokens
+                    .saturating_add(model.cache_read_tokens);
+                current_model.cache_creation_tokens = current_model
+                    .cache_creation_tokens
+                    .saturating_add(model.cache_creation_tokens);
+            }
+
+            for tool in cached_day.map(|day| day.tools.iter()).into_iter().flatten() {
+                let current_tool = by_tool.entry(tool.tool.clone()).or_default();
+                current_tool.input_tokens =
+                    current_tool.input_tokens.saturating_add(tool.input_tokens);
+                current_tool.output_tokens = current_tool
+                    .output_tokens
+                    .saturating_add(tool.output_tokens);
+                current_tool.cache_read_tokens = current_tool
+                    .cache_read_tokens
+                    .saturating_add(tool.cache_read_tokens);
+                current_tool.cache_creation_tokens = current_tool
+                    .cache_creation_tokens
+                    .saturating_add(tool.cache_creation_tokens);
+            }
+
+            days.push(LocalTokenUsageDay {
+                date,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                total_tokens,
+                models,
+            });
+            current += Duration::days(1);
+        }
+
+        let mut models = by_model
+            .into_iter()
+            .map(|(model, stats)| model_usage(model, stats))
+            .collect::<Vec<_>>();
+        models.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| a.model.cmp(&b.model))
+        });
+
+        let mut tools = by_tool
+            .into_iter()
+            .map(|(tool, stats)| LocalTokenUsageTool {
+                tool,
+                input_tokens: stats.input_tokens,
+                output_tokens: stats.output_tokens,
+                cache_read_tokens: stats.cache_read_tokens,
+                cache_creation_tokens: stats.cache_creation_tokens,
+                total_tokens: stats.total_tokens(),
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| a.tool.cmp(&b.tool))
+        });
+
+        LocalTokenUsageReport {
+            range: LocalTokenUsageRange::Custom,
+            start_date: Some(start_date.format("%Y-%m-%d").to_string()),
+            end_date: Some(end_date.format("%Y-%m-%d").to_string()),
+            pending: false,
+            totals: LocalTokenUsageTotals {
+                input_tokens: totals.input_tokens,
+                output_tokens: totals.output_tokens,
+                cache_read_tokens: totals.cache_read_tokens,
+                cache_creation_tokens: totals.cache_creation_tokens,
+                total_tokens: totals.total_tokens(),
+                cache_hit_rate_percent: cache_hit_rate(&totals),
+            },
+            days,
+            models,
+            tools,
+            missing_sources: self.this_month.missing_sources.clone(),
+            warnings: self.this_month.warnings.clone(),
+            generated_at: self.generated_at,
         }
     }
 }
@@ -88,7 +252,37 @@ pub fn build_cache() -> Result<LocalTokenUsageCache, String> {
 
 pub fn empty_report(range: LocalTokenUsageRange, warning: Option<String>) -> LocalTokenUsageReport {
     let warnings = warning.into_iter().collect::<Vec<_>>();
+    if range == LocalTokenUsageRange::Custom {
+        let today = Utc::now().date_naive();
+        return aggregate_custom_events(Utc::now(), today, today, Vec::new(), Vec::new(), warnings);
+    }
     aggregate_events(range, Utc::now(), Vec::new(), Vec::new(), warnings)
+}
+
+pub fn pending_report(
+    range: LocalTokenUsageRange,
+    warning: Option<String>,
+) -> LocalTokenUsageReport {
+    let mut report = empty_report(range, warning);
+    report.pending = true;
+    report
+}
+
+pub fn pending_custom_report(
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    warning: Option<String>,
+) -> LocalTokenUsageReport {
+    let mut report = aggregate_custom_events(
+        Utc::now(),
+        start_date,
+        end_date,
+        Vec::new(),
+        Vec::new(),
+        warning.into_iter().collect(),
+    );
+    report.pending = true;
+    report
 }
 
 fn load_events() -> Result<(Vec<LocalUsageEvent>, Vec<String>, Vec<String>), String> {
@@ -139,6 +333,7 @@ fn build_cache_from_events(
     missing_sources: Vec<String>,
     warnings: Vec<String>,
 ) -> LocalTokenUsageCache {
+    let (custom_window_start, custom_window_end, custom_days) = build_custom_days(now, &events);
     LocalTokenUsageCache {
         generated_at: now,
         today: aggregate_events(
@@ -169,7 +364,102 @@ fn build_cache_from_events(
             missing_sources,
             warnings,
         ),
+        custom_window_start: Some(custom_window_start),
+        custom_window_end: Some(custom_window_end),
+        custom_days,
     }
+}
+
+fn build_custom_days(
+    now: DateTime<Utc>,
+    events: &[LocalUsageEvent],
+) -> (NaiveDate, NaiveDate, Vec<LocalTokenUsageCachedDay>) {
+    let window_end = now.date_naive();
+    let window_start = window_end - Duration::days(CUSTOM_USAGE_WINDOW_DAYS - 1);
+    let start = Utc.from_utc_datetime(&window_start.and_hms_opt(0, 0, 0).unwrap());
+    let end = Utc.from_utc_datetime(&window_end.and_hms_opt(23, 59, 59).unwrap());
+    let mut by_day = HashMap::<String, TokenStats>::new();
+    let mut by_day_model = HashMap::<String, HashMap<String, TokenStats>>::new();
+    let mut by_day_tool = HashMap::<String, HashMap<String, TokenStats>>::new();
+
+    for event in events {
+        if event.timestamp < start || event.timestamp > end {
+            continue;
+        }
+        let date = bucket_key(
+            BucketGranularity::Day,
+            bucket_start_for_event(BucketGranularity::Day, event.timestamp),
+        );
+        add_event(by_day.entry(date.clone()).or_default(), event);
+        add_event(
+            by_day_model
+                .entry(date.clone())
+                .or_default()
+                .entry(event.model.clone().unwrap_or_else(|| "unknown".into()))
+                .or_default(),
+            event,
+        );
+        add_event(
+            by_day_tool
+                .entry(date)
+                .or_default()
+                .entry(event.tool.clone())
+                .or_default(),
+            event,
+        );
+    }
+
+    let mut days = Vec::new();
+    let mut current = window_start;
+    while current <= window_end {
+        let date = current.format("%Y-%m-%d").to_string();
+        let stats = by_day.remove(&date).unwrap_or_default();
+        let mut models = by_day_model
+            .remove(&date)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(model, stats)| model_usage(model, stats))
+            .collect::<Vec<_>>();
+        models.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        let mut tools = by_day_tool
+            .remove(&date)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(tool, stats)| LocalTokenUsageTool {
+                tool,
+                input_tokens: stats.input_tokens,
+                output_tokens: stats.output_tokens,
+                cache_read_tokens: stats.cache_read_tokens,
+                cache_creation_tokens: stats.cache_creation_tokens,
+                total_tokens: stats.total_tokens(),
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| a.tool.cmp(&b.tool))
+        });
+        days.push(LocalTokenUsageCachedDay {
+            date,
+            totals: LocalTokenUsageTotals {
+                input_tokens: stats.input_tokens,
+                output_tokens: stats.output_tokens,
+                cache_read_tokens: stats.cache_read_tokens,
+                cache_creation_tokens: stats.cache_creation_tokens,
+                total_tokens: stats.total_tokens(),
+                cache_hit_rate_percent: cache_hit_rate(&stats),
+            },
+            models,
+            tools,
+        });
+        current += Duration::days(1);
+    }
+
+    (window_start, window_end, days)
 }
 
 fn existing_roots(
@@ -572,15 +862,73 @@ fn aggregate_events(
     missing_sources: Vec<String>,
     warnings: Vec<String>,
 ) -> LocalTokenUsageReport {
-    let range_start = range_start(range, now);
+    let start = range_start(range, now);
+    let granularity = bucket_granularity(range);
+    let bucket_starts = range_bucket_starts(range, now);
+    aggregate_events_for_window(
+        range,
+        now,
+        start,
+        now,
+        granularity,
+        bucket_starts,
+        None,
+        None,
+        events,
+        missing_sources,
+        warnings,
+    )
+}
+
+fn aggregate_custom_events(
+    now: DateTime<Utc>,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    events: Vec<LocalUsageEvent>,
+    missing_sources: Vec<String>,
+    warnings: Vec<String>,
+) -> LocalTokenUsageReport {
+    let start = Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap());
+    let inclusive_end = Utc.from_utc_datetime(&end_date.and_hms_opt(23, 59, 59).unwrap());
+    let end = if inclusive_end > now {
+        now
+    } else {
+        inclusive_end
+    };
+    aggregate_events_for_window(
+        LocalTokenUsageRange::Custom,
+        now,
+        start,
+        end,
+        BucketGranularity::Day,
+        day_bucket_starts(start_date, end_date),
+        Some(start_date.format("%Y-%m-%d").to_string()),
+        Some(end_date.format("%Y-%m-%d").to_string()),
+        events,
+        missing_sources,
+        warnings,
+    )
+}
+
+fn aggregate_events_for_window(
+    range: LocalTokenUsageRange,
+    now: DateTime<Utc>,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    granularity: BucketGranularity,
+    bucket_starts: Vec<DateTime<Utc>>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    events: Vec<LocalUsageEvent>,
+    missing_sources: Vec<String>,
+    warnings: Vec<String>,
+) -> LocalTokenUsageReport {
     let filtered = events
         .into_iter()
-        .filter(|event| event.timestamp >= range_start && event.timestamp <= now)
+        .filter(|event| event.timestamp >= range_start && event.timestamp <= range_end)
         .collect::<Vec<_>>();
 
     let mut totals = TokenStats::default();
-    let granularity = bucket_granularity(range);
-    let bucket_starts = range_bucket_starts(range, now);
     let mut by_bucket: HashMap<String, TokenStats> = HashMap::new();
     let mut by_bucket_model: HashMap<String, HashMap<String, TokenStats>> = HashMap::new();
     let mut by_model: HashMap<String, TokenStats> = HashMap::new();
@@ -669,6 +1017,9 @@ fn aggregate_events(
 
     LocalTokenUsageReport {
         range,
+        start_date,
+        end_date,
+        pending: false,
         totals: LocalTokenUsageTotals {
             input_tokens: totals.input_tokens,
             output_tokens: totals.output_tokens,
@@ -728,6 +1079,7 @@ fn range_start(range: LocalTokenUsageRange, now: DateTime<Utc>) -> DateTime<Utc>
         LocalTokenUsageRange::ThisMonth => {
             NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today)
         }
+        LocalTokenUsageRange::Custom => today,
     };
     Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
 }
@@ -736,7 +1088,9 @@ fn bucket_granularity(range: LocalTokenUsageRange) -> BucketGranularity {
     match range {
         LocalTokenUsageRange::Today => BucketGranularity::Hour,
         LocalTokenUsageRange::Last3Days => BucketGranularity::ThreeHours,
-        LocalTokenUsageRange::ThisWeek | LocalTokenUsageRange::ThisMonth => BucketGranularity::Day,
+        LocalTokenUsageRange::ThisWeek
+        | LocalTokenUsageRange::ThisMonth
+        | LocalTokenUsageRange::Custom => BucketGranularity::Day,
     }
 }
 
@@ -748,10 +1102,38 @@ fn range_bucket_starts(range: LocalTokenUsageRange, now: DateTime<Utc>) -> Vec<D
         BucketGranularity::ThreeHours => Duration::hours(3),
     };
     let mut current = range_start(range, now);
+    let end = match range {
+        LocalTokenUsageRange::Today => current + Duration::hours(23),
+        LocalTokenUsageRange::ThisWeek => current + Duration::days(6),
+        LocalTokenUsageRange::ThisMonth => {
+            let month_end = month_end_date(now.date_naive());
+            Utc.from_utc_datetime(&month_end.and_hms_opt(0, 0, 0).unwrap())
+        }
+        _ => now,
+    };
     let mut starts = Vec::new();
-    while current <= now {
+    while current <= end {
         starts.push(current);
         current = current + step;
+    }
+    starts
+}
+
+fn month_end_date(date: NaiveDate) -> NaiveDate {
+    let (next_year, next_month) = if date.month() == 12 {
+        (date.year() + 1, 1)
+    } else {
+        (date.year(), date.month() + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(date) - Duration::days(1)
+}
+
+fn day_bucket_starts(start_date: NaiveDate, end_date: NaiveDate) -> Vec<DateTime<Utc>> {
+    let mut current = start_date;
+    let mut starts = Vec::new();
+    while current <= end_date {
+        starts.push(Utc.from_utc_datetime(&current.and_hms_opt(0, 0, 0).unwrap()));
+        current = current + Duration::days(1);
     }
     starts
 }
@@ -1152,22 +1534,29 @@ mod tests {
 
         let report = aggregate_events(LocalTokenUsageRange::ThisMonth, now, events, vec![], vec![]);
 
+        assert_eq!(report.days.len(), 30);
         assert_eq!(
             report
                 .days
                 .iter()
+                .take(3)
                 .map(|day| day.date.as_str())
                 .collect::<Vec<_>>(),
             vec!["2026-04-01", "2026-04-02", "2026-04-03"]
+        );
+        assert_eq!(
+            report.days.last().map(|day| day.date.as_str()),
+            Some("2026-04-30")
         );
         assert_eq!(report.days[0].models[0].model, "claude-sonnet");
         assert_eq!(report.days[0].models[0].total_tokens, 15);
         assert!(report.days[1].models.is_empty());
         assert_eq!(report.days[2].models[0].model, "gpt-codex");
+        assert!(report.days[29].models.is_empty());
     }
 
     #[test]
-    fn report_today_returns_hourly_buckets_from_midnight_to_current_hour() {
+    fn report_today_returns_hourly_buckets_for_full_day() {
         let now = chrono::Utc.with_ymd_and_hms(2026, 4, 27, 3, 30, 0).unwrap();
         let events = vec![
             usage_event(
@@ -1188,6 +1577,7 @@ mod tests {
             report
                 .days
                 .iter()
+                .take(4)
                 .map(|day| day.date.as_str())
                 .collect::<Vec<_>>(),
             vec![
@@ -1197,6 +1587,11 @@ mod tests {
                 "2026-04-27T03:00:00Z",
             ]
         );
+        assert_eq!(report.days.len(), 24);
+        assert_eq!(
+            report.days.last().map(|day| day.date.as_str()),
+            Some("2026-04-27T23:00:00Z")
+        );
         assert_eq!(report.days[0].models[0].model, "claude-sonnet");
         assert!(report.days[1].models.is_empty());
         assert!(report.days[2].models.is_empty());
@@ -1204,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn report_this_week_returns_monday_to_current_day() {
+    fn report_this_week_returns_monday_to_sunday() {
         let now = chrono::Utc.with_ymd_and_hms(2026, 4, 29, 12, 0, 0).unwrap();
         let report = aggregate_events(LocalTokenUsageRange::ThisWeek, now, vec![], vec![], vec![]);
 
@@ -1214,7 +1609,15 @@ mod tests {
                 .iter()
                 .map(|day| day.date.as_str())
                 .collect::<Vec<_>>(),
-            vec!["2026-04-27", "2026-04-28", "2026-04-29"]
+            vec![
+                "2026-04-27",
+                "2026-04-28",
+                "2026-04-29",
+                "2026-04-30",
+                "2026-05-01",
+                "2026-05-02",
+                "2026-05-03",
+            ]
         );
     }
 
@@ -1243,6 +1646,45 @@ mod tests {
         );
         assert_eq!(report.days.len(), 19);
         assert_eq!(report.days[18].models[0].model, "gpt-codex");
+    }
+
+    #[test]
+    fn report_custom_range_returns_daily_buckets_for_inclusive_dates() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 4, 27, 7, 30, 0).unwrap();
+        let start = NaiveDate::from_ymd_opt(2026, 4, 20).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 4, 22).unwrap();
+        let events = vec![
+            usage_event("codex", "gpt-codex", "2026-04-19T23:59:00Z", 999, 0, 0, 0),
+            usage_event("codex", "gpt-codex", "2026-04-20T00:00:00Z", 10, 0, 0, 0),
+            usage_event("kimi", "kimi-cli", "2026-04-22T23:59:00Z", 20, 0, 0, 0),
+            usage_event(
+                "claude",
+                "claude-sonnet",
+                "2026-04-23T00:00:00Z",
+                999,
+                0,
+                0,
+                0,
+            ),
+        ];
+
+        let report = aggregate_custom_events(now, start, end, events, vec![], vec![]);
+
+        assert_eq!(report.range, LocalTokenUsageRange::Custom);
+        assert_eq!(report.start_date.as_deref(), Some("2026-04-20"));
+        assert_eq!(report.end_date.as_deref(), Some("2026-04-22"));
+        assert_eq!(report.totals.total_tokens, 30);
+        assert_eq!(
+            report
+                .days
+                .iter()
+                .map(|day| day.date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-04-20", "2026-04-21", "2026-04-22"]
+        );
+        assert_eq!(report.days[0].models[0].model, "gpt-codex");
+        assert!(report.days[1].models.is_empty());
+        assert_eq!(report.days[2].models[0].model, "kimi-cli");
     }
 
     #[test]
@@ -1289,6 +1731,104 @@ mod tests {
             cache.report(LocalTokenUsageRange::ThisWeek).generated_at,
             now
         );
+        assert_eq!(
+            cache.custom_window_start,
+            Some(NaiveDate::from_ymd_opt(2026, 1, 28).unwrap())
+        );
+        assert_eq!(
+            cache.custom_window_end,
+            Some(NaiveDate::from_ymd_opt(2026, 4, 27).unwrap())
+        );
+        assert_eq!(cache.custom_days.len(), 90);
+    }
+
+    #[test]
+    fn custom_report_aggregates_cached_daily_rows() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 4, 28, 7, 30, 0).unwrap();
+        let cache = LocalTokenUsageCache {
+            generated_at: now,
+            today: empty_report(LocalTokenUsageRange::Today, None),
+            last3_days: empty_report(LocalTokenUsageRange::Last3Days, None),
+            this_week: empty_report(LocalTokenUsageRange::ThisWeek, None),
+            this_month: empty_report(LocalTokenUsageRange::ThisMonth, None),
+            custom_window_start: Some(NaiveDate::from_ymd_opt(2026, 1, 29).unwrap()),
+            custom_window_end: Some(NaiveDate::from_ymd_opt(2026, 4, 28).unwrap()),
+            custom_days: vec![
+                LocalTokenUsageCachedDay {
+                    date: "2026-04-20".into(),
+                    totals: LocalTokenUsageTotals {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_tokens: 2,
+                        cache_creation_tokens: 1,
+                        total_tokens: 18,
+                        cache_hit_rate_percent: 16.7,
+                    },
+                    models: vec![LocalTokenUsageModel {
+                        model: "gpt-4.1".into(),
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_tokens: 2,
+                        cache_creation_tokens: 1,
+                        total_tokens: 18,
+                    }],
+                    tools: vec![LocalTokenUsageTool {
+                        tool: "codex".into(),
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_tokens: 2,
+                        cache_creation_tokens: 1,
+                        total_tokens: 18,
+                    }],
+                },
+                LocalTokenUsageCachedDay {
+                    date: "2026-04-21".into(),
+                    totals: LocalTokenUsageTotals::default(),
+                    models: vec![],
+                    tools: vec![],
+                },
+                LocalTokenUsageCachedDay {
+                    date: "2026-04-22".into(),
+                    totals: LocalTokenUsageTotals {
+                        input_tokens: 20,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                        total_tokens: 30,
+                        cache_hit_rate_percent: 0.0,
+                    },
+                    models: vec![LocalTokenUsageModel {
+                        model: "claude-sonnet".into(),
+                        input_tokens: 20,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                        total_tokens: 30,
+                    }],
+                    tools: vec![LocalTokenUsageTool {
+                        tool: "claude".into(),
+                        input_tokens: 20,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                        total_tokens: 30,
+                    }],
+                },
+            ],
+        };
+
+        let report = cache.custom_report(
+            NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 4, 22).unwrap(),
+        );
+
+        assert_eq!(report.range, LocalTokenUsageRange::Custom);
+        assert_eq!(report.start_date.as_deref(), Some("2026-04-20"));
+        assert_eq!(report.end_date.as_deref(), Some("2026-04-22"));
+        assert_eq!(report.totals.total_tokens, 48);
+        assert_eq!(report.days.len(), 3);
+        assert_eq!(report.tools.len(), 2);
+        assert_eq!(report.models[0].model, "claude-sonnet");
     }
 
     fn usage_event(

@@ -8,7 +8,6 @@ export interface GitUsageChartRow {
   changedFiles: number;
   addedHeight: number;
   deletedHeight: number;
-  changedHeight: number;
 }
 
 export interface GitUsageSummaryMetric {
@@ -47,7 +46,7 @@ export function gitUsageSummaryMetrics(report: GitUsageReport): GitUsageSummaryM
 
 export function buildGitUsageChartRows(report: GitUsageReport): GitUsageChartRow[] {
   const maxLines = Math.max(
-    ...report.buckets.flatMap((bucket) => [bucket.added_lines, bucket.deleted_lines, bucket.changed_files]),
+    ...report.buckets.flatMap((bucket) => [bucket.added_lines, bucket.deleted_lines]),
     0,
   );
 
@@ -59,19 +58,18 @@ export function buildGitUsageChartRows(report: GitUsageReport): GitUsageChartRow
     changedFiles: bucket.changed_files,
     addedHeight: scaledHeight(bucket.added_lines, maxLines),
     deletedHeight: scaledHeight(bucket.deleted_lines, maxLines),
-    changedHeight: scaledHeight(bucket.changed_files, maxLines),
   }));
 }
 
-export function repositoryUsageRows(report: GitUsageReport, limit = 3): RepositoryUsageDisplayRow[] {
-  const repositories = [...report.repositories]
+export function repositoryUsageRows(report: GitUsageReport, limit?: number): RepositoryUsageDisplayRow[] {
+  const sorted = [...report.repositories]
     .filter((repository) => repository.added_lines + repository.deleted_lines + repository.changed_files > 0)
     .sort((a, b) => {
       const aLineTotal = a.added_lines + a.deleted_lines;
       const bLineTotal = b.added_lines + b.deleted_lines;
       return bLineTotal - aLineTotal || b.changed_files - a.changed_files || a.name.localeCompare(b.name);
-    })
-    .slice(0, limit);
+    });
+  const repositories = typeof limit === "number" ? sorted.slice(0, limit) : sorted;
   const maxLineTotal = Math.max(...repositories.map((repository) => repository.added_lines + repository.deleted_lines), 0);
 
   return repositories.map((repository) => {

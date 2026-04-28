@@ -1,17 +1,18 @@
 use crate::{
     errors::{ProviderError, ProviderErrorKind},
-    git_usage, local_usage,
+    git_usage, local_usage, pr_kpi,
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ConnectedAccount,
         ConnectionTestResult, GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport,
-        QuotaSnapshot, SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_COPILOT, PROVIDER_GLM,
+        PrKpiOverview, PrKpiReport, QuotaSnapshot, SaveSettingsInput, UsageRangeRequest,
+        CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC, PROVIDER_COPILOT, PROVIDER_GLM,
         PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     notifications, oauth, panel, provider, secrets, settings,
     state::StateStore,
     storage,
 };
-use chrono::Utc;
+use chrono::{Local, NaiveDate, Utc};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -25,8 +26,11 @@ const TOKEN_USAGE_CACHE_FILE: &str = "local-token-usage-cache.json";
 const TOKEN_USAGE_CACHE_UPDATED_EVENT: &str = "local-token-usage-cache-updated";
 const GIT_USAGE_CACHE_FILE: &str = "git-usage-cache.json";
 const GIT_USAGE_CACHE_UPDATED_EVENT: &str = "git-usage-cache-updated";
+const PR_KPI_CACHE_FILE: &str = "pr-kpi-cache.json";
+const PR_KPI_CACHE_UPDATED_EVENT: &str = "pr-kpi-cache-updated";
 static TOKEN_USAGE_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
 static GIT_USAGE_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
+static PR_KPI_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 pub async fn get_current_quota(
@@ -291,12 +295,43 @@ pub fn resize_main_panel(app: AppHandle, width: f64, height: f64) -> Result<(), 
 #[tauri::command]
 pub fn get_local_token_usage(
     app: AppHandle,
-    range: LocalTokenUsageRange,
+    request: UsageRangeRequest,
 ) -> Result<LocalTokenUsageReport, String> {
+    let resolved = validate_usage_range_request(&request)?;
     let cache = read_local_token_usage_cache(&app)?;
     let max_age_minutes = settings::load_settings(&app)
         .map(|settings| i64::from(settings.refresh_interval_minutes))
         .unwrap_or(15);
+    if let ResolvedUsageRange::Custom {
+        start_date,
+        end_date,
+    } = resolved
+    {
+        let should_refresh = cache
+            .as_ref()
+            .map(|cache| {
+                local_token_usage_cache_is_stale(cache, max_age_minutes)
+                    || !cache.covers_custom_range(start_date, end_date)
+            })
+            .unwrap_or(true);
+        if should_refresh {
+            start_local_token_usage_cache_refresh(app.clone());
+        }
+
+        if let Some(cache) = cache.filter(|cache| cache.covers_custom_range(start_date, end_date)) {
+            return Ok(cache.custom_report(start_date, end_date));
+        }
+
+        return Ok(local_usage::pending_custom_report(
+            start_date,
+            end_date,
+            Some("Token 用量缓存正在后台生成，完成后会自动更新".into()),
+        ));
+    }
+
+    let ResolvedUsageRange::Preset(range) = resolved else {
+        unreachable!("custom usage range returned above");
+    };
 
     if cache
         .as_ref()
@@ -310,7 +345,7 @@ pub fn get_local_token_usage(
         return Ok(cache.report(range));
     }
 
-    Ok(local_usage::empty_report(
+    Ok(local_usage::pending_report(
         range,
         Some("Token 用量缓存正在后台生成，完成后会自动更新".into()),
     ))
@@ -319,20 +354,67 @@ pub fn get_local_token_usage(
 #[tauri::command]
 pub async fn refresh_local_token_usage(
     app: AppHandle,
-    range: LocalTokenUsageRange,
+    request: UsageRangeRequest,
 ) -> Result<LocalTokenUsageReport, String> {
+    let resolved = validate_usage_range_request(&request)?;
+    if let ResolvedUsageRange::Custom {
+        start_date,
+        end_date,
+    } = resolved
+    {
+        let cache = refresh_local_token_usage_cache(app, true).await?;
+        if !cache.covers_custom_range(start_date, end_date) {
+            return Err("Token 用量缓存刷新后仍未准备好".into());
+        }
+        return Ok(cache.custom_report(start_date, end_date));
+    }
+
+    let ResolvedUsageRange::Preset(range) = resolved else {
+        unreachable!("custom usage range returned above");
+    };
     let cache = refresh_local_token_usage_cache(app, true).await?;
     Ok(cache.report(range))
 }
 
 #[tauri::command]
-pub fn get_git_usage(
-    app: AppHandle,
-    range: LocalTokenUsageRange,
-) -> Result<GitUsageReport, String> {
+pub fn get_git_usage(app: AppHandle, request: UsageRangeRequest) -> Result<GitUsageReport, String> {
+    let resolved = validate_usage_range_request(&request)?;
     let cache = read_git_usage_cache(&app)?;
     let settings = settings::load_settings(&app).unwrap_or_default();
     let max_age_minutes = i64::from(settings.refresh_interval_minutes);
+    if let ResolvedUsageRange::Custom {
+        start_date,
+        end_date,
+    } = resolved
+    {
+        let should_refresh = cache
+            .as_ref()
+            .map(|cache| {
+                git_usage_cache_is_stale(cache, max_age_minutes, &settings.git_usage_root)
+                    || !cache.covers_custom_range(start_date, end_date)
+            })
+            .unwrap_or(true);
+        if should_refresh {
+            start_git_usage_cache_refresh(app.clone());
+        }
+
+        if let Some(cache) = cache.filter(|cache| {
+            cache.root_path == settings.git_usage_root
+                && cache.covers_custom_range(start_date, end_date)
+        }) {
+            return Ok(cache.custom_report(start_date, end_date));
+        }
+
+        return Ok(git_usage::pending_custom_report(
+            start_date,
+            end_date,
+            Some("Git 统计缓存正在后台生成，完成后会自动更新".into()),
+        ));
+    }
+
+    let ResolvedUsageRange::Preset(range) = resolved else {
+        unreachable!("custom usage range returned above");
+    };
 
     let cache_is_stale = cache
         .as_ref()
@@ -347,7 +429,7 @@ pub fn get_git_usage(
         return Ok(cache.report(range));
     }
 
-    Ok(git_usage::empty_report(
+    Ok(git_usage::pending_report(
         range,
         Some("Git 统计缓存正在后台生成，完成后会自动更新".into()),
     ))
@@ -356,10 +438,166 @@ pub fn get_git_usage(
 #[tauri::command]
 pub async fn refresh_git_usage(
     app: AppHandle,
-    range: LocalTokenUsageRange,
+    request: UsageRangeRequest,
 ) -> Result<GitUsageReport, String> {
+    let resolved = validate_usage_range_request(&request)?;
+    if let ResolvedUsageRange::Custom {
+        start_date,
+        end_date,
+    } = resolved
+    {
+        let cache = refresh_git_usage_cache(app, true).await?;
+        if !cache.covers_custom_range(start_date, end_date) {
+            return Err("Git 统计缓存刷新后仍未准备好".into());
+        }
+        return Ok(cache.custom_report(start_date, end_date));
+    }
+
+    let ResolvedUsageRange::Preset(range) = resolved else {
+        unreachable!("custom usage range returned above");
+    };
     let cache = refresh_git_usage_cache(app, true).await?;
     Ok(cache.report(range))
+}
+
+#[tauri::command]
+pub fn get_pr_kpi(app: AppHandle, request: UsageRangeRequest) -> Result<PrKpiReport, String> {
+    let resolved = validate_usage_range_request(&request)?;
+    let overview = kpi_overview_from_cached_stats(&app, &request)?;
+    let cache = read_pr_kpi_cache(&app)?;
+    let settings = settings::load_settings(&app).unwrap_or_default();
+    let max_age_minutes = i64::from(settings.refresh_interval_minutes);
+
+    if let ResolvedUsageRange::Custom {
+        start_date,
+        end_date,
+    } = resolved
+    {
+        let should_refresh = cache
+            .as_ref()
+            .map(|cache| {
+                pr_kpi_cache_is_stale(cache, max_age_minutes, &settings.git_usage_root)
+                    || !cache.covers_custom_range(start_date, end_date)
+            })
+            .unwrap_or(true);
+        if should_refresh {
+            start_pr_kpi_cache_refresh(app.clone());
+        }
+
+        if let Some(cache) = cache.filter(|cache| {
+            cache.root_path == settings.git_usage_root
+                && cache.covers_custom_range(start_date, end_date)
+        }) {
+            return Ok(cache.custom_report(start_date, end_date, overview));
+        }
+
+        return Ok(pr_kpi::pending_custom_report(
+            start_date,
+            end_date,
+            overview,
+            Some("KPI 分析缓存正在后台生成，完成后会自动更新".into()),
+        ));
+    }
+
+    let ResolvedUsageRange::Preset(range) = resolved else {
+        unreachable!("custom usage range returned above");
+    };
+
+    let cache_is_stale = cache
+        .as_ref()
+        .map(|cache| pr_kpi_cache_is_stale(cache, max_age_minutes, &settings.git_usage_root))
+        .unwrap_or(true);
+    if cache_is_stale {
+        start_pr_kpi_cache_refresh(app.clone());
+    }
+
+    if let Some(cache) = cache.filter(|cache| cache.root_path == settings.git_usage_root) {
+        return Ok(cache.report(range, overview));
+    }
+
+    Ok(pr_kpi::pending_report(
+        range,
+        overview,
+        Some("KPI 分析缓存正在后台生成，完成后会自动更新".into()),
+    ))
+}
+
+#[tauri::command]
+pub async fn refresh_pr_kpi(
+    app: AppHandle,
+    request: UsageRangeRequest,
+) -> Result<PrKpiReport, String> {
+    let resolved = validate_usage_range_request(&request)?;
+    let cache = refresh_pr_kpi_cache(app.clone(), true).await?;
+    let overview = kpi_overview_after_refresh(&app, &request).await?;
+
+    match resolved {
+        ResolvedUsageRange::Preset(range) => Ok(cache.report(range, overview)),
+        ResolvedUsageRange::Custom {
+            start_date,
+            end_date,
+        } => {
+            if !cache.covers_custom_range(start_date, end_date) {
+                return Err("KPI 缓存刷新后仍未准备好".into());
+            }
+            Ok(cache.custom_report(start_date, end_date, overview))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedUsageRange {
+    Preset(LocalTokenUsageRange),
+    Custom {
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    },
+}
+
+fn validate_usage_range_request(request: &UsageRangeRequest) -> Result<ResolvedUsageRange, String> {
+    validate_usage_range_request_with_today(request, Local::now().date_naive())
+}
+
+fn validate_usage_range_request_with_today(
+    request: &UsageRangeRequest,
+    today: NaiveDate,
+) -> Result<ResolvedUsageRange, String> {
+    match request {
+        UsageRangeRequest::Preset { range } => Ok(ResolvedUsageRange::Preset(*range)),
+        UsageRangeRequest::Custom {
+            start_date,
+            end_date,
+        } => {
+            let start = parse_custom_usage_date(start_date, "开始")?;
+            let end = parse_custom_usage_date(end_date, "结束")?;
+            if start > end {
+                return Err("自定义开始日期不能晚于结束日期".into());
+            }
+            if end > today {
+                return Err("自定义结束日期不能晚于今天".into());
+            }
+            let earliest_start = custom_usage_window_start(today);
+            if start < earliest_start {
+                return Err(format!(
+                    "自定义开始日期不能早于 {}",
+                    earliest_start.format("%Y-%m-%d")
+                ));
+            }
+            Ok(ResolvedUsageRange::Custom {
+                start_date: start,
+                end_date: end,
+            })
+        }
+    }
+}
+
+fn parse_custom_usage_date(value: &str, label: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| format!("自定义{label}日期格式无效，请使用 YYYY-MM-DD"))
+}
+
+fn custom_usage_window_start(today: NaiveDate) -> NaiveDate {
+    today - chrono::Duration::days(CUSTOM_USAGE_WINDOW_DAYS - 1)
 }
 
 pub fn ensure_local_token_usage_cache(app: &AppHandle, max_age_minutes: i64) {
@@ -390,6 +628,20 @@ pub fn ensure_git_usage_cache(app: &AppHandle, max_age_minutes: i64, root_path: 
     }
 }
 
+pub fn ensure_pr_kpi_cache(app: &AppHandle, max_age_minutes: i64, root_path: &str) {
+    let should_refresh = read_pr_kpi_cache(app)
+        .map(|cache| {
+            cache
+                .as_ref()
+                .map(|cache| pr_kpi_cache_is_stale(cache, max_age_minutes, root_path))
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+    if should_refresh {
+        start_pr_kpi_cache_refresh(app.clone());
+    }
+}
+
 fn start_local_token_usage_cache_refresh(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         match refresh_local_token_usage_cache(app, true).await {
@@ -407,6 +659,17 @@ fn start_git_usage_cache_refresh(app: AppHandle) {
             Ok(_) => {}
             Err(error) => {
                 eprintln!("Git usage cache refresh failed: {error}");
+            }
+        }
+    });
+}
+
+fn start_pr_kpi_cache_refresh(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        match refresh_pr_kpi_cache(app, true).await {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("PR KPI cache refresh failed: {error}");
             }
         }
     });
@@ -445,6 +708,25 @@ async fn refresh_git_usage_cache(
     Ok(cache)
 }
 
+async fn refresh_pr_kpi_cache(
+    app: AppHandle,
+    emit_update: bool,
+) -> Result<pr_kpi::PrKpiCache, String> {
+    let _guard = claim_pr_kpi_refresh()?;
+    let root = settings::load_settings(&app)
+        .map(|settings| PathBuf::from(settings.git_usage_root))
+        .unwrap_or_else(|_| PathBuf::from(crate::models::default_git_usage_root()));
+    let github_token = secrets::load_github_cli_token().ok().flatten();
+    let cache = tauri::async_runtime::spawn_blocking(move || pr_kpi::build_cache(root, github_token))
+        .await
+        .map_err(|error| format!("KPI 分析缓存任务失败: {error}"))??;
+    storage::write_json(&app, PR_KPI_CACHE_FILE, &cache)?;
+    if emit_update {
+        let _ = app.emit(PR_KPI_CACHE_UPDATED_EVENT, ());
+    }
+    Ok(cache)
+}
+
 #[derive(Debug)]
 struct LocalTokenUsageRefreshGuard;
 
@@ -475,6 +757,22 @@ fn claim_git_usage_refresh() -> Result<GitUsageRefreshGuard, String> {
         return Err("Git 统计正在刷新，请稍后再试".into());
     }
     Ok(GitUsageRefreshGuard)
+}
+
+#[derive(Debug)]
+struct PrKpiRefreshGuard;
+
+impl Drop for PrKpiRefreshGuard {
+    fn drop(&mut self) {
+        PR_KPI_CACHE_REFRESHING.store(false, Ordering::Release);
+    }
+}
+
+fn claim_pr_kpi_refresh() -> Result<PrKpiRefreshGuard, String> {
+    if PR_KPI_CACHE_REFRESHING.swap(true, Ordering::AcqRel) {
+        return Err("KPI 分析正在刷新，请稍后再试".into());
+    }
+    Ok(PrKpiRefreshGuard)
 }
 
 pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), String> {
@@ -720,6 +1018,10 @@ fn read_git_usage_cache(app: &AppHandle) -> Result<Option<git_usage::GitUsageCac
     storage::read_json::<git_usage::GitUsageCache>(app, GIT_USAGE_CACHE_FILE)
 }
 
+fn read_pr_kpi_cache(app: &AppHandle) -> Result<Option<pr_kpi::PrKpiCache>, String> {
+    storage::read_json::<pr_kpi::PrKpiCache>(app, PR_KPI_CACHE_FILE)
+}
+
 fn local_token_usage_cache_is_stale(
     cache: &local_usage::LocalTokenUsageCache,
     max_age_minutes: i64,
@@ -743,6 +1045,44 @@ fn git_usage_cache_is_stale(
         return true;
     }
     (Utc::now() - cache.generated_at).num_minutes() >= max_age_minutes
+}
+
+fn pr_kpi_cache_is_stale(
+    cache: &pr_kpi::PrKpiCache,
+    max_age_minutes: i64,
+    root_path: &str,
+) -> bool {
+    if cache.root_path != root_path {
+        return true;
+    }
+    if max_age_minutes <= 0 {
+        return true;
+    }
+    (Utc::now() - cache.generated_at).num_minutes() >= max_age_minutes
+}
+
+fn kpi_overview_from_cached_stats(
+    app: &AppHandle,
+    request: &UsageRangeRequest,
+) -> Result<PrKpiOverview, String> {
+    let token_report = get_local_token_usage(app.clone(), request.clone())
+        .unwrap_or_else(|_| local_usage::pending_report(LocalTokenUsageRange::ThisMonth, None));
+    let git_report = get_git_usage(app.clone(), request.clone())
+        .unwrap_or_else(|_| git_usage::pending_report(LocalTokenUsageRange::ThisMonth, None));
+    Ok(pr_kpi::build_overview(&token_report, &git_report))
+}
+
+async fn kpi_overview_after_refresh(
+    app: &AppHandle,
+    request: &UsageRangeRequest,
+) -> Result<PrKpiOverview, String> {
+    let token_report = refresh_local_token_usage(app.clone(), request.clone())
+        .await
+        .or_else(|_| get_local_token_usage(app.clone(), request.clone()))?;
+    let git_report = refresh_git_usage(app.clone(), request.clone())
+        .await
+        .or_else(|_| get_git_usage(app.clone(), request.clone()))?;
+    Ok(pr_kpi::build_overview(&token_report, &git_report))
 }
 
 fn write_account_snapshot(
@@ -1065,10 +1405,54 @@ mod tests {
             last3_days: git_usage::empty_report(LocalTokenUsageRange::Last3Days, None),
             this_week: git_usage::empty_report(LocalTokenUsageRange::ThisWeek, None),
             this_month: git_usage::empty_report(LocalTokenUsageRange::ThisMonth, None),
+            custom_window_start: None,
+            custom_window_end: None,
+            custom_days: vec![],
         };
 
         assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/new"));
         assert!(!git_usage_cache_is_stale(&cache, 15, "/tmp/old"));
+    }
+
+    #[test]
+    fn custom_usage_range_request_rejects_invalid_dates() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+
+        let bad_format = UsageRangeRequest::Custom {
+            start_date: "2026/04/20".into(),
+            end_date: "2026-04-27".into(),
+        };
+        assert_eq!(
+            validate_usage_range_request_with_today(&bad_format, today).unwrap_err(),
+            "自定义开始日期格式无效，请使用 YYYY-MM-DD"
+        );
+
+        let reversed = UsageRangeRequest::Custom {
+            start_date: "2026-04-28".into(),
+            end_date: "2026-04-27".into(),
+        };
+        assert_eq!(
+            validate_usage_range_request_with_today(&reversed, today).unwrap_err(),
+            "自定义开始日期不能晚于结束日期"
+        );
+
+        let future_end = UsageRangeRequest::Custom {
+            start_date: "2026-04-20".into(),
+            end_date: "2026-04-28".into(),
+        };
+        assert_eq!(
+            validate_usage_range_request_with_today(&future_end, today).unwrap_err(),
+            "自定义结束日期不能晚于今天"
+        );
+
+        let too_old = UsageRangeRequest::Custom {
+            start_date: "2026-01-27".into(),
+            end_date: "2026-04-27".into(),
+        };
+        assert_eq!(
+            validate_usage_range_request_with_today(&too_old, today).unwrap_err(),
+            "自定义开始日期不能早于 2026-01-28"
+        );
     }
 
     #[test]

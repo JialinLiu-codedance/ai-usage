@@ -17,7 +17,11 @@ import type {
   LocalTokenUsageTotals,
   LocalTokenUsageTool,
   OAuthStatus,
+  PresetUsageRange,
+  PrKpiMetric,
+  PrKpiReport,
   SaveSettingsInput,
+  UsageRangeSelection,
 } from "./types";
 
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -531,32 +535,60 @@ export async function deleteConnectedAccount(accountId: string): Promise<AppSett
   return invoke("delete_connected_account", { accountId });
 }
 
-export async function getLocalTokenUsage(range: LocalTokenUsageRange = "thisMonth"): Promise<LocalTokenUsageReport> {
+type UsageRangeInput = UsageRangeSelection | LocalTokenUsageRange;
+
+const defaultUsageRangeSelection: UsageRangeSelection = { kind: "preset", range: "thisMonth" };
+
+export async function getLocalTokenUsage(
+  selection: UsageRangeInput = defaultUsageRangeSelection,
+): Promise<LocalTokenUsageReport> {
+  const request = normalizeUsageRangeSelection(selection);
   if (!isTauriRuntime) {
-    return mockLocalTokenUsageReport(range);
+    return mockLocalTokenUsageReport(request);
   }
-  return invoke("get_local_token_usage", { range });
+  return invoke("get_local_token_usage", { request });
 }
 
-export async function refreshLocalTokenUsage(range: LocalTokenUsageRange = "thisMonth"): Promise<LocalTokenUsageReport> {
+export async function refreshLocalTokenUsage(
+  selection: UsageRangeInput = defaultUsageRangeSelection,
+): Promise<LocalTokenUsageReport> {
+  const request = normalizeUsageRangeSelection(selection);
   if (!isTauriRuntime) {
-    return mockLocalTokenUsageReport(range);
+    return mockLocalTokenUsageReport(request);
   }
-  return invoke("refresh_local_token_usage", { range });
+  return invoke("refresh_local_token_usage", { request });
 }
 
-export async function getGitUsage(range: LocalTokenUsageRange = "thisMonth"): Promise<GitUsageReport> {
+export async function getGitUsage(selection: UsageRangeInput = defaultUsageRangeSelection): Promise<GitUsageReport> {
+  const request = normalizeUsageRangeSelection(selection);
   if (!isTauriRuntime) {
-    return mockGitUsageReport(range);
+    return mockGitUsageReport(request);
   }
-  return invoke("get_git_usage", { range });
+  return invoke("get_git_usage", { request });
 }
 
-export async function refreshGitUsage(range: LocalTokenUsageRange = "thisMonth"): Promise<GitUsageReport> {
+export async function refreshGitUsage(selection: UsageRangeInput = defaultUsageRangeSelection): Promise<GitUsageReport> {
+  const request = normalizeUsageRangeSelection(selection);
   if (!isTauriRuntime) {
-    return mockGitUsageReport(range);
+    return mockGitUsageReport(request);
   }
-  return invoke("refresh_git_usage", { range });
+  return invoke("refresh_git_usage", { request });
+}
+
+export async function getPrKpi(selection: UsageRangeInput = defaultUsageRangeSelection): Promise<PrKpiReport> {
+  const request = normalizeUsageRangeSelection(selection);
+  if (!isTauriRuntime) {
+    return mockPrKpiReport(request);
+  }
+  return invoke("get_pr_kpi", { request });
+}
+
+export async function refreshPrKpi(selection: UsageRangeInput = defaultUsageRangeSelection): Promise<PrKpiReport> {
+  const request = normalizeUsageRangeSelection(selection);
+  if (!isTauriRuntime) {
+    return mockPrKpiReport(request);
+  }
+  return invoke("refresh_pr_kpi", { request });
 }
 
 export async function chooseGitUsageRoot(currentPath?: string | null): Promise<string | null> {
@@ -623,9 +655,46 @@ function uniqueMockAccountId(provider: MockProviderKey, email: string): string {
   }
 }
 
-function mockLocalTokenUsageReport(range: LocalTokenUsageRange): LocalTokenUsageReport {
+function normalizeUsageRangeSelection(selection: UsageRangeInput): UsageRangeSelection {
+  if (typeof selection !== "string") {
+    return selection;
+  }
+  if (selection === "custom") {
+    return defaultMockCustomRange();
+  }
+  return { kind: "preset", range: selection as PresetUsageRange };
+}
+
+function reportRangeFromSelection(selection: UsageRangeSelection): LocalTokenUsageRange {
+  return selection.kind === "custom" ? "custom" : selection.range;
+}
+
+function reportDateFields(
+  selection: UsageRangeSelection,
+): Pick<LocalTokenUsageReport, "start_date" | "end_date"> {
+  if (selection.kind !== "custom") {
+    return {};
+  }
+  return {
+    start_date: selection.startDate,
+    end_date: selection.endDate,
+  };
+}
+
+function defaultMockCustomRange(): UsageRangeSelection {
+  const end = startOfLocalDay(new Date());
+  const start = addLocalDays(end, -7);
+  return {
+    kind: "custom",
+    startDate: localDateKey(start),
+    endDate: localDateKey(end),
+  };
+}
+
+function mockLocalTokenUsageReport(selection: UsageRangeSelection): LocalTokenUsageReport {
+  const range = reportRangeFromSelection(selection);
   const generatedAt = new Date();
-  const bucketDates = mockTokenBucketDates(range, generatedAt);
+  const bucketDates = mockTokenBucketDates(selection, generatedAt);
   const days = bucketDates.map((date, index) => {
     const models = mockTokenBucketModels(index);
     const totals = sumTokenStats(models);
@@ -644,6 +713,7 @@ function mockLocalTokenUsageReport(range: LocalTokenUsageRange): LocalTokenUsage
 
   return {
     range,
+    ...reportDateFields(selection),
     totals,
     days,
     models,
@@ -654,9 +724,10 @@ function mockLocalTokenUsageReport(range: LocalTokenUsageRange): LocalTokenUsage
   };
 }
 
-function mockGitUsageReport(range: LocalTokenUsageRange): GitUsageReport {
+function mockGitUsageReport(selection: UsageRangeSelection): GitUsageReport {
+  const range = reportRangeFromSelection(selection);
   const generatedAt = new Date();
-  const bucketDates = mockTokenBucketDates(range, generatedAt);
+  const bucketDates = mockTokenBucketDates(selection, generatedAt);
   const buckets = bucketDates.map((date, index) => {
     const stats = mockGitBucketStats(index);
     return {
@@ -669,6 +740,7 @@ function mockGitUsageReport(range: LocalTokenUsageRange): GitUsageReport {
 
   return {
     range,
+    ...reportDateFields(selection),
     totals,
     buckets,
     repositories,
@@ -676,6 +748,65 @@ function mockGitUsageReport(range: LocalTokenUsageRange): GitUsageReport {
     missing_sources: [],
     warnings: [],
     generated_at: generatedAt.toISOString(),
+  };
+}
+
+function mockPrKpiReport(selection: UsageRangeSelection): PrKpiReport {
+  const range = reportRangeFromSelection(selection);
+  const generatedAt = new Date().toISOString();
+  const tokenReport = mockLocalTokenUsageReport(selection);
+  const gitReport = mockGitUsageReport(selection);
+  const netLines = gitReport.totals.added_lines - gitReport.totals.deleted_lines;
+  const outputRatio =
+    tokenReport.totals.total_tokens > 0 ? netLines / (tokenReport.totals.total_tokens / 1_000) : null;
+  const rangeDays =
+    selection.kind === "custom"
+      ? Math.max(1, daysBetweenInclusive(selection.startDate, selection.endDate))
+      : range === "today"
+        ? 1
+        : range === "thisWeek"
+          ? 7
+          : 30;
+  const mergedPerWeek = Math.max(0.4, roundOneDecimal(gitReport.repositories.length * 7 / rangeDays));
+  const metrics: PrKpiMetric[] = [
+    metricRow("cycle_time_ai", "合入周期", 18, "18h", 82),
+    metricRow("merged_ai_prs_per_week", "合入频率", mergedPerWeek, `${mergedPerWeek.toFixed(1)} / 周`, 74),
+    metricRow("review_comments_per_pr", "评审负担", 4.1, "4.1 / PR", 68),
+    metricRow("test_added_ratio", "测试占比", 0.18, "18%", 51),
+    metricRow("7d_rework_rate", "返工控制", 0.08, "8%", 91),
+    metricRow("7d_retention_rate", "代码保留", 0.92, "92%", 91),
+  ];
+
+  return {
+    range,
+    ...reportDateFields(selection),
+    overview: {
+      token_total: tokenReport.totals.total_tokens,
+      code_lines: gitReport.totals.added_lines + gitReport.totals.deleted_lines,
+      output_ratio: outputRatio,
+    },
+    metrics,
+    overall_score: metrics.reduce((sum, metric) => sum + (metric.score ?? 0), 0) / metrics.length,
+    missing_sources: [],
+    warnings: [],
+    generated_at: generatedAt,
+  };
+}
+
+function metricRow(
+  key: PrKpiMetric["key"],
+  label: string,
+  rawValue: number | null,
+  displayValue: string,
+  score: number | null,
+): PrKpiMetric {
+  return {
+    key,
+    label,
+    score,
+    raw_value: rawValue,
+    display_value: displayValue,
+    is_missing: rawValue == null,
   };
 }
 
@@ -699,26 +830,30 @@ function mockGitRepositories(totals: GitUsageTotals): GitUsageRepository[] {
   }));
 }
 
-function mockTokenBucketDates(range: LocalTokenUsageRange, now: Date): Date[] {
+function mockTokenBucketDates(selection: UsageRangeSelection, now: Date): Date[] {
   const starts: Date[] = [];
   const start = startOfLocalDay(now);
   let cursor: Date;
   let end: Date;
   let stepHours = 24;
+  const range = reportRangeFromSelection(selection);
 
-  if (range === "thisMonth") {
+  if (selection.kind === "custom") {
+    cursor = parseLocalDateKey(selection.startDate);
+    end = parseLocalDateKey(selection.endDate);
+  } else if (range === "thisMonth") {
     cursor = startOfLocalMonth(now);
-    end = start;
+    end = endOfLocalMonth(now);
   } else if (range === "thisWeek") {
     cursor = startOfLocalWeek(now);
-    end = start;
+    end = addLocalDays(cursor, 6);
   } else if (range === "last3Days") {
     cursor = addLocalDays(start, -2);
     end = floorLocalHour(now, 3);
     stepHours = 3;
   } else {
     cursor = start;
-    end = floorLocalHour(now, 1);
+    end = addLocalHours(start, 23);
     stepHours = 1;
   }
 
@@ -894,6 +1029,13 @@ function startOfLocalMonth(date: Date): Date {
   return next;
 }
 
+function endOfLocalMonth(date: Date): Date {
+  const next = startOfLocalMonth(date);
+  next.setMonth(next.getMonth() + 1);
+  next.setDate(0);
+  return next;
+}
+
 function startOfLocalWeek(date: Date): Date {
   const next = startOfLocalDay(date);
   const offset = (next.getDay() + 6) % 7;
@@ -920,8 +1062,27 @@ function addLocalHours(date: Date, hours: number): Date {
   return next;
 }
 
+function daysBetweenInclusive(startDate: string, endDate: string): number {
+  const start = parseLocalDateKey(startDate);
+  const end = parseLocalDateKey(endDate);
+  const ms = startOfLocalDay(end).getTime() - startOfLocalDay(start).getTime();
+  return Math.floor(ms / (24 * 60 * 60 * 1000)) + 1;
+}
+
+function parseLocalDateKey(value: string): Date {
+  const [year, month, day] = value.split("-").map((part) => Number.parseInt(part, 10));
+  if (!year || !month || !day) {
+    return startOfLocalDay(new Date());
+  }
+  return new Date(year, month - 1, day);
+}
+
 function localDateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function roundOneDecimal(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 export async function resizePanel(width: number, height: number): Promise<void> {

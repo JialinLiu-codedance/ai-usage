@@ -8,6 +8,7 @@ pub const PROVIDER_KIMI: &str = "kimi";
 pub const PROVIDER_GLM: &str = "glm";
 pub const PROVIDER_MINIMAX: &str = "minimax";
 pub const PROVIDER_COPILOT: &str = "copilot";
+pub const CUSTOM_USAGE_WINDOW_DAYS: i64 = 90;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -252,11 +253,32 @@ pub enum LocalTokenUsageRange {
     Last3Days,
     ThisWeek,
     ThisMonth,
+    Custom,
 }
 
 impl Default for LocalTokenUsageRange {
     fn default() -> Self {
         Self::ThisMonth
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum UsageRangeRequest {
+    #[serde(rename_all = "camelCase")]
+    Preset { range: LocalTokenUsageRange },
+    #[serde(rename_all = "camelCase")]
+    Custom {
+        start_date: String,
+        end_date: String,
+    },
+}
+
+impl Default for UsageRangeRequest {
+    fn default() -> Self {
+        Self::Preset {
+            range: LocalTokenUsageRange::ThisMonth,
+        }
     }
 }
 
@@ -304,6 +326,12 @@ pub struct LocalTokenUsageTool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalTokenUsageReport {
     pub range: LocalTokenUsageRange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub pending: bool,
     pub totals: LocalTokenUsageTotals,
     pub days: Vec<LocalTokenUsageDay>,
     pub models: Vec<LocalTokenUsageModel>,
@@ -340,11 +368,69 @@ pub struct GitUsageRepository {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitUsageReport {
     pub range: LocalTokenUsageRange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub pending: bool,
     pub totals: GitUsageTotals,
     pub buckets: Vec<GitUsageBucket>,
     #[serde(default)]
     pub repositories: Vec<GitUsageRepository>,
     pub repository_count: usize,
+    pub missing_sources: Vec<String>,
+    pub warnings: Vec<String>,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrKpiMetricKey {
+    CycleTimeAi,
+    MergedAiPrsPerWeek,
+    ReviewCommentsPerPr,
+    TestAddedRatio,
+    #[serde(rename = "7d_rework_rate")]
+    SevenDayReworkRate,
+    #[serde(rename = "7d_retention_rate")]
+    SevenDayRetentionRate,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PrKpiOverview {
+    pub token_total: u64,
+    pub code_lines: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrKpiMetric {
+    pub key: PrKpiMetricKey,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_value: Option<f64>,
+    pub display_value: String,
+    #[serde(default)]
+    pub is_missing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrKpiReport {
+    pub range: LocalTokenUsageRange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub pending: bool,
+    pub overview: PrKpiOverview,
+    pub metrics: Vec<PrKpiMetric>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overall_score: Option<f64>,
     pub missing_sources: Vec<String>,
     pub warnings: Vec<String>,
     pub generated_at: DateTime<Utc>,
