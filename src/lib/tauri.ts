@@ -14,7 +14,6 @@ import type {
   ConnectionTestResult,
   GitUsageBucket,
   GitUsageReport,
-  LocalProxyMatchResult,
   LocalProxySettingsState,
   LocalProxyStatus,
   GitUsageRepository,
@@ -342,35 +341,6 @@ export async function stopLocalProxy(): Promise<LocalProxyStatus> {
     return mockLocalProxyStatus;
   }
   return invoke("stop_local_proxy");
-}
-
-export async function testLocalProxyMatch(model: string): Promise<LocalProxyMatchResult> {
-  if (!isTauriRuntime) {
-    syncMockLocalProxyState();
-    const route = mockLocalProxySettingsState.config.routes.find(
-      (item) => item.enabled && mockModelMatches(item.model_pattern, model),
-    );
-    if (!route) {
-      return {
-        matched: false,
-        route_id: null,
-        model_pattern: null,
-        account_id: null,
-        display_name: null,
-        error: "未匹配到模型路由",
-      };
-    }
-    const capability = mockLocalProxySettingsState.capabilities.find((item) => item.account_id === route.account_id);
-    return {
-      matched: true,
-      route_id: route.id,
-      model_pattern: route.model_pattern,
-      account_id: route.account_id,
-      display_name: capability?.display_name ?? route.account_id,
-      error: null,
-    };
-  }
-  return invoke("test_local_proxy_match", { model });
 }
 
 export async function ensureNotificationPermission(): Promise<boolean> {
@@ -824,19 +794,6 @@ function mockDefaultClaudeProfile(provider: string): ClaudeProxyProfileSummary {
     auth_field: "ANTHROPIC_AUTH_TOKEN",
     secret_configured: false,
   };
-}
-
-function mockModelMatches(pattern: string, model: string): boolean {
-  if (pattern === "*") {
-    return true;
-  }
-  if (pattern.endsWith("*")) {
-    return model.startsWith(pattern.slice(0, -1));
-  }
-  if (pattern.startsWith("*")) {
-    return model.endsWith(pattern.slice(1));
-  }
-  return pattern === model;
 }
 
 function mockStatusWithAccounts(): AppStatus {

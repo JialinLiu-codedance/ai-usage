@@ -50,7 +50,6 @@ import {
   startLocalProxy,
   startAnthropicOAuth,
   stopLocalProxy,
-  testLocalProxyMatch,
   startOpenAIOAuth,
 } from "./lib/tauri";
 import {
@@ -101,7 +100,6 @@ import type {
   ClaudeProxyCapability,
   ConnectedAccount,
   GitUsageReport,
-  LocalProxyMatchResult,
   LocalProxySettingsState,
   LocalProxyStatus,
   LocalTokenUsageReport,
@@ -300,7 +298,7 @@ function proxyCapabilityStatus(capability: ClaudeProxyCapability): {
     return { label: "当前不支持", tone: "unsupported" };
   }
   if (capability.can_direct_connect) {
-    return { label: "可直接接入", tone: "ready" };
+    return { label: "已接入", tone: "ready" };
   }
   return { label: "需补充信息", tone: "pending" };
 }
@@ -1125,8 +1123,6 @@ function SettingsPanel({
   const [proxyActionPending, setProxyActionPending] = useState(false);
   const [proxyProfileSaving, setProxyProfileSaving] = useState(false);
   const [proxyError, setProxyError] = useState<string | null>(null);
-  const [proxyTestModel, setProxyTestModel] = useState("");
-  const [proxyMatchResult, setProxyMatchResult] = useState<LocalProxyMatchResult | null>(null);
   const [proxyEditorAccountId, setProxyEditorAccountId] = useState<string | null>(null);
   const [proxyEditorBaseUrl, setProxyEditorBaseUrl] = useState("");
   const [proxyEditorApiFormat, setProxyEditorApiFormat] = useState<ClaudeApiFormat>("anthropic");
@@ -1533,9 +1529,6 @@ function SettingsPanel({
     try {
       const nextStatus = checked ? await startLocalProxy() : await stopLocalProxy();
       setProxyStatus(nextStatus);
-      if (checked) {
-        setProxyMatchResult(null);
-      }
       if (!proxySettingsState) {
         await reloadProxyState();
       }
@@ -1653,16 +1646,6 @@ function SettingsPanel({
       setProxyError(errorMessage(error, "Claude 代理资料保存失败"));
     } finally {
       setProxyProfileSaving(false);
-    }
-  }
-
-  async function handleProxyTestMatch() {
-    setProxyError(null);
-    try {
-      const result = await testLocalProxyMatch(proxyTestModel);
-      setProxyMatchResult(result);
-    } catch (error) {
-      setProxyError(errorMessage(error, "测试匹配失败"));
     }
   }
 
@@ -1919,8 +1902,6 @@ function SettingsPanel({
           actionPending={proxyActionPending}
           profileSaving={proxyProfileSaving}
           error={proxyError}
-          testModel={proxyTestModel}
-          matchResult={proxyMatchResult}
           editingAccountId={proxyEditorAccountId}
           editingBaseUrl={proxyEditorBaseUrl}
           editingApiFormat={proxyEditorApiFormat}
@@ -1954,8 +1935,6 @@ function SettingsPanel({
           onRouteEditingAccountIdChange={setRouteEditorAccountId}
           onRouteEditingEnabledChange={setRouteEditorEnabled}
           onRouteSave={handleProxySaveRoute}
-          onTestModelChange={setProxyTestModel}
-          onTestMatch={handleProxyTestMatch}
         />
       )}
 
@@ -2642,8 +2621,6 @@ function LocalProxyPanel({
   actionPending,
   profileSaving,
   error,
-  testModel,
-  matchResult,
   editingAccountId,
   editingBaseUrl,
   editingApiFormat,
@@ -2672,8 +2649,6 @@ function LocalProxyPanel({
   onRouteEditingAccountIdChange,
   onRouteEditingEnabledChange,
   onRouteSave,
-  onTestModelChange,
-  onTestMatch,
 }: {
   proxySubTab: ProxySubTab;
   settingsState: LocalProxySettingsState | null;
@@ -2683,8 +2658,6 @@ function LocalProxyPanel({
   actionPending: boolean;
   profileSaving: boolean;
   error: string | null;
-  testModel: string;
-  matchResult: LocalProxyMatchResult | null;
   editingAccountId: string | null;
   editingBaseUrl: string;
   editingApiFormat: ClaudeApiFormat;
@@ -2713,8 +2686,6 @@ function LocalProxyPanel({
   onRouteEditingAccountIdChange: (value: string) => void;
   onRouteEditingEnabledChange: (value: boolean) => void;
   onRouteSave: () => Promise<void>;
-  onTestModelChange: (value: string) => void;
-  onTestMatch: () => Promise<void>;
 }) {
   const editingCapability =
     editingAccountId && settingsState
@@ -2912,29 +2883,6 @@ function LocalProxyPanel({
               </Button>
             </div>
           </section>
-
-          {!status?.running ? (
-            <section className="token-card proxy-test-card">
-              <h2>测试匹配</h2>
-              <div className="proxy-test-row">
-                <input
-                  value={testModel}
-                  onChange={(event) => onTestModelChange(event.target.value)}
-                  placeholder="输入模型名，如 claude-sonnet-4-5"
-                />
-                <Button type="button" variant="secondary" size="sm" onClick={() => void onTestMatch()}>
-                  测试匹配
-                </Button>
-              </div>
-              {matchResult ? (
-                <div className="proxy-test-result">
-                  {matchResult.matched
-                    ? `已匹配：${matchResult.display_name ?? matchResult.account_id ?? "--"} · ${matchResult.model_pattern ?? "--"}`
-                    : matchResult.error ?? "未匹配到路由"}
-                </div>
-              ) : null}
-            </section>
-          ) : null}
 
           <section className="proxy-stats-grid">
             <div className="token-metric token-metric-default">

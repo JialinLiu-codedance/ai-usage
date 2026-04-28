@@ -3,9 +3,9 @@ use crate::{
     git_usage, local_proxy, local_usage, pr_kpi,
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ClaudeProxyProfileInput,
-        ConnectedAccount, ConnectionTestResult, GitUsageReport, LocalProxyMatchResult,
-        LocalProxySettingsState, LocalProxyStatus, LocalTokenUsageRange, LocalTokenUsageReport,
-        PrKpiOverview, PrKpiReport, QuotaSnapshot, SaveLocalProxySettingsInput, SaveSettingsInput,
+        ConnectedAccount, ConnectionTestResult, GitUsageReport, LocalProxySettingsState,
+        LocalProxyStatus, LocalTokenUsageRange, LocalTokenUsageReport, PrKpiOverview,
+        PrKpiReport, QuotaSnapshot, SaveLocalProxySettingsInput, SaveSettingsInput,
         UsageRangeRequest, CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC, PROVIDER_COPILOT,
         PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
@@ -155,15 +155,6 @@ pub async fn stop_local_proxy(
     manager: State<'_, local_proxy::LocalProxyManager>,
 ) -> Result<LocalProxyStatus, String> {
     manager.stop(app).await
-}
-
-#[tauri::command]
-pub fn test_local_proxy_match(
-    app: AppHandle,
-    model: String,
-) -> Result<LocalProxyMatchResult, String> {
-    let settings = settings::load_settings(&app)?;
-    local_proxy::test_model_match(&settings, &model)
 }
 
 #[tauri::command]

@@ -148,7 +148,6 @@ fn main() {
             commands::get_local_proxy_status,
             commands::start_local_proxy,
             commands::stop_local_proxy,
-            commands::test_local_proxy_match,
             commands::import_kimi_account,
             commands::import_glm_account,
             commands::import_minimax_account,

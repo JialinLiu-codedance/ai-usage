@@ -1891,7 +1891,6 @@ textarea {
 
 .proxy-address-inputs input,
 .proxy-route-row input,
-.proxy-test-row input,
 .proxy-profile-field input {
   width: 100%;
   height: 36px;
@@ -1910,8 +1909,7 @@ textarea {
   padding: 8px 12px;
 }
 
-.proxy-saving-note,
-.proxy-test-result {
+.proxy-saving-note {
   color: #71717a;
   font-size: 12px;
 }
@@ -2007,7 +2005,6 @@ textarea {
   color: #52525b;
 }
 
-.proxy-test-row,
 .proxy-stats-grid {
   display: grid;
   gap: 8px;
@@ -2080,10 +2077,6 @@ textarea {
   justify-content: center;
 }
 
-.proxy-test-row {
-  grid-template-columns: 1fr auto;
-}
-
 .proxy-stats-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -2131,8 +2124,7 @@ textarea {
 
 @media (max-width: 360px) {
   .proxy-address-inputs,
-  .proxy-stats-grid,
-  .proxy-test-row {
+  .proxy-stats-grid {
     grid-template-columns: 1fr;
   }
 }

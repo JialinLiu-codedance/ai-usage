@@ -116,15 +116,6 @@ export interface LocalProxyStatus {
   last_error: string | null;
 }
 
-export interface LocalProxyMatchResult {
-  matched: boolean;
-  route_id: string | null;
-  model_pattern: string | null;
-  account_id: string | null;
-  display_name: string | null;
-  error: string | null;
-}
-
 export interface ConnectedAccount {
   account_id: string;
   account_name: string;

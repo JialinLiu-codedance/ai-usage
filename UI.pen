@@ -18350,7 +18350,7 @@
                           "id": "nCxVb",
                           "name": "b7Text",
                           "fill": "$secondary-foreground",
-                          "content": "暂不支持",
+                          "content": "反代接入",
                           "fontFamily": "Inter",
                           "fontSize": 11,
                           "fontWeight": "500"
@@ -19658,7 +19658,7 @@
                           "id": "Y5QLb",
                           "name": "p7Name",
                           "fill": "$foreground",
-                          "content": "Copilot",
+                          "content": "jane@company.com",
                           "fontFamily": "Inter",
                           "fontSize": "$font-sm",
                           "fontWeight": "normal"
@@ -19742,7 +19742,7 @@
                           "id": "koT5Q",
                           "name": "p7Name",
                           "fill": "$foreground",
-                          "content": "Copilot",
+                          "content": "jane@company.com",
                           "fontFamily": "Inter",
                           "fontSize": "$font-sm",
                           "fontWeight": "normal"
@@ -37475,6 +37475,18 @@
           ]
         }
       ]
+    },
+    {
+      "type": "frame",
+      "id": "VKwWj",
+      "x": 2925,
+      "y": 2251,
+      "name": "Frame 1",
+      "clip": true,
+      "width": 2,
+      "height": 1,
+      "fill": "#FFFFFF",
+      "layout": "none"
     }
   ],
   "variables": {
