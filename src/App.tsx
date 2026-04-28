@@ -1,10 +1,17 @@
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, Copy, FileText, FolderOpen, Inbox, Info, KeyRound, Link2, Plus, RefreshCw, Settings } from "lucide-react";
+import { ArrowLeft, Copy, FileText, FolderOpen, Inbox, Info, KeyRound, Link2, Pencil, Plus, RefreshCw, Settings, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import anthropicIcon from "../icons/extracted/anthropic.svg";
 import copilotIcon from "../icons/extracted/copilot.svg";
@@ -20,6 +27,8 @@ import {
   ensureNotificationPermission,
   chooseGitUsageRoot,
   getCurrentQuota,
+  getLocalProxySettings,
+  getLocalProxyStatus,
   getLocalTokenUsage,
   getSettings,
   completeAnthropicOAuth,
@@ -35,8 +44,13 @@ import {
   refreshQuota,
   refreshGitUsage,
   refreshLocalTokenUsage,
+  saveClaudeProxyProfile,
+  saveLocalProxySettings,
   saveSettings,
+  startLocalProxy,
   startAnthropicOAuth,
+  stopLocalProxy,
+  testLocalProxyMatch,
   startOpenAIOAuth,
 } from "./lib/tauri";
 import {
@@ -82,8 +96,14 @@ import type {
   AccountQuotaStatus,
   AppSettings,
   AppStatus,
+  ClaudeApiFormat,
+  ClaudeAuthField,
+  ClaudeProxyCapability,
   ConnectedAccount,
   GitUsageReport,
+  LocalProxyMatchResult,
+  LocalProxySettingsState,
+  LocalProxyStatus,
   LocalTokenUsageReport,
   LocalTokenUsageTotals,
   PrKpiReport,
@@ -103,8 +123,9 @@ type PanelView =
   | "copilot-auth";
 type AddAccountBackView = Extract<PanelView, "overview" | "settings">;
 type OAuthProviderKey = "openai" | "anthropic";
-type SettingsTab = "quota" | "tokens";
+type SettingsTab = "quota" | "tokens" | "proxy";
 type SettingsUsageTab = "token" | "git" | "kpi";
+type ProxySubTab = "local" | "reverse";
 type Tone = "success" | "warning" | "danger" | "muted";
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const PANEL_WIDTH = 420;
@@ -222,6 +243,15 @@ function defaultProviderAccountName(provider: string): string {
   if (provider === "copilot") {
     return "Copilot Account";
   }
+  if (provider === "qwen") {
+    return "Qwen Account";
+  }
+  if (provider === "xiaomi") {
+    return "XiaoMi Account";
+  }
+  if (provider === "custom") {
+    return "Custom Account";
+  }
   return "OpenAI Account";
 }
 
@@ -241,6 +271,15 @@ function providerDisplayName(provider: string): string {
   if (provider === "copilot") {
     return "Copilot";
   }
+  if (provider === "qwen") {
+    return "Qwen";
+  }
+  if (provider === "xiaomi") {
+    return "XiaoMi";
+  }
+  if (provider === "custom") {
+    return "Custom";
+  }
   return "OpenAI";
 }
 
@@ -251,6 +290,54 @@ function providerIconConfig(provider: string): { icon: string; iconMode?: Provid
 
 function isOAuthProvider(provider: ProviderKey): provider is OAuthProviderKey {
   return provider === "openai" || provider === "anthropic";
+}
+
+function proxyCapabilityStatus(capability: ClaudeProxyCapability): {
+  label: string;
+  tone: "ready" | "pending" | "unsupported";
+} {
+  if (!capability.is_claude_compatible_provider) {
+    return { label: "当前不支持", tone: "unsupported" };
+  }
+  if (capability.can_direct_connect) {
+    return { label: "可直接接入", tone: "ready" };
+  }
+  return { label: "需补充信息", tone: "pending" };
+}
+
+function proxyCapabilityHint(capability: ClaudeProxyCapability): string {
+  if (!capability.is_claude_compatible_provider) {
+    return "当前账号类型暂不支持 Claude 调用模式";
+  }
+  if (capability.missing_fields.length === 0) {
+    return "当前账号已具备 Claude 代理所需信息";
+  }
+  return `缺少：${capability.missing_fields
+    .map((field) => (field === "api_key_or_token" ? "API Key" : field === "base_url" ? "BASE_URL" : field))
+    .join("、")}`;
+}
+
+function localProxyUrl(status: LocalProxyStatus | null, settingsState: LocalProxySettingsState | null): string {
+  const address =
+    status?.running && status.address ? status.address : settingsState?.config.listen_address || "127.0.0.1";
+  const port = status?.running && status.port ? status.port : settingsState?.config.listen_port || 16555;
+  return `http://${address}:${port}`;
+}
+
+function formatProxyUptime(seconds: number): string {
+  if (seconds <= 0) {
+    return "0s";
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${secs}s`;
+  }
+  return `${secs}s`;
 }
 
 function nextKimiAccountName(settings: AppSettings): string {
@@ -1030,6 +1117,25 @@ function SettingsPanel({
   const [kpiError, setKpiError] = useState<string | null>(null);
   const [gitRootDraft, setGitRootDraft] = useState(form.git_usage_root);
   const [gitRootPicking, setGitRootPicking] = useState(false);
+  const [proxySubTab, setProxySubTab] = useState<ProxySubTab>("local");
+  const [proxySettingsState, setProxySettingsState] = useState<LocalProxySettingsState | null>(null);
+  const [proxyStatus, setProxyStatus] = useState<LocalProxyStatus | null>(null);
+  const [proxyLoading, setProxyLoading] = useState(false);
+  const [proxySaving, setProxySaving] = useState(false);
+  const [proxyActionPending, setProxyActionPending] = useState(false);
+  const [proxyProfileSaving, setProxyProfileSaving] = useState(false);
+  const [proxyError, setProxyError] = useState<string | null>(null);
+  const [proxyTestModel, setProxyTestModel] = useState("");
+  const [proxyMatchResult, setProxyMatchResult] = useState<LocalProxyMatchResult | null>(null);
+  const [proxyEditorAccountId, setProxyEditorAccountId] = useState<string | null>(null);
+  const [proxyEditorBaseUrl, setProxyEditorBaseUrl] = useState("");
+  const [proxyEditorApiFormat, setProxyEditorApiFormat] = useState<ClaudeApiFormat>("anthropic");
+  const [proxyEditorAuthField, setProxyEditorAuthField] = useState<ClaudeAuthField>("ANTHROPIC_AUTH_TOKEN");
+  const [proxyEditorApiKey, setProxyEditorApiKey] = useState("");
+  const [routeEditorRouteId, setRouteEditorRouteId] = useState<string | null>(null);
+  const [routeEditorPattern, setRouteEditorPattern] = useState("");
+  const [routeEditorAccountId, setRouteEditorAccountId] = useState("");
+  const [routeEditorEnabled, setRouteEditorEnabled] = useState(true);
   const usageRangeSelection = usageRangeUiState.appliedSelection;
   const usageRangeKey = usageRangeSelectionKey(usageRangeSelection);
   const selectedRangeOption = usageRangeUiState.selectedOption;
@@ -1066,6 +1172,65 @@ function SettingsPanel({
   useEffect(() => {
     setGitRootDraft(form.git_usage_root);
   }, [form.git_usage_root]);
+
+  useEffect(() => {
+    if (activeTab !== "proxy") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    setProxyLoading(true);
+    setProxyError(null);
+
+    Promise.all([getLocalProxySettings(), getLocalProxyStatus()])
+      .then(([nextSettingsState, nextStatus]) => {
+        if (cancelled) {
+          return;
+        }
+        setProxySettingsState(nextSettingsState);
+        setProxyStatus(nextStatus);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setProxyError(errorMessage(error, "代理设置读取失败"));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setProxyLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, settings.accounts.length]);
+
+  useEffect(() => {
+    if (!isTauriRuntime || activeTab !== "proxy" || proxySubTab !== "local" || !proxyStatus?.running) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      getLocalProxyStatus()
+        .then((nextStatus) => {
+          if (!cancelled) {
+            setProxyStatus(nextStatus);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setProxyError(errorMessage(error, "代理状态刷新失败"));
+          }
+        });
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeTab, proxySubTab, proxyStatus?.running]);
 
   useEffect(() => {
     if (activeTab !== "tokens" || activeUsageTab !== "token") {
@@ -1339,6 +1504,168 @@ function SettingsPanel({
     }
   }
 
+  async function reloadProxyState() {
+    const [nextSettingsState, nextStatus] = await Promise.all([getLocalProxySettings(), getLocalProxyStatus()]);
+    setProxySettingsState(nextSettingsState);
+    setProxyStatus(nextStatus);
+  }
+
+  async function persistProxyConfig(nextConfig: LocalProxySettingsState["config"]) {
+    setProxySaving(true);
+    setProxyError(null);
+    try {
+      const nextState = await saveLocalProxySettings({ config: nextConfig });
+      setProxySettingsState(nextState);
+    } catch (error) {
+      setProxyError(errorMessage(error, "代理设置保存失败"));
+    } finally {
+      setProxySaving(false);
+    }
+  }
+
+  function updateProxyConfig(nextConfig: LocalProxySettingsState["config"]) {
+    setProxySettingsState((current) => (current ? { ...current, config: nextConfig } : current));
+  }
+
+  async function handleProxyToggle(checked: boolean) {
+    setProxyActionPending(true);
+    setProxyError(null);
+    try {
+      const nextStatus = checked ? await startLocalProxy() : await stopLocalProxy();
+      setProxyStatus(nextStatus);
+      if (checked) {
+        setProxyMatchResult(null);
+      }
+      if (!proxySettingsState) {
+        await reloadProxyState();
+      }
+    } catch (error) {
+      setProxyError(errorMessage(error, checked ? "启动代理失败" : "停止代理失败"));
+    } finally {
+      setProxyActionPending(false);
+    }
+  }
+
+  async function handleProxyRouteChange(
+    routeId: string,
+    updater: (route: LocalProxySettingsState["config"]["routes"][number]) => LocalProxySettingsState["config"]["routes"][number],
+  ) {
+    if (!proxySettingsState) {
+      return;
+    }
+    const nextConfig = {
+      ...proxySettingsState.config,
+      routes: proxySettingsState.config.routes.map((route) => (route.id === routeId ? updater(route) : route)),
+    };
+    updateProxyConfig(nextConfig);
+    await persistProxyConfig(nextConfig);
+  }
+
+  function openProxyRouteEditor(routeId: string | null) {
+    if (!proxySettingsState) {
+      return;
+    }
+    if (!routeId) {
+      const firstCapability =
+        proxySettingsState.capabilities.find((capability) => capability.is_claude_compatible_provider) ??
+        proxySettingsState.capabilities[0];
+      setRouteEditorRouteId(null);
+      setRouteEditorPattern("claude-*");
+      setRouteEditorAccountId(firstCapability?.account_id ?? "");
+      setRouteEditorEnabled(true);
+      return;
+    }
+    const route = proxySettingsState.config.routes.find((item) => item.id === routeId);
+    if (!route) {
+      return;
+    }
+    setRouteEditorRouteId(route.id);
+    setRouteEditorPattern(route.model_pattern);
+    setRouteEditorAccountId(route.account_id);
+    setRouteEditorEnabled(route.enabled);
+  }
+
+  async function handleProxySaveRoute() {
+    if (!proxySettingsState) {
+      return;
+    }
+    const nextRoute = {
+      id: routeEditorRouteId ?? `route-${Date.now()}`,
+      model_pattern: routeEditorPattern.trim(),
+      account_id: routeEditorAccountId,
+      enabled: routeEditorEnabled,
+    };
+    if (!nextRoute.model_pattern || !nextRoute.account_id) {
+      return;
+    }
+    const nextConfig = {
+      ...proxySettingsState.config,
+      routes: routeEditorRouteId
+        ? proxySettingsState.config.routes.map((route) => (route.id === routeEditorRouteId ? nextRoute : route))
+        : [...proxySettingsState.config.routes, nextRoute],
+    };
+    updateProxyConfig(nextConfig);
+    await persistProxyConfig(nextConfig);
+    setRouteEditorRouteId(null);
+    setRouteEditorPattern("");
+    setRouteEditorAccountId("");
+    setRouteEditorEnabled(true);
+  }
+
+  async function handleProxyDeleteRoute(routeId: string) {
+    if (!proxySettingsState) {
+      return;
+    }
+    const nextConfig = {
+      ...proxySettingsState.config,
+      routes: proxySettingsState.config.routes.filter((route) => route.id !== routeId),
+    };
+    updateProxyConfig(nextConfig);
+    await persistProxyConfig(nextConfig);
+  }
+
+  function openProxyProfileEditor(capability: ClaudeProxyCapability) {
+    setProxyEditorAccountId(capability.account_id);
+    setProxyEditorBaseUrl(capability.profile.base_url ?? "");
+    setProxyEditorApiFormat(capability.profile.api_format);
+    setProxyEditorAuthField(capability.profile.auth_field);
+    setProxyEditorApiKey("");
+  }
+
+  async function handleProxyProfileSave() {
+    if (!proxyEditorAccountId) {
+      return;
+    }
+    setProxyProfileSaving(true);
+    setProxyError(null);
+    try {
+      const nextState = await saveClaudeProxyProfile({
+        account_id: proxyEditorAccountId,
+        base_url: proxyEditorBaseUrl.trim() || null,
+        api_format: proxyEditorApiFormat,
+        auth_field: proxyEditorAuthField,
+        api_key_or_token: proxyEditorApiKey.trim() || null,
+      });
+      setProxySettingsState(nextState);
+      setProxyEditorAccountId(null);
+      setProxyEditorApiKey("");
+    } catch (error) {
+      setProxyError(errorMessage(error, "Claude 代理资料保存失败"));
+    } finally {
+      setProxyProfileSaving(false);
+    }
+  }
+
+  async function handleProxyTestMatch() {
+    setProxyError(null);
+    try {
+      const result = await testLocalProxyMatch(proxyTestModel);
+      setProxyMatchResult(result);
+    } catch (error) {
+      setProxyError(errorMessage(error, "测试匹配失败"));
+    }
+  }
+
   function handleUsageRangeChange(option: UsageRangeOption) {
     setUsageRangeUiState((current) => selectUsageRangeOption(current, option));
   }
@@ -1413,6 +1740,15 @@ function SettingsPanel({
           onClick={() => setActiveTab("tokens")}
         >
           统计
+        </button>
+        <button
+          type="button"
+          className={`settings-tab ${activeTab === "proxy" ? "settings-tab-active" : ""}`}
+          role="tab"
+          aria-selected={activeTab === "proxy"}
+          onClick={() => setActiveTab("proxy")}
+        >
+          代理
         </button>
       </div>
 
@@ -1538,7 +1874,7 @@ function SettingsPanel({
         </div>
       </section>
         </>
-      ) : (
+      ) : activeTab === "tokens" ? (
         <TokenUsagePanel
           report={tokenReport}
           gitReport={gitReport}
@@ -1572,6 +1908,54 @@ function SettingsPanel({
           onRefresh={handleTokenRefresh}
           onGitRefresh={handleGitRefresh}
           onKpiRefresh={handleKpiRefresh}
+        />
+      ) : (
+        <LocalProxyPanel
+          proxySubTab={proxySubTab}
+          settingsState={proxySettingsState}
+          status={proxyStatus}
+          loading={proxyLoading}
+          saving={proxySaving}
+          actionPending={proxyActionPending}
+          profileSaving={proxyProfileSaving}
+          error={proxyError}
+          testModel={proxyTestModel}
+          matchResult={proxyMatchResult}
+          editingAccountId={proxyEditorAccountId}
+          editingBaseUrl={proxyEditorBaseUrl}
+          editingApiFormat={proxyEditorApiFormat}
+          editingAuthField={proxyEditorAuthField}
+          editingApiKey={proxyEditorApiKey}
+          routeEditingId={routeEditorRouteId}
+          routeEditingPattern={routeEditorPattern}
+          routeEditingAccountId={routeEditorAccountId}
+          routeEditingEnabled={routeEditorEnabled}
+          onSubTabChange={setProxySubTab}
+          onConfigChange={updateProxyConfig}
+          onConfigCommit={persistProxyConfig}
+          onToggle={handleProxyToggle}
+          onAddRoute={() => openProxyRouteEditor(null)}
+          onDeleteRoute={handleProxyDeleteRoute}
+          onOpenProfileEditor={openProxyProfileEditor}
+          onOpenRouteEditor={openProxyRouteEditor}
+          onCloseProfileEditor={() => setProxyEditorAccountId(null)}
+          onEditingBaseUrlChange={setProxyEditorBaseUrl}
+          onEditingApiFormatChange={setProxyEditorApiFormat}
+          onEditingAuthFieldChange={setProxyEditorAuthField}
+          onEditingApiKeyChange={setProxyEditorApiKey}
+          onProfileSave={handleProxyProfileSave}
+          onCloseRouteEditor={() => {
+            setRouteEditorRouteId(null);
+            setRouteEditorPattern("");
+            setRouteEditorAccountId("");
+            setRouteEditorEnabled(true);
+          }}
+          onRouteEditingPatternChange={setRouteEditorPattern}
+          onRouteEditingAccountIdChange={setRouteEditorAccountId}
+          onRouteEditingEnabledChange={setRouteEditorEnabled}
+          onRouteSave={handleProxySaveRoute}
+          onTestModelChange={setProxyTestModel}
+          onTestMatch={handleProxyTestMatch}
         />
       )}
 
@@ -2249,6 +2633,462 @@ function KpiUsageSection({
   );
 }
 
+function LocalProxyPanel({
+  proxySubTab,
+  settingsState,
+  status,
+  loading,
+  saving,
+  actionPending,
+  profileSaving,
+  error,
+  testModel,
+  matchResult,
+  editingAccountId,
+  editingBaseUrl,
+  editingApiFormat,
+  editingAuthField,
+  editingApiKey,
+  routeEditingId,
+  routeEditingPattern,
+  routeEditingAccountId,
+  routeEditingEnabled,
+  onSubTabChange,
+  onConfigChange,
+  onConfigCommit,
+  onToggle,
+  onAddRoute,
+  onDeleteRoute,
+  onOpenProfileEditor,
+  onOpenRouteEditor,
+  onCloseProfileEditor,
+  onEditingBaseUrlChange,
+  onEditingApiFormatChange,
+  onEditingAuthFieldChange,
+  onEditingApiKeyChange,
+  onProfileSave,
+  onCloseRouteEditor,
+  onRouteEditingPatternChange,
+  onRouteEditingAccountIdChange,
+  onRouteEditingEnabledChange,
+  onRouteSave,
+  onTestModelChange,
+  onTestMatch,
+}: {
+  proxySubTab: ProxySubTab;
+  settingsState: LocalProxySettingsState | null;
+  status: LocalProxyStatus | null;
+  loading: boolean;
+  saving: boolean;
+  actionPending: boolean;
+  profileSaving: boolean;
+  error: string | null;
+  testModel: string;
+  matchResult: LocalProxyMatchResult | null;
+  editingAccountId: string | null;
+  editingBaseUrl: string;
+  editingApiFormat: ClaudeApiFormat;
+  editingAuthField: ClaudeAuthField;
+  editingApiKey: string;
+  routeEditingId: string | null;
+  routeEditingPattern: string;
+  routeEditingAccountId: string;
+  routeEditingEnabled: boolean;
+  onSubTabChange: (tab: ProxySubTab) => void;
+  onConfigChange: (config: LocalProxySettingsState["config"]) => void;
+  onConfigCommit: (config: LocalProxySettingsState["config"]) => Promise<void>;
+  onToggle: (checked: boolean) => Promise<void>;
+  onAddRoute: () => void;
+  onDeleteRoute: (routeId: string) => Promise<void>;
+  onOpenProfileEditor: (capability: ClaudeProxyCapability) => void;
+  onOpenRouteEditor: (routeId: string | null) => void;
+  onCloseProfileEditor: () => void;
+  onEditingBaseUrlChange: (value: string) => void;
+  onEditingApiFormatChange: (value: ClaudeApiFormat) => void;
+  onEditingAuthFieldChange: (value: ClaudeAuthField) => void;
+  onEditingApiKeyChange: (value: string) => void;
+  onProfileSave: () => Promise<void>;
+  onCloseRouteEditor: () => void;
+  onRouteEditingPatternChange: (value: string) => void;
+  onRouteEditingAccountIdChange: (value: string) => void;
+  onRouteEditingEnabledChange: (value: boolean) => void;
+  onRouteSave: () => Promise<void>;
+  onTestModelChange: (value: string) => void;
+  onTestMatch: () => Promise<void>;
+}) {
+  const editingCapability =
+    editingAccountId && settingsState
+      ? settingsState.capabilities.find((capability) => capability.account_id === editingAccountId) ?? null
+      : null;
+
+  return (
+    <section className="local-proxy-panel">
+      <div className="proxy-subtabs" role="tablist" aria-label="代理类型">
+        <button
+          type="button"
+          className={`proxy-subtab ${proxySubTab === "local" ? "proxy-subtab-active" : ""}`}
+          onClick={() => onSubTabChange("local")}
+        >
+          本地代理
+        </button>
+        <button
+          type="button"
+          className={`proxy-subtab ${proxySubTab === "reverse" ? "proxy-subtab-active" : ""}`}
+          onClick={() => onSubTabChange("reverse")}
+        >
+          反向代理
+        </button>
+      </div>
+
+      {error ? <div className="inline-error">{error}</div> : null}
+      {loading && !settingsState ? <div className="token-loading">读取代理配置...</div> : null}
+
+      {proxySubTab === "reverse" ? (
+        <section className="token-card proxy-placeholder-card">
+          <h2>反向代理</h2>
+          <p>一期仅保留入口，当前版本暂不实现反向代理能力。</p>
+        </section>
+      ) : null}
+
+      {proxySubTab === "local" && settingsState ? (
+        <>
+          <section className="token-card proxy-master-card">
+            <div className="proxy-master-row">
+              <div>
+                <h2>本地代理（LLM 聚合）</h2>
+                <div className={`proxy-status-text ${status?.running ? "proxy-status-ready" : "proxy-status-pending"}`}>
+                  {status?.running ? "运行中" : "已停止"}
+                </div>
+              </div>
+              <Switch
+                aria-label="本地代理开关"
+                className="settings-switch"
+                size="panel"
+                checked={Boolean(status?.running)}
+                disabled={actionPending}
+                onCheckedChange={(checked) => void onToggle(checked)}
+              />
+            </div>
+          </section>
+
+          <section className="token-card proxy-address-card">
+            <h2>服务地址</h2>
+            {status?.running ? (
+              <div className="proxy-address-running">
+                <span>{localProxyUrl(status, settingsState)}</span>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="icon-sm"
+                  className="git-root-pick-button"
+                  aria-label="复制代理地址"
+                  onClick={() => void navigator.clipboard?.writeText(localProxyUrl(status, settingsState))}
+                >
+                  <Copy />
+                </Button>
+              </div>
+            ) : (
+              <div className="proxy-address-inputs">
+                <label>
+                  <span>地址</span>
+                  <input
+                    value={settingsState.config.listen_address}
+                    onChange={(event) =>
+                      onConfigChange({
+                        ...settingsState.config,
+                        listen_address: event.target.value,
+                      })
+                    }
+                    onBlur={() => void onConfigCommit(settingsState.config)}
+                  />
+                </label>
+                <label>
+                  <span>端口</span>
+                  <input
+                    type="number"
+                    value={settingsState.config.listen_port}
+                    onChange={(event) =>
+                      onConfigChange({
+                        ...settingsState.config,
+                        listen_port: Number(event.target.value || 0),
+                      })
+                    }
+                    onBlur={() => void onConfigCommit(settingsState.config)}
+                  />
+                </label>
+              </div>
+            )}
+            <p className="auth-muted">修改地址或端口后需要重启代理服务才能生效</p>
+            {saving ? <div className="proxy-saving-note">保存中...</div> : null}
+          </section>
+
+          <section className="token-card proxy-model-config-card">
+            <h2>模型配置</h2>
+            <div className="proxy-capability-list">
+              {settingsState.capabilities.map((capability) => {
+                const state = proxyCapabilityStatus(capability);
+                return (
+                  <button
+                    key={capability.account_id}
+                    type="button"
+                    className={`proxy-capability-row ${capability.is_claude_compatible_provider ? "proxy-capability-row-actionable" : ""}`}
+                    onClick={() => {
+                      if (capability.is_claude_compatible_provider) {
+                        onOpenProfileEditor(capability);
+                      }
+                    }}
+                  >
+                    <div className="proxy-capability-copy proxy-capability-copy-compact">
+                      <span className="proxy-capability-logo">
+                        <ProviderIcon {...providerIconConfig(capability.provider)} />
+                      </span>
+                      <span>{capability.display_name}</span>
+                    </div>
+                    <span className={`proxy-capability-badge proxy-capability-badge-${state.tone}`}>{state.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="token-card proxy-routes-card">
+            <div className="proxy-card-header">
+              <div>
+                <h2>模型路由</h2>
+                <p className="auth-muted">根据请求中的模型名路由到不同的 Provider</p>
+              </div>
+            </div>
+
+            <div className="proxy-route-list">
+              {settingsState.config.routes.length === 0 ? (
+                <div className="token-empty">暂无模型路由</div>
+              ) : (
+                <>
+                  <div className="proxy-route-header">
+                    <span>模型模式</span>
+                    <span>匹配方式</span>
+                    <span>目标 Provider</span>
+                    <span>操作</span>
+                  </div>
+                  {settingsState.config.routes.map((route) => {
+                    const capability = settingsState.capabilities.find((item) => item.account_id === route.account_id);
+                    return (
+                      <div key={route.id} className="proxy-route-summary-row">
+                        <span>{route.model_pattern}</span>
+                        <span className="proxy-route-match-chip">
+                          {route.model_pattern.includes("*") ? "通配符匹配" : "精确匹配"}
+                        </span>
+                        <span>{capability?.display_name ?? route.account_id}</span>
+                        <div className="proxy-route-actions">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="proxy-route-edit-button"
+                            aria-label="编辑路由"
+                            onClick={() => onOpenRouteEditor(route.id)}
+                          >
+                            <Pencil />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="proxy-route-delete-button"
+                            aria-label="删除路由"
+                            onClick={() => void onDeleteRoute(route.id)}
+                          >
+                            <Trash2 />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+              <Button type="button" variant="secondary" size="sm" className="proxy-add-route-button" onClick={onAddRoute}>
+                <Plus data-icon="inline-start" />
+                添加路由
+              </Button>
+            </div>
+          </section>
+
+          {!status?.running ? (
+            <section className="token-card proxy-test-card">
+              <h2>测试匹配</h2>
+              <div className="proxy-test-row">
+                <input
+                  value={testModel}
+                  onChange={(event) => onTestModelChange(event.target.value)}
+                  placeholder="输入模型名，如 claude-sonnet-4-5"
+                />
+                <Button type="button" variant="secondary" size="sm" onClick={() => void onTestMatch()}>
+                  测试匹配
+                </Button>
+              </div>
+              {matchResult ? (
+                <div className="proxy-test-result">
+                  {matchResult.matched
+                    ? `已匹配：${matchResult.display_name ?? matchResult.account_id ?? "--"} · ${matchResult.model_pattern ?? "--"}`
+                    : matchResult.error ?? "未匹配到路由"}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+
+          <section className="proxy-stats-grid">
+            <div className="token-metric token-metric-default">
+              <span>活跃连接</span>
+              <strong>{status?.active_connections ?? 0}</strong>
+            </div>
+            <div className="token-metric token-metric-default">
+              <span>总请求数</span>
+              <strong>{status?.total_requests ?? 0}</strong>
+            </div>
+            <div className="token-metric token-metric-default">
+              <span>成功率</span>
+              <strong>{`${Math.round(status?.success_rate ?? 0)}%`}</strong>
+            </div>
+            <div className="token-metric token-metric-default">
+              <span>运行时间</span>
+              <strong>{formatProxyUptime(status?.uptime_seconds ?? 0)}</strong>
+            </div>
+          </section>
+        </>
+      ) : null}
+
+      {editingCapability ? (
+        <div className="proxy-profile-modal-backdrop" role="presentation" onClick={onCloseProfileEditor}>
+          <div className="proxy-profile-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="proxy-card-header">
+              <div>
+                <h2>{editingCapability.display_name}</h2>
+                <p className="auth-muted">补充 Claude 代理所需信息</p>
+              </div>
+              <Button type="button" variant="ghost" size="sm" onClick={onCloseProfileEditor}>
+                关闭
+              </Button>
+            </div>
+
+            <label className="proxy-profile-field">
+              <span>BASE_URL</span>
+              <input value={editingBaseUrl} onChange={(event) => onEditingBaseUrlChange(event.target.value)} />
+            </label>
+
+            <label className="proxy-profile-field">
+              <span>API 格式</span>
+              <Select value={editingApiFormat} onValueChange={(value) => onEditingApiFormatChange(value as ClaudeApiFormat)}>
+                <SelectTrigger className="proxy-profile-select">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {claudeApiFormatOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+
+            <label className="proxy-profile-field">
+              <span>认证字段</span>
+              <Select value={editingAuthField} onValueChange={(value) => onEditingAuthFieldChange(value as ClaudeAuthField)}>
+                <SelectTrigger className="proxy-profile-select">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {claudeAuthFieldOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+
+            <label className="proxy-profile-field">
+              <span>API Key</span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={editingApiKey}
+                onChange={(event) => onEditingApiKeyChange(event.target.value)}
+                placeholder={editingCapability.profile.secret_configured ? "留空则保留当前密钥" : "请输入 Claude 代理 API Key"}
+              />
+            </label>
+
+            <div className="proxy-profile-actions">
+              <Button type="button" variant="ghost" onClick={onCloseProfileEditor}>
+                取消
+              </Button>
+              <Button type="button" onClick={() => void onProfileSave()} disabled={profileSaving}>
+                {profileSaving ? "保存中" : "保存"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {settingsState && (routeEditingId !== null || routeEditingPattern || routeEditingAccountId) ? (
+        <div className="proxy-profile-modal-backdrop" role="presentation" onClick={onCloseRouteEditor}>
+          <div className="proxy-profile-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="proxy-card-header">
+              <div>
+                <h2>{routeEditingId ? "编辑路由" : "添加路由"}</h2>
+                <p className="auth-muted">配置模型模式与目标 Provider</p>
+              </div>
+              <Button type="button" variant="ghost" size="sm" onClick={onCloseRouteEditor}>
+                关闭
+              </Button>
+            </div>
+
+            <label className="proxy-profile-field">
+              <span>模型模式</span>
+              <input value={routeEditingPattern} onChange={(event) => onRouteEditingPatternChange(event.target.value)} />
+            </label>
+
+            <label className="proxy-profile-field">
+              <span>目标 Provider</span>
+              <Select value={routeEditingAccountId} onValueChange={onRouteEditingAccountIdChange}>
+                <SelectTrigger className="proxy-profile-select">
+                  <SelectValue placeholder="选择账号" />
+                </SelectTrigger>
+                <SelectContent>
+                  {settingsState.capabilities
+                    .filter((capability) => capability.is_claude_compatible_provider)
+                    .map((capability) => {
+                      const state = proxyCapabilityStatus(capability);
+                      return (
+                        <SelectItem key={capability.account_id} value={capability.account_id}>
+                          {`${capability.display_name} · ${state.label}`}
+                        </SelectItem>
+                      );
+                    })}
+                </SelectContent>
+              </Select>
+            </label>
+
+            <div className="proxy-route-enabled-row">
+              <span>启用路由</span>
+              <Switch checked={routeEditingEnabled} onCheckedChange={onRouteEditingEnabledChange} />
+            </div>
+
+            <div className="proxy-profile-actions">
+              <Button type="button" variant="ghost" onClick={onCloseRouteEditor}>
+                取消
+              </Button>
+              <Button type="button" onClick={() => void onRouteSave()}>
+                保存
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function TokenUsageSummary({ totals }: { totals: LocalTokenUsageTotals }) {
   return (
     <section className="token-card token-summary-card">
@@ -2748,6 +3588,17 @@ const refreshIntervalOptions = [
   { value: 15, label: "15 分钟" },
   { value: 30, label: "30 分钟" },
   { value: 60, label: "1 小时" },
+];
+
+const claudeApiFormatOptions: Array<{ value: ClaudeApiFormat; label: string }> = [
+  { value: "anthropic", label: "Anthropic Messages（原生）" },
+  { value: "openai_chat", label: "OpenAI Chat Completions" },
+  { value: "openai_responses", label: "OpenAI Responses" },
+];
+
+const claudeAuthFieldOptions: Array<{ value: ClaudeAuthField; label: string }> = [
+  { value: "ANTHROPIC_AUTH_TOKEN", label: "ANTHROPIC_AUTH_TOKEN（默认）" },
+  { value: "ANTHROPIC_API_KEY", label: "ANTHROPIC_API_KEY" },
 ];
 
 const tokenUsageRangeOptions: UsageRangeOption[] = ["thisMonth", "thisWeek", "today", "custom"];

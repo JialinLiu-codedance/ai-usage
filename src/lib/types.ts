@@ -32,6 +32,8 @@ export interface AppSettings {
   notify_on_reset: boolean;
   reset_notify_lead_minutes: number;
   git_usage_root: string;
+  claude_proxy: ClaudeProxyConfig;
+  claude_proxy_profiles: Record<string, ClaudeProxyProfileSummary>;
   secret_configured: boolean;
 }
 
@@ -48,6 +50,79 @@ export interface SaveSettingsInput {
   reset_notify_lead_minutes: number;
   git_usage_root: string;
   auth_secret?: string | null;
+}
+
+export type ClaudeApiFormat = "anthropic" | "openai_chat" | "openai_responses";
+export type ClaudeAuthField = "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY";
+
+export interface ClaudeProxyProfileSummary {
+  base_url: string | null;
+  api_format: ClaudeApiFormat;
+  auth_field: ClaudeAuthField;
+  secret_configured: boolean;
+}
+
+export interface ClaudeProxyCapability {
+  account_id: string;
+  provider: string;
+  display_name: string;
+  is_claude_compatible_provider: boolean;
+  can_direct_connect: boolean;
+  missing_fields: string[];
+  profile: ClaudeProxyProfileSummary;
+  resolved_profile: ClaudeProxyProfileSummary | null;
+}
+
+export interface ClaudeModelRoute {
+  id: string;
+  model_pattern: string;
+  account_id: string;
+  enabled: boolean;
+}
+
+export interface ClaudeProxyConfig {
+  listen_address: string;
+  listen_port: number;
+  routes: ClaudeModelRoute[];
+}
+
+export interface LocalProxySettingsState {
+  config: ClaudeProxyConfig;
+  capabilities: ClaudeProxyCapability[];
+}
+
+export interface SaveLocalProxySettingsInput {
+  config: ClaudeProxyConfig;
+}
+
+export interface ClaudeProxyProfileInput {
+  account_id: string;
+  base_url: string | null;
+  api_format: ClaudeApiFormat;
+  auth_field: ClaudeAuthField;
+  api_key_or_token?: string | null;
+}
+
+export interface LocalProxyStatus {
+  running: boolean;
+  address: string;
+  port: number;
+  active_connections: number;
+  total_requests: number;
+  successful_requests: number;
+  failed_requests: number;
+  success_rate: number;
+  uptime_seconds: number;
+  last_error: string | null;
+}
+
+export interface LocalProxyMatchResult {
+  matched: boolean;
+  route_id: string | null;
+  model_pattern: string | null;
+  account_id: string | null;
+  display_name: string | null;
+  error: string | null;
 }
 
 export interface ConnectedAccount {

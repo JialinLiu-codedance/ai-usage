@@ -7,6 +7,7 @@ use keyring::Entry;
 const SERVICE_NAME: &str = "com.liujialin.ai-usage";
 const SECRET_ACCOUNT: &str = "default";
 const ACCOUNT_SECRET_PREFIX: &str = "account-secret:";
+const CLAUDE_PROXY_SECRET_PREFIX: &str = "claude-proxy:";
 const GH_CLI_KEYCHAIN_SERVICE: &str = "gh:github.com";
 
 pub fn load_secret(settings: &AppSettings) -> Result<Option<ProbeCredentials>, String> {
@@ -100,6 +101,43 @@ pub fn account_secret_configured(account_id: &str) -> Result<bool, String> {
     Ok(load_account_secret(account_id)?.is_some())
 }
 
+pub fn load_claude_proxy_secret(account_id: &str) -> Result<Option<String>, String> {
+    let entry = Entry::new(SERVICE_NAME, &claude_proxy_keychain_account(account_id))
+        .map_err(|error| format!("初始化 Claude 代理 Keychain 失败: {error}"))?;
+    match entry.get_password() {
+        Ok(secret) => {
+            if secret.trim().is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(secret))
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!("读取 Claude 代理 Keychain 失败: {error}")),
+    }
+}
+
+pub fn save_claude_proxy_secret(account_id: &str, secret: &str) -> Result<(), String> {
+    let entry = Entry::new(SERVICE_NAME, &claude_proxy_keychain_account(account_id))
+        .map_err(|error| format!("初始化 Claude 代理 Keychain 失败: {error}"))?;
+    entry
+        .set_password(secret)
+        .map_err(|error| format!("写入 Claude 代理 Keychain 失败: {error}"))
+}
+
+#[allow(dead_code)]
+pub fn delete_claude_proxy_secret(account_id: &str) -> Result<(), String> {
+    let entry = Entry::new(SERVICE_NAME, &claude_proxy_keychain_account(account_id))
+        .map_err(|error| format!("初始化 Claude 代理 Keychain 失败: {error}"))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!("删除 Claude 代理 Keychain 凭证失败: {error}")),
+    }
+}
+
+pub fn claude_proxy_secret_configured(account_id: &str) -> Result<bool, String> {
+    Ok(load_claude_proxy_secret(account_id)?.is_some())
+}
+
 pub fn load_github_cli_token() -> Result<Option<String>, String> {
     load_macos_generic_password_by_service(GH_CLI_KEYCHAIN_SERVICE)
         .map(|token| token.and_then(|value| normalize_github_cli_token(&value)))
@@ -163,6 +201,16 @@ fn account_secret_keychain_account(account_id: &str) -> String {
         trimmed.to_string()
     };
     format!("{ACCOUNT_SECRET_PREFIX}{id}")
+}
+
+fn claude_proxy_keychain_account(account_id: &str) -> String {
+    let trimmed = account_id.trim();
+    let id = if trimmed.is_empty() {
+        default_account_id()
+    } else {
+        trimmed.to_string()
+    };
+    format!("{CLAUDE_PROXY_SECRET_PREFIX}{id}")
 }
 
 #[cfg(target_os = "macos")]

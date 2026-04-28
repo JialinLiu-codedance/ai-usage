@@ -499,21 +499,22 @@ textarea {
 
 .settings-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 2px;
   width: 100%;
+  height: 36px;
   border-radius: 8px;
   background: #f4f4f5;
-  padding: 3px;
+  padding: 2px;
 }
 
 .settings-tab {
-  height: 30px;
+  height: 100%;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: #71717a;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 16px;
   cursor: pointer;
@@ -1812,6 +1813,328 @@ textarea {
   width: 14px;
   height: 14px;
   flex: 0 0 14px;
+}
+
+.local-proxy-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.proxy-subtabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  border-radius: 8px;
+  background: #f4f4f5;
+  padding: 2px;
+}
+
+.proxy-subtab {
+  height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #71717a;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.proxy-subtab-active {
+  background: #18181b;
+  color: #fafafa;
+}
+
+.proxy-master-row,
+.proxy-card-header,
+.proxy-capability-row,
+.proxy-address-running,
+.proxy-profile-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.proxy-status-text {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.proxy-status-ready {
+  color: #16a34a;
+}
+
+.proxy-status-pending {
+  color: #71717a;
+}
+
+.proxy-address-inputs {
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  gap: 12px;
+}
+
+.proxy-address-inputs label,
+.proxy-profile-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.proxy-address-inputs span,
+.proxy-profile-field span {
+  color: #09090b;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.proxy-address-inputs input,
+.proxy-route-row input,
+.proxy-test-row input,
+.proxy-profile-field input {
+  width: 100%;
+  height: 36px;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0 12px;
+  color: #09090b;
+  font-size: 13px;
+  outline: none;
+}
+
+.proxy-address-running {
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.proxy-saving-note,
+.proxy-test-result {
+  color: #71717a;
+  font-size: 12px;
+}
+
+.proxy-capability-list,
+.proxy-route-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.proxy-capability-row {
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  width: 100%;
+  background: #fff;
+  text-align: left;
+  cursor: default;
+}
+
+.proxy-capability-row-actionable {
+  cursor: pointer;
+}
+
+.proxy-capability-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.proxy-capability-copy > span:last-child {
+  color: #09090b;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.proxy-capability-copy small {
+  color: #71717a;
+  font-size: 11px;
+}
+
+.proxy-capability-copy-compact {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.proxy-capability-copy-compact > span:last-child {
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.proxy-capability-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+}
+
+.proxy-capability-logo .provider-logo-img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.proxy-capability-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  height: 24px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.proxy-capability-badge-ready {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.proxy-capability-badge-pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.proxy-capability-badge-unsupported {
+  background: #f4f4f5;
+  color: #52525b;
+}
+
+.proxy-test-row,
+.proxy-stats-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.proxy-route-select,
+.proxy-profile-select {
+  width: 100%;
+  background: #fff;
+}
+
+.proxy-route-header,
+.proxy-route-summary-row {
+  display: grid;
+  grid-template-columns: minmax(84px, 1fr) 72px minmax(96px, 1fr) 56px;
+  align-items: center;
+  gap: 10px;
+}
+
+.proxy-route-header {
+  color: #71717a;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.proxy-route-header span:last-child {
+  justify-self: end;
+}
+
+.proxy-route-summary-row {
+  min-height: 28px;
+  color: #09090b;
+  font-size: 13px;
+}
+
+.proxy-route-summary-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-route-match-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  height: 22px;
+  border-radius: 6px;
+  background: #f4f4f5;
+  color: #71717a;
+  font-size: 12px;
+}
+
+.proxy-route-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-self: end;
+}
+
+.proxy-route-edit-button,
+.proxy-route-delete-button {
+  color: #71717a;
+}
+
+.proxy-add-route-button {
+  width: 100%;
+  height: 36px;
+  justify-content: center;
+}
+
+.proxy-test-row {
+  grid-template-columns: 1fr auto;
+}
+
+.proxy-stats-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.proxy-placeholder-card p {
+  margin: 0;
+  color: #71717a;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.proxy-profile-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(9 9 11 / 35%);
+  padding: 20px;
+}
+
+.proxy-profile-modal {
+  width: min(100%, 360px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-radius: 12px;
+  background: #fff;
+  padding: 16px;
+  box-shadow: 0 24px 60px -24px rgb(0 0 0 / 35%);
+}
+
+.proxy-route-enabled-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.proxy-route-enabled-row span {
+  color: #09090b;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+@media (max-width: 360px) {
+  .proxy-address-inputs,
+  .proxy-stats-grid,
+  .proxy-test-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 @theme inline {

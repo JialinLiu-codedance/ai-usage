@@ -1,12 +1,13 @@
 use crate::{
     errors::{ProviderError, ProviderErrorKind},
-    git_usage, local_usage, pr_kpi,
+    git_usage, local_proxy, local_usage, pr_kpi,
     models::{
-        AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ConnectedAccount,
-        ConnectionTestResult, GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport,
-        PrKpiOverview, PrKpiReport, QuotaSnapshot, SaveSettingsInput, UsageRangeRequest,
-        CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC, PROVIDER_COPILOT, PROVIDER_GLM,
-        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ClaudeProxyProfileInput,
+        ConnectedAccount, ConnectionTestResult, GitUsageReport, LocalProxyMatchResult,
+        LocalProxySettingsState, LocalProxyStatus, LocalTokenUsageRange, LocalTokenUsageReport,
+        PrKpiOverview, PrKpiReport, QuotaSnapshot, SaveLocalProxySettingsInput, SaveSettingsInput,
+        UsageRangeRequest, CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC, PROVIDER_COPILOT,
+        PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     notifications, oauth, panel, provider, secrets, settings,
     state::StateStore,
@@ -105,6 +106,64 @@ pub fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
 #[tauri::command]
 pub fn save_settings(app: AppHandle, input: SaveSettingsInput) -> Result<AppSettings, String> {
     settings::save_settings(&app, input)
+}
+
+#[tauri::command]
+pub fn get_local_proxy_settings(app: AppHandle) -> Result<LocalProxySettingsState, String> {
+    let settings = settings::load_settings(&app)?;
+    local_proxy::build_local_proxy_settings_state(&settings)
+}
+
+#[tauri::command]
+pub fn save_local_proxy_settings(
+    app: AppHandle,
+    input: SaveLocalProxySettingsInput,
+) -> Result<LocalProxySettingsState, String> {
+    let settings = settings::save_local_proxy_settings(&app, input)?;
+    local_proxy::build_local_proxy_settings_state(&settings)
+}
+
+#[tauri::command]
+pub fn save_claude_proxy_profile(
+    app: AppHandle,
+    input: ClaudeProxyProfileInput,
+) -> Result<LocalProxySettingsState, String> {
+    let _ = settings::save_claude_proxy_profile(&app, input)?;
+    let settings = settings::load_settings(&app)?;
+    local_proxy::build_local_proxy_settings_state(&settings)
+}
+
+#[tauri::command]
+pub async fn get_local_proxy_status(
+    app: AppHandle,
+    manager: State<'_, local_proxy::LocalProxyManager>,
+) -> Result<LocalProxyStatus, String> {
+    manager.status(&app).await
+}
+
+#[tauri::command]
+pub async fn start_local_proxy(
+    app: AppHandle,
+    manager: State<'_, local_proxy::LocalProxyManager>,
+) -> Result<LocalProxyStatus, String> {
+    manager.start(app).await
+}
+
+#[tauri::command]
+pub async fn stop_local_proxy(
+    app: AppHandle,
+    manager: State<'_, local_proxy::LocalProxyManager>,
+) -> Result<LocalProxyStatus, String> {
+    manager.stop(app).await
+}
+
+#[tauri::command]
+pub fn test_local_proxy_match(
+    app: AppHandle,
+    model: String,
+) -> Result<LocalProxyMatchResult, String> {
+    let settings = settings::load_settings(&app)?;
+    local_proxy::test_model_match(&settings, &model)
 }
 
 #[tauri::command]

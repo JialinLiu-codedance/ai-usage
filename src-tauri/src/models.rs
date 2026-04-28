@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 pub const PROVIDER_OPENAI: &str = "openai";
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
@@ -8,6 +8,9 @@ pub const PROVIDER_KIMI: &str = "kimi";
 pub const PROVIDER_GLM: &str = "glm";
 pub const PROVIDER_MINIMAX: &str = "minimax";
 pub const PROVIDER_COPILOT: &str = "copilot";
+pub const PROVIDER_QWEN: &str = "qwen";
+pub const PROVIDER_XIAOMI: &str = "xiaomi";
+pub const PROVIDER_CUSTOM: &str = "custom";
 pub const CUSTOM_USAGE_WINDOW_DAYS: i64 = 90;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,6 +107,10 @@ pub struct AppSettings {
     pub reset_notify_lead_minutes: u32,
     #[serde(default = "default_git_usage_root")]
     pub git_usage_root: String,
+    #[serde(default)]
+    pub claude_proxy: ClaudeProxyConfig,
+    #[serde(default)]
+    pub claude_proxy_profiles: HashMap<String, ClaudeProxyProfileSettings>,
     pub secret_configured: bool,
 }
 
@@ -122,6 +129,8 @@ impl Default for AppSettings {
             notify_on_reset: false,
             reset_notify_lead_minutes: 15,
             git_usage_root: default_git_usage_root(),
+            claude_proxy: ClaudeProxyConfig::default(),
+            claude_proxy_profiles: HashMap::new(),
             secret_configured: false,
         }
     }
@@ -173,6 +182,18 @@ fn default_provider() -> String {
     PROVIDER_OPENAI.into()
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_claude_proxy_listen_address() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_claude_proxy_listen_port() -> u16 {
+    16555
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredOAuthTokens {
     #[serde(default = "default_provider")]
@@ -213,6 +234,178 @@ impl Default for AppStatus {
 pub struct ConnectionTestResult {
     pub success: bool,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeApiFormat {
+    Anthropic,
+    OpenaiChat,
+    OpenaiResponses,
+}
+
+impl Default for ClaudeApiFormat {
+    fn default() -> Self {
+        Self::Anthropic
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClaudeAuthField {
+    #[serde(rename = "ANTHROPIC_AUTH_TOKEN")]
+    AnthropicAuthToken,
+    #[serde(rename = "ANTHROPIC_API_KEY")]
+    AnthropicApiKey,
+}
+
+impl Default for ClaudeAuthField {
+    fn default() -> Self {
+        Self::AnthropicAuthToken
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeProxyProfileSettings {
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_format: ClaudeApiFormat,
+    #[serde(default)]
+    pub auth_field: ClaudeAuthField,
+    #[serde(default)]
+    pub secret_configured: bool,
+}
+
+impl Default for ClaudeProxyProfileSettings {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            api_format: ClaudeApiFormat::Anthropic,
+            auth_field: ClaudeAuthField::AnthropicAuthToken,
+            secret_configured: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeProxyProfileSummary {
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_format: ClaudeApiFormat,
+    #[serde(default)]
+    pub auth_field: ClaudeAuthField,
+    #[serde(default)]
+    pub secret_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeProxyCapability {
+    pub account_id: String,
+    pub provider: String,
+    pub display_name: String,
+    pub is_claude_compatible_provider: bool,
+    pub can_direct_connect: bool,
+    pub missing_fields: Vec<String>,
+    pub profile: ClaudeProxyProfileSummary,
+    pub resolved_profile: Option<ClaudeProxyProfileSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeProxyProfileInput {
+    pub account_id: String,
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_format: ClaudeApiFormat,
+    #[serde(default)]
+    pub auth_field: ClaudeAuthField,
+    pub api_key_or_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeModelRoute {
+    pub id: String,
+    pub model_pattern: String,
+    pub account_id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeProxyConfig {
+    #[serde(default = "default_claude_proxy_listen_address")]
+    pub listen_address: String,
+    #[serde(default = "default_claude_proxy_listen_port")]
+    pub listen_port: u16,
+    #[serde(default)]
+    pub routes: Vec<ClaudeModelRoute>,
+}
+
+impl Default for ClaudeProxyConfig {
+    fn default() -> Self {
+        Self {
+            listen_address: default_claude_proxy_listen_address(),
+            listen_port: default_claude_proxy_listen_port(),
+            routes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalProxySettingsState {
+    pub config: ClaudeProxyConfig,
+    pub capabilities: Vec<ClaudeProxyCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveLocalProxySettingsInput {
+    pub config: ClaudeProxyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalProxyMatchResult {
+    pub matched: bool,
+    pub route_id: Option<String>,
+    pub model_pattern: Option<String>,
+    pub account_id: Option<String>,
+    pub display_name: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalProxyStatus {
+    #[serde(default)]
+    pub running: bool,
+    pub address: String,
+    pub port: u16,
+    #[serde(default)]
+    pub active_connections: usize,
+    #[serde(default)]
+    pub total_requests: u64,
+    #[serde(default)]
+    pub successful_requests: u64,
+    #[serde(default)]
+    pub failed_requests: u64,
+    #[serde(default)]
+    pub success_rate: f64,
+    #[serde(default)]
+    pub uptime_seconds: u64,
+    pub last_error: Option<String>,
+}
+
+impl Default for LocalProxyStatus {
+    fn default() -> Self {
+        Self {
+            running: false,
+            address: default_claude_proxy_listen_address(),
+            port: default_claude_proxy_listen_port(),
+            active_connections: 0,
+            total_requests: 0,
+            successful_requests: 0,
+            failed_requests: 0,
+            success_rate: 0.0,
+            uptime_seconds: 0,
+            last_error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

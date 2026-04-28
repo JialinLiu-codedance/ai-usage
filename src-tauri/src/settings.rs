@@ -1,8 +1,9 @@
 use crate::{
     models::{
-        default_account_id, default_git_usage_root, AppSettings, AuthMode, ConnectedAccount,
-        SaveSettingsInput, PROVIDER_COPILOT, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX,
-        PROVIDER_OPENAI,
+        default_account_id, default_git_usage_root, AppSettings, AuthMode, ClaudeProxyProfileInput,
+        ClaudeProxyProfileSettings, ClaudeProxyProfileSummary, ClaudeProxyConfig, ConnectedAccount,
+        SaveLocalProxySettingsInput, SaveSettingsInput, PROVIDER_COPILOT, PROVIDER_GLM,
+        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     secrets, storage,
 };
@@ -14,6 +15,7 @@ const SETTINGS_FILE: &str = "settings.json";
 pub fn load_settings(app: &AppHandle) -> Result<AppSettings, String> {
     let mut settings = storage::read_json::<AppSettings>(app, SETTINGS_FILE)?.unwrap_or_default();
     hydrate_connected_accounts(&mut settings)?;
+    hydrate_claude_proxy_profiles(&mut settings)?;
     settings.secret_configured = secret_configured_for_settings(&settings)?;
     Ok(settings)
 }
@@ -52,6 +54,63 @@ pub fn write_settings(app: &AppHandle, settings: &AppSettings) -> Result<AppSett
     load_settings(app)
 }
 
+pub fn save_local_proxy_settings(
+    app: &AppHandle,
+    input: SaveLocalProxySettingsInput,
+) -> Result<AppSettings, String> {
+    let mut settings = load_settings(app)?;
+    settings.claude_proxy = sanitize_claude_proxy_config(input.config);
+    write_settings(app, &settings)
+}
+
+pub fn save_claude_proxy_profile(
+    app: &AppHandle,
+    input: ClaudeProxyProfileInput,
+) -> Result<ClaudeProxyProfileSummary, String> {
+    let mut settings = load_settings(app)?;
+    let account_id = sanitize_account_id(input.account_id);
+    if !settings
+        .accounts
+        .iter()
+        .any(|account| account.account_id == account_id)
+    {
+        return Err("未找到对应账号".into());
+    }
+
+    let sanitized_secret = input
+        .api_key_or_token
+        .and_then(|value| sanitize_optional(Some(value)));
+    if let Some(secret) = sanitized_secret.as_deref() {
+        secrets::save_claude_proxy_secret(&account_id, secret)?;
+    }
+
+    let secret_configured = settings
+        .claude_proxy_profiles
+        .get(&account_id)
+        .map(|profile| profile.secret_configured)
+        .unwrap_or(false)
+        || sanitized_secret.is_some()
+        || secrets::claude_proxy_secret_configured(&account_id)?;
+
+    let profile = ClaudeProxyProfileSettings {
+        base_url: sanitize_optional(input.base_url),
+        api_format: input.api_format,
+        auth_field: input.auth_field,
+        secret_configured,
+    };
+    settings
+        .claude_proxy_profiles
+        .insert(account_id.clone(), profile.clone());
+    write_settings(app, &settings)?;
+
+    Ok(ClaudeProxyProfileSummary {
+        base_url: profile.base_url,
+        api_format: profile.api_format,
+        auth_field: profile.auth_field,
+        secret_configured: profile.secret_configured,
+    })
+}
+
 pub fn normalize_account_id(input: &str) -> String {
     sanitize_account_id(input.to_string())
 }
@@ -70,6 +129,8 @@ fn settings_from_save_input(existing: AppSettings, input: SaveSettingsInput) -> 
         notify_on_reset: false,
         reset_notify_lead_minutes: input.reset_notify_lead_minutes.max(1),
         git_usage_root: sanitize_git_usage_root(input.git_usage_root),
+        claude_proxy: existing.claude_proxy,
+        claude_proxy_profiles: existing.claude_proxy_profiles,
         secret_configured: false,
     }
 }
@@ -262,6 +323,22 @@ fn hydrate_connected_accounts(settings: &mut AppSettings) -> Result<(), String> 
     Ok(())
 }
 
+fn hydrate_claude_proxy_profiles(settings: &mut AppSettings) -> Result<(), String> {
+    let account_ids = settings
+        .accounts
+        .iter()
+        .map(|account| account.account_id.clone())
+        .collect::<HashSet<_>>();
+    settings
+        .claude_proxy_profiles
+        .retain(|account_id, _| account_ids.contains(account_id));
+    for (account_id, profile) in settings.claude_proxy_profiles.iter_mut() {
+        profile.base_url = sanitize_optional(profile.base_url.take());
+        profile.secret_configured = secrets::claude_proxy_secret_configured(account_id)?;
+    }
+    Ok(())
+}
+
 fn sync_active_account_metadata(settings: &mut AppSettings) {
     let active_id = settings.account_id.clone();
     if let Some(account) = settings
@@ -446,6 +523,43 @@ fn sanitize_git_usage_root(input: String) -> String {
     }
 
     expand_home_path(trimmed).to_string_lossy().to_string()
+}
+
+fn sanitize_claude_proxy_config(input: ClaudeProxyConfig) -> ClaudeProxyConfig {
+    let listen_address = input.listen_address.trim();
+    let listen_address = if listen_address.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        listen_address.to_string()
+    };
+    let listen_port = input.listen_port.clamp(1024, 65535);
+    let mut routes = Vec::with_capacity(input.routes.len());
+    let mut seen = HashSet::new();
+
+    for route in input.routes {
+        let id = route.id.trim().to_string();
+        let model_pattern = route.model_pattern.trim().to_string();
+        let account_id = sanitize_account_id(route.account_id);
+        if id.is_empty() || model_pattern.is_empty() || account_id.is_empty() {
+            continue;
+        }
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+
+        routes.push(crate::models::ClaudeModelRoute {
+            id,
+            model_pattern,
+            account_id,
+            enabled: route.enabled,
+        });
+    }
+
+    ClaudeProxyConfig {
+        listen_address,
+        listen_port,
+        routes,
+    }
 }
 
 fn expand_home_path(input: &str) -> PathBuf {

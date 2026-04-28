@@ -1,6 +1,7 @@
 mod commands;
 mod errors;
 mod git_usage;
+mod local_proxy;
 mod local_usage;
 mod models;
 mod notifications;
@@ -33,6 +34,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .manage(oauth::OAuthStore::default())
         .manage(panel::PanelAnchor::default())
+        .manage(local_proxy::LocalProxyManager::default())
         .manage(state::StateStore::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -140,6 +142,13 @@ fn main() {
             commands::test_connection,
             commands::get_settings,
             commands::save_settings,
+            commands::get_local_proxy_settings,
+            commands::save_local_proxy_settings,
+            commands::save_claude_proxy_profile,
+            commands::get_local_proxy_status,
+            commands::start_local_proxy,
+            commands::stop_local_proxy,
+            commands::test_local_proxy_match,
             commands::import_kimi_account,
             commands::import_glm_account,
             commands::import_minimax_account,

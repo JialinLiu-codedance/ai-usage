@@ -4,10 +4,19 @@ import type {
   AccountQuotaStatus,
   AppSettings,
   AppStatus,
+  ClaudeApiFormat,
+  ClaudeAuthField,
+  ClaudeProxyCapability,
+  ClaudeProxyConfig,
+  ClaudeProxyProfileInput,
+  ClaudeProxyProfileSummary,
   ConnectedAccount,
   ConnectionTestResult,
   GitUsageBucket,
   GitUsageReport,
+  LocalProxyMatchResult,
+  LocalProxySettingsState,
+  LocalProxyStatus,
   GitUsageRepository,
   GitUsageTotals,
   LocalTokenUsageDay,
@@ -20,12 +29,18 @@ import type {
   PresetUsageRange,
   PrKpiMetric,
   PrKpiReport,
+  SaveLocalProxySettingsInput,
   SaveSettingsInput,
   UsageRangeSelection,
 } from "./types";
 
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const mockGitUsageRoot = "/Users/test/project";
+const defaultMockClaudeProxyConfig: ClaudeProxyConfig = {
+  listen_address: "127.0.0.1",
+  listen_port: 16555,
+  routes: [],
+};
 let mockOAuthSequence = 0;
 let mockOAuthCompleteSequence = 0;
 let mockPendingOAuthAccountId: string | null = null;
@@ -89,6 +104,8 @@ function initialMockSettings(): AppSettings {
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     git_usage_root: mockGitUsageRoot,
+    claude_proxy: defaultMockClaudeProxyConfig,
+    claude_proxy_profiles: {},
     secret_configured: true,
   };
 }
@@ -107,6 +124,8 @@ function emptyMockSettings(): AppSettings {
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     git_usage_root: mockGitUsageRoot,
+    claude_proxy: defaultMockClaudeProxyConfig,
+    claude_proxy_profiles: {},
     secret_configured: false,
   };
 }
@@ -159,10 +178,44 @@ let mockStatus: AppStatus = {
   last_refreshed_at: new Date().toISOString(),
 };
 
+let mockLocalProxySettingsState: LocalProxySettingsState = {
+  config: defaultMockClaudeProxyConfig,
+  capabilities: [],
+};
+
+let mockLocalProxyStatus: LocalProxyStatus = {
+  running: false,
+  address: "127.0.0.1",
+  port: 16555,
+  active_connections: 0,
+  total_requests: 0,
+  successful_requests: 0,
+  failed_requests: 0,
+  success_rate: 0,
+  uptime_seconds: 0,
+  last_error: null,
+};
+
 export function resetMockTauriStateForTests(): void {
   mockOAuthSequence = 0;
   mockOAuthCompleteSequence = 0;
   mockPendingOAuthAccountId = null;
+  mockLocalProxySettingsState = {
+    config: defaultMockClaudeProxyConfig,
+    capabilities: [],
+  };
+  mockLocalProxyStatus = {
+    running: false,
+    address: "127.0.0.1",
+    port: 16555,
+    active_connections: 0,
+    total_requests: 0,
+    successful_requests: 0,
+    failed_requests: 0,
+    success_rate: 0,
+    uptime_seconds: 0,
+    last_error: null,
+  };
   mockSettings = emptyMockSettings();
   mockStatus = {
     snapshot: null,
@@ -171,6 +224,7 @@ export function resetMockTauriStateForTests(): void {
     last_error: null,
     last_refreshed_at: null,
   };
+  syncMockLocalProxyState();
 }
 
 export async function getCurrentQuota(): Promise<AppStatus> {
@@ -207,9 +261,116 @@ export async function saveSettings(input: SaveSettingsInput): Promise<AppSetting
       notify_on_reset: false,
       secret_configured: mockSettings.secret_configured || Boolean(authSecret),
     };
+    syncMockLocalProxyState();
     return mockSettings;
   }
   return invoke("save_settings", { input });
+}
+
+export async function getLocalProxySettings(): Promise<LocalProxySettingsState> {
+  if (!isTauriRuntime) {
+    syncMockLocalProxyState();
+    return mockLocalProxySettingsState;
+  }
+  return invoke("get_local_proxy_settings");
+}
+
+export async function saveLocalProxySettings(input: SaveLocalProxySettingsInput): Promise<LocalProxySettingsState> {
+  if (!isTauriRuntime) {
+    mockSettings = {
+      ...mockSettings,
+      claude_proxy: input.config,
+    };
+    syncMockLocalProxyState();
+    return mockLocalProxySettingsState;
+  }
+  return invoke("save_local_proxy_settings", { input });
+}
+
+export async function saveClaudeProxyProfile(input: ClaudeProxyProfileInput): Promise<LocalProxySettingsState> {
+  if (!isTauriRuntime) {
+    const { account_id, api_key_or_token, ...profile } = input;
+    mockSettings = {
+      ...mockSettings,
+      claude_proxy_profiles: {
+        ...mockSettings.claude_proxy_profiles,
+        [account_id]: {
+          base_url: profile.base_url,
+          api_format: profile.api_format,
+          auth_field: profile.auth_field,
+          secret_configured:
+            mockSettings.claude_proxy_profiles[account_id]?.secret_configured || Boolean(api_key_or_token?.trim()),
+        },
+      },
+    };
+    syncMockLocalProxyState();
+    return mockLocalProxySettingsState;
+  }
+  return invoke("save_claude_proxy_profile", { input });
+}
+
+export async function getLocalProxyStatus(): Promise<LocalProxyStatus> {
+  if (!isTauriRuntime) {
+    return mockLocalProxyStatus;
+  }
+  return invoke("get_local_proxy_status");
+}
+
+export async function startLocalProxy(): Promise<LocalProxyStatus> {
+  if (!isTauriRuntime) {
+    syncMockLocalProxyState();
+    mockLocalProxyStatus = {
+      ...mockLocalProxyStatus,
+      running: true,
+      address: mockSettings.claude_proxy.listen_address,
+      port: mockSettings.claude_proxy.listen_port,
+      uptime_seconds: 1,
+      last_error: null,
+    };
+    return mockLocalProxyStatus;
+  }
+  return invoke("start_local_proxy");
+}
+
+export async function stopLocalProxy(): Promise<LocalProxyStatus> {
+  if (!isTauriRuntime) {
+    mockLocalProxyStatus = {
+      ...mockLocalProxyStatus,
+      running: false,
+      uptime_seconds: 0,
+    };
+    return mockLocalProxyStatus;
+  }
+  return invoke("stop_local_proxy");
+}
+
+export async function testLocalProxyMatch(model: string): Promise<LocalProxyMatchResult> {
+  if (!isTauriRuntime) {
+    syncMockLocalProxyState();
+    const route = mockLocalProxySettingsState.config.routes.find(
+      (item) => item.enabled && mockModelMatches(item.model_pattern, model),
+    );
+    if (!route) {
+      return {
+        matched: false,
+        route_id: null,
+        model_pattern: null,
+        account_id: null,
+        display_name: null,
+        error: "未匹配到模型路由",
+      };
+    }
+    const capability = mockLocalProxySettingsState.capabilities.find((item) => item.account_id === route.account_id);
+    return {
+      matched: true,
+      route_id: route.id,
+      model_pattern: route.model_pattern,
+      account_id: route.account_id,
+      display_name: capability?.display_name ?? route.account_id,
+      error: null,
+    };
+  }
+  return invoke("test_local_proxy_match", { model });
 }
 
 export async function ensureNotificationPermission(): Promise<boolean> {
@@ -252,6 +413,7 @@ export async function importKimiAccount(accountName?: string | null, accountId?:
         ? { ...mockStatus.snapshot, account_id: nextAccountId, account_name: normalizedName }
         : null,
     };
+    syncMockLocalProxyState();
     return mockSettings;
   }
   return invoke("import_kimi_account", {
@@ -295,6 +457,7 @@ export async function importGlmAccount(
         ? { ...mockStatus.snapshot, account_id: nextAccountId, account_name: normalizedName }
         : null,
     };
+    syncMockLocalProxyState();
     return mockSettings;
   }
   return invoke("import_glm_account", {
@@ -339,6 +502,7 @@ export async function importMiniMaxAccount(
         ? { ...mockStatus.snapshot, account_id: nextAccountId, account_name: normalizedName }
         : null,
     };
+    syncMockLocalProxyState();
     return mockSettings;
   }
   return invoke("import_minimax_account", {
@@ -383,6 +547,7 @@ export async function importCopilotAccount(
         ? { ...mockStatus.snapshot, account_id: nextAccountId, account_name: normalizedName }
         : null,
     };
+    syncMockLocalProxyState();
     return mockSettings;
   }
   return invoke("import_copilot_account", {
@@ -481,6 +646,7 @@ async function completeProviderOAuth(provider: OAuthProviderKey, callbackUrl: st
         : null,
     };
     mockPendingOAuthAccountId = null;
+    syncMockLocalProxyState();
     return { phase: "success", message: callbackUrl, email, auth_url: null };
   }
   const command = provider === "anthropic" ? "complete_anthropic_oauth" : "complete_openai_oauth";
@@ -530,6 +696,7 @@ export async function deleteConnectedAccount(accountId: string): Promise<AppSett
       last_error: activeAccount ? mockStatus.last_error : null,
       last_refreshed_at: activeAccount ? mockStatus.last_refreshed_at : null,
     };
+    syncMockLocalProxyState();
     return mockSettings;
   }
   return invoke("delete_connected_account", { accountId });
@@ -603,6 +770,73 @@ export async function chooseGitUsageRoot(currentPath?: string | null): Promise<s
   });
 
   return typeof selected === "string" ? selected : null;
+}
+
+function syncMockLocalProxyState(): void {
+  const capabilities = mockSettings.accounts.map((account) => {
+    const compatibleProviders = new Set(["anthropic", "glm", "minimax", "kimi", "qwen", "xiaomi", "custom"]);
+    const isCompatible = compatibleProviders.has(account.provider);
+    const defaults = mockDefaultClaudeProfile(account.provider);
+    const stored = mockSettings.claude_proxy_profiles[account.account_id];
+    const profile: ClaudeProxyProfileSummary = {
+      base_url: stored?.base_url ?? defaults.base_url,
+      api_format: stored?.api_format ?? defaults.api_format,
+      auth_field: stored?.auth_field ?? defaults.auth_field,
+      secret_configured:
+        stored?.secret_configured ?? (account.provider === "glm" || account.provider === "minimax"),
+    };
+    const missing_fields = isCompatible
+      ? [
+          ...(profile.base_url ? [] : ["base_url"]),
+          ...(profile.secret_configured ? [] : ["api_key_or_token"]),
+        ]
+      : [];
+    return {
+      account_id: account.account_id,
+      provider: account.provider,
+      display_name: account.account_name,
+      is_claude_compatible_provider: isCompatible,
+      can_direct_connect: isCompatible && missing_fields.length === 0,
+      missing_fields,
+      profile,
+      resolved_profile: isCompatible && missing_fields.length === 0 ? profile : null,
+    } satisfies ClaudeProxyCapability;
+  });
+
+  mockLocalProxySettingsState = {
+    config: mockSettings.claude_proxy,
+    capabilities,
+  };
+}
+
+function mockDefaultClaudeProfile(provider: string): ClaudeProxyProfileSummary {
+  const base_url =
+    provider === "anthropic"
+      ? "https://api.anthropic.com"
+      : provider === "glm"
+        ? "https://open.bigmodel.cn/api/anthropic"
+        : provider === "minimax"
+          ? "https://api.minimaxi.com/anthropic"
+          : null;
+  return {
+    base_url,
+    api_format: "anthropic",
+    auth_field: "ANTHROPIC_AUTH_TOKEN",
+    secret_configured: false,
+  };
+}
+
+function mockModelMatches(pattern: string, model: string): boolean {
+  if (pattern === "*") {
+    return true;
+  }
+  if (pattern.endsWith("*")) {
+    return model.startsWith(pattern.slice(0, -1));
+  }
+  if (pattern.startsWith("*")) {
+    return model.endsWith(pattern.slice(1));
+  }
+  return pattern === model;
 }
 
 function mockStatusWithAccounts(): AppStatus {
