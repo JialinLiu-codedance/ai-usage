@@ -1,11 +1,13 @@
 use crate::models::{
     default_account_id, AppSettings, AuthMode, ProbeCredentials, StoredOAuthTokens, PROVIDER_OPENAI,
 };
+use base64::{engine::general_purpose, Engine as _};
 use keyring::Entry;
 
 const SERVICE_NAME: &str = "com.liujialin.ai-usage";
 const SECRET_ACCOUNT: &str = "default";
 const ACCOUNT_SECRET_PREFIX: &str = "account-secret:";
+const GH_CLI_KEYCHAIN_SERVICE: &str = "gh:github.com";
 
 pub fn load_secret(settings: &AppSettings) -> Result<Option<ProbeCredentials>, String> {
     if matches!(settings.auth_mode, AuthMode::OAuth) {
@@ -98,6 +100,11 @@ pub fn account_secret_configured(account_id: &str) -> Result<bool, String> {
     Ok(load_account_secret(account_id)?.is_some())
 }
 
+pub fn load_github_cli_token() -> Result<Option<String>, String> {
+    load_macos_generic_password_by_service(GH_CLI_KEYCHAIN_SERVICE)
+        .map(|token| token.and_then(|value| normalize_github_cli_token(&value)))
+}
+
 pub fn load_oauth_tokens(account_id: &str) -> Result<Option<StoredOAuthTokens>, String> {
     let entry = Entry::new(SERVICE_NAME, &oauth_keychain_account(account_id))
         .map_err(|error| format!("初始化 OAuth Keychain 失败: {error}"))?;
@@ -156,4 +163,48 @@ fn account_secret_keychain_account(account_id: &str) -> String {
         trimmed.to_string()
     };
     format!("{ACCOUNT_SECRET_PREFIX}{id}")
+}
+
+#[cfg(target_os = "macos")]
+fn load_macos_generic_password_by_service(service: &str) -> Result<Option<String>, String> {
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", service, "-w"])
+        .output()
+        .map_err(|error| format!("读取 GitHub CLI Keychain 失败: {error}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(token))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_macos_generic_password_by_service(_service: &str) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+fn normalize_github_cli_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(encoded) = trimmed.strip_prefix("go-keyring-base64:") {
+        let decoded = general_purpose::STANDARD.decode(encoded.trim()).ok()?;
+        let token = String::from_utf8(decoded).ok()?;
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            None
+        } else {
+            Some(token)
+        }
+    } else {
+        Some(trimmed.to_string())
+    }
 }

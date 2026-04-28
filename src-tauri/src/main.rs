@@ -17,7 +17,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder},
     tray::TrayIconBuilder,
-    ActivationPolicy, Emitter, Manager, Runtime, WindowEvent,
+    Emitter, Manager, Runtime, WindowEvent,
 };
 
 const TRAY_ID: &str = "ai-usage-tray";
@@ -28,13 +28,14 @@ const TRAY_USAGE_LINE_WIDTH: usize = 52;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(oauth::OAuthStore::default())
         .manage(panel::PanelAnchor::default())
         .manage(state::StateStore::default())
         .setup(|app| {
             let handle = app.handle().clone();
-            let _ = handle.set_activation_policy(ActivationPolicy::Accessory);
+            set_main_window_dock_visible(&handle, false);
             let tray_menu = build_tray_menu(&handle, &models::AppStatus::default())?;
 
             TrayIconBuilder::with_id(TRAY_ID)
@@ -68,11 +69,14 @@ fn main() {
                 {
                     let state = handle.state::<state::StateStore>();
                     let _ = commands::hydrate_cached_snapshot(&handle, &state).await;
-                    let token_cache_max_age = settings::load_settings(&handle)
-                        .map(|settings| i64::from(settings.refresh_interval_minutes))
-                        .unwrap_or(15);
+                    let initial_settings = settings::load_settings(&handle).unwrap_or_default();
+                    let token_cache_max_age = i64::from(initial_settings.refresh_interval_minutes);
                     commands::ensure_local_token_usage_cache(&handle, token_cache_max_age);
-                    commands::ensure_git_usage_cache(&handle, token_cache_max_age);
+                    commands::ensure_git_usage_cache(
+                        &handle,
+                        token_cache_max_age,
+                        &initial_settings.git_usage_root,
+                    );
                     refresh_tray_menu_from_state(&handle).await;
                 }
 
@@ -87,6 +91,7 @@ fn main() {
                         commands::ensure_git_usage_cache(
                             &handle,
                             i64::from(settings.refresh_interval_minutes),
+                            &settings.git_usage_root,
                         );
 
                         let should_refresh = {
@@ -127,6 +132,7 @@ fn main() {
             commands::import_kimi_account,
             commands::import_glm_account,
             commands::import_minimax_account,
+            commands::import_copilot_account,
             commands::start_openai_oauth,
             commands::start_anthropic_oauth,
             commands::get_oauth_status,
@@ -149,14 +155,12 @@ fn main() {
                     if label == "main" {
                         api.prevent_close();
                         if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.hide();
+                            hide_main_window(app, &window);
                         }
                     }
-                }
-
-                if should_hide_main_panel(&label, &event) {
+                } else if should_hide_main_panel(&label, &event) {
                     if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.hide();
+                        hide_main_window(app, &window);
                     }
                 }
             }
@@ -181,11 +185,25 @@ impl UtcNow {
 
 fn open_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        set_main_window_dock_visible(app, true);
         let _ = window.show();
         let _ = window.set_focus();
         let _ = window.emit("show-main-panel", ());
     }
 }
+
+fn hide_main_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let _ = window.hide();
+    set_main_window_dock_visible(app, false);
+}
+
+#[cfg(target_os = "macos")]
+fn set_main_window_dock_visible(app: &tauri::AppHandle, visible: bool) {
+    let _ = app.set_dock_visibility(visible);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_main_window_dock_visible(_app: &tauri::AppHandle, _visible: bool) {}
 
 fn should_hide_main_panel(label: &str, event: &WindowEvent) -> bool {
     label == "main" && matches!(event, WindowEvent::CloseRequested { .. })
@@ -284,6 +302,7 @@ fn provider_supports_quota_refresh(provider: &str) -> bool {
             | models::PROVIDER_KIMI
             | models::PROVIDER_GLM
             | models::PROVIDER_MINIMAX
+            | models::PROVIDER_COPILOT
     )
 }
 
@@ -332,10 +351,10 @@ fn tray_account_summary_group(
 ) -> Vec<String> {
     let mut lines = vec![account_line];
     if let Some(window) = five_hour {
-        lines.push(usage_line("5H", Some(window)));
+        lines.push(usage_line(quota_window_label(window, "5H"), Some(window)));
     }
     if let Some(window) = seven_day {
-        lines.push(usage_line("7D", Some(window)));
+        lines.push(usage_line(quota_window_label(window, "7D"), Some(window)));
     }
     lines
 }
@@ -343,6 +362,7 @@ fn tray_account_summary_group(
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         models::PROVIDER_ANTHROPIC => "Anthropic",
+        models::PROVIDER_COPILOT => "Copilot",
         models::PROVIDER_GLM => "GLM",
         models::PROVIDER_KIMI => "Kimi",
         models::PROVIDER_MINIMAX => "MiniMax",
@@ -360,10 +380,9 @@ fn display_account_name(name: &str) -> &str {
 
 fn usage_line(label: &str, window: Option<&models::QuotaWindow>) -> String {
     let percent = compact_percent(window);
-    format!(
-        "{label:<2}{percent:>width$}",
-        width = TRAY_USAGE_LINE_WIDTH - 2
-    )
+    let label_width = label.chars().count();
+    let value_width = TRAY_USAGE_LINE_WIDTH.saturating_sub(label_width);
+    format!("{label}{percent:>width$}", width = value_width)
 }
 
 fn tray_tooltip(status: &models::AppStatus) -> String {
@@ -372,12 +391,12 @@ fn tray_tooltip(status: &models::AppStatus) -> String {
             .accounts
             .iter()
             .map(|account| {
-                format!(
-                    "{}\n5 小时 {}\n1 周 {}",
-                    display_account_name(&account.account_name),
-                    compact_percent(account.five_hour.as_ref()),
-                    compact_percent(account.seven_day.as_ref())
-                )
+                let mut lines = vec![display_account_name(&account.account_name).to_string()];
+                lines.extend(tooltip_quota_lines(
+                    account.five_hour.as_ref(),
+                    account.seven_day.as_ref(),
+                ));
+                lines.join("\n")
             })
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -388,9 +407,38 @@ fn tray_tooltip(status: &models::AppStatus) -> String {
         return "AI Usage".to_string();
     };
 
-    let five = compact_percent(snapshot.five_hour.as_ref());
-    let seven = compact_percent(snapshot.seven_day.as_ref());
-    format!("AI Usage\n5 小时 {five}\n1 周 {seven}")
+    let lines = tooltip_quota_lines(snapshot.five_hour.as_ref(), snapshot.seven_day.as_ref());
+    if lines.is_empty() {
+        "AI Usage".to_string()
+    } else {
+        format!("AI Usage\n{}", lines.join("\n"))
+    }
+}
+
+fn tooltip_quota_lines(
+    five_hour: Option<&models::QuotaWindow>,
+    seven_day: Option<&models::QuotaWindow>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(window) = five_hour {
+        lines.push(format!(
+            "{} {}",
+            quota_window_label(window, "5 小时"),
+            compact_percent(Some(window))
+        ));
+    }
+    if let Some(window) = seven_day {
+        lines.push(format!(
+            "{} {}",
+            quota_window_label(window, "1 周"),
+            compact_percent(Some(window))
+        ));
+    }
+    lines
+}
+
+fn quota_window_label<'a>(window: &'a models::QuotaWindow, fallback: &'a str) -> &'a str {
+    window.label.as_deref().unwrap_or(fallback)
 }
 
 fn compact_percent(window: Option<&models::QuotaWindow>) -> String {
@@ -528,6 +576,7 @@ mod tests {
                     account_name: "first@example.com".into(),
                     provider: models::PROVIDER_OPENAI.into(),
                     five_hour: Some(models::QuotaWindow {
+                        label: None,
                         used_percent: 4.0,
                         remaining_percent: 96.0,
                         reset_at: None,
@@ -544,6 +593,7 @@ mod tests {
                     provider: models::PROVIDER_ANTHROPIC.into(),
                     five_hour: None,
                     seven_day: Some(models::QuotaWindow {
+                        label: None,
                         used_percent: 10.0,
                         remaining_percent: 90.0,
                         reset_at: None,
@@ -589,6 +639,7 @@ mod tests {
         let line = usage_line(
             "5H",
             Some(&models::QuotaWindow {
+                label: None,
                 used_percent: 12.0,
                 remaining_percent: 88.0,
                 reset_at: None,
@@ -609,6 +660,7 @@ mod tests {
                 account_name: "MiniMax Account".into(),
                 provider: models::PROVIDER_MINIMAX.into(),
                 five_hour: Some(models::QuotaWindow {
+                    label: None,
                     used_percent: 0.0,
                     remaining_percent: 100.0,
                     reset_at: None,

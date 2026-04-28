@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, Copy, Inbox, Info, KeyRound, Link2, Plus, RefreshCw, Settings } from "lucide-react";
+import { ArrowLeft, Copy, FolderOpen, Inbox, Info, KeyRound, Link2, Plus, RefreshCw, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import anthropicIcon from "../icons/extracted/anthropic.svg";
+import copilotIcon from "../icons/extracted/copilot.svg";
 import kimiIcon from "../icons/extracted/kimi.svg";
 import minimaxIcon from "../icons/extracted/minimax.svg";
 import openaiIcon from "../icons/extracted/openai.svg";
@@ -17,12 +18,14 @@ import aiUsageLogo from "../icons/ai-usage-logo.svg";
 import {
   deleteConnectedAccount,
   ensureNotificationPermission,
+  chooseGitUsageRoot,
   getCurrentQuota,
   getLocalTokenUsage,
   getSettings,
   completeAnthropicOAuth,
   completeOpenAIOAuth,
   getGitUsage,
+  importCopilotAccount,
   importGlmAccount,
   importKimiAccount,
   importMiniMaxAccount,
@@ -44,6 +47,7 @@ import {
   buildGitUsageChartRows,
   formatCompactLines,
   gitUsageSummaryMetrics,
+  repositoryUsageRows,
 } from "./lib/git-usage-display";
 import {
   buildTokenUsageChartLegend,
@@ -66,10 +70,19 @@ import type {
   SaveSettingsInput,
 } from "./lib/types";
 
-type PanelView = "overview" | "settings" | "add-account" | "oauth-auth" | "kimi-auth" | "glm-auth" | "minimax-auth";
+type PanelView =
+  | "overview"
+  | "settings"
+  | "add-account"
+  | "oauth-auth"
+  | "kimi-auth"
+  | "glm-auth"
+  | "minimax-auth"
+  | "copilot-auth";
 type AddAccountBackView = Extract<PanelView, "overview" | "settings">;
 type OAuthProviderKey = "openai" | "anthropic";
 type SettingsTab = "quota" | "tokens";
+type SettingsUsageTab = "token" | "git";
 type Tone = "success" | "warning" | "danger" | "muted";
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const PANEL_WIDTH = 420;
@@ -182,6 +195,9 @@ function defaultProviderAccountName(provider: string): string {
   if (provider === "minimax") {
     return "MiniMax Account";
   }
+  if (provider === "copilot") {
+    return "Copilot Account";
+  }
   return "OpenAI Account";
 }
 
@@ -197,6 +213,9 @@ function providerDisplayName(provider: string): string {
   }
   if (provider === "minimax") {
     return "MiniMax";
+  }
+  if (provider === "copilot") {
+    return "Copilot";
   }
   return "OpenAI";
 }
@@ -225,6 +244,11 @@ function nextMiniMaxAccountName(settings: AppSettings): string {
   return existingCount === 0 ? "MiniMax Account" : `MiniMax Account ${existingCount + 1}`;
 }
 
+function nextCopilotAccountName(settings: AppSettings): string {
+  const existingCount = settings.accounts.filter((account) => account.provider === "copilot").length;
+  return existingCount === 0 ? "Copilot Account" : `Copilot Account ${existingCount + 1}`;
+}
+
 export default function App() {
   const panelRootRef = useRef<HTMLElement | null>(null);
   const lastPanelSizeRef = useRef<{ width: number; height: number } | null>(null);
@@ -249,6 +273,10 @@ export default function App() {
   const [minimaxAccountName, setMiniMaxAccountName] = useState("MiniMax Account");
   const [minimaxApiKey, setMiniMaxApiKey] = useState("");
   const [minimaxImporting, setMiniMaxImporting] = useState(false);
+  const [copilotTargetAccountId, setCopilotTargetAccountId] = useState<string | null>(null);
+  const [copilotAccountName, setCopilotAccountName] = useState("Copilot Account");
+  const [copilotToken, setCopilotToken] = useState("");
+  const [copilotImporting, setCopilotImporting] = useState(false);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [authCode, setAuthCode] = useState("");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
@@ -263,6 +291,7 @@ export default function App() {
     notify_on_low_quota: false,
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
+    git_usage_root: "",
     auth_secret: "",
   });
 
@@ -337,6 +366,7 @@ export default function App() {
       notify_on_low_quota: nextSettings.notify_on_low_quota,
       notify_on_reset: nextSettings.notify_on_reset,
       reset_notify_lead_minutes: nextSettings.reset_notify_lead_minutes,
+      git_usage_root: nextSettings.git_usage_root,
       auth_secret: "",
     }));
   }
@@ -497,6 +527,15 @@ export default function App() {
     navigateToView("minimax-auth");
   }
 
+  function openCopilotImport(accountId: string | null, accountName: string) {
+    setSettingsMessage(null);
+    setCopilotTargetAccountId(accountId);
+    setCopilotAccountName(accountName.trim() || "Copilot Account");
+    setCopilotToken("");
+    setCopilotImporting(false);
+    navigateToView("copilot-auth");
+  }
+
   async function handleImportKimi() {
     const trimmedName = kimiAccountName.trim();
     if (!trimmedName) {
@@ -588,6 +627,34 @@ export default function App() {
     }
   }
 
+  async function handleImportCopilot() {
+    const trimmedName = copilotAccountName.trim();
+    const trimmedToken = copilotToken.trim();
+    if (!trimmedName) {
+      setSettingsMessage("请输入账号名称");
+      return;
+    }
+
+    setCopilotImporting(true);
+    setSettingsMessage(null);
+    try {
+      const nextSettings = await importCopilotAccount(trimmedName, trimmedToken || null, copilotTargetAccountId);
+      applySettings(nextSettings);
+      navigateToView("settings");
+      try {
+        setStatus(await refreshQuota());
+        setSettingsMessage("Copilot 账号已添加并刷新额度");
+      } catch (refreshError) {
+        setStatus(await getCurrentQuota());
+        setSettingsMessage(refreshError instanceof Error ? refreshError.message : "Copilot 账号已添加，额度刷新失败");
+      }
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "添加 Copilot 账号失败");
+    } finally {
+      setCopilotImporting(false);
+    }
+  }
+
   async function handleDeleteConnectedAccount(accountId: string) {
     setSettingsMessage(null);
     try {
@@ -641,6 +708,10 @@ export default function App() {
               openMiniMaxImport(account.account_id, connectedAccountSubtitle(account));
               return;
             }
+            if (account.provider === "copilot") {
+              openCopilotImport(account.account_id, connectedAccountSubtitle(account));
+              return;
+            }
             openOAuthAuth(account.provider as OAuthProviderKey, account.account_id);
           }}
           onDeleteAccount={(accountId) => void handleDeleteConnectedAccount(accountId)}
@@ -667,6 +738,10 @@ export default function App() {
             }
             if (provider === "minimax") {
               openMiniMaxImport(null, nextMiniMaxAccountName(settings));
+              return;
+            }
+            if (provider === "copilot") {
+              openCopilotImport(null, nextCopilotAccountName(settings));
               return;
             }
             setSettingsMessage("该平台的接入流程尚未实现");
@@ -722,6 +797,19 @@ export default function App() {
           onAccountNameChange={setMiniMaxAccountName}
           onApiKeyChange={setMiniMaxApiKey}
           onImport={() => void handleImportMiniMax()}
+        />
+      ) : null}
+
+      {view === "copilot-auth" ? (
+        <CopilotTokenPanel
+          accountName={copilotAccountName}
+          token={copilotToken}
+          importing={copilotImporting}
+          message={settingsMessage}
+          onBack={() => navigateToView(copilotTargetAccountId ? "settings" : "add-account")}
+          onAccountNameChange={setCopilotAccountName}
+          onTokenChange={setCopilotToken}
+          onImport={() => void handleImportCopilot()}
         />
       ) : null}
     </main>
@@ -891,6 +979,7 @@ function SettingsPanel({
 }) {
   const [thresholdDraft, setThresholdDraft] = useState(String(form.low_quota_threshold_percent));
   const [activeTab, setActiveTab] = useState<SettingsTab>("quota");
+  const [activeUsageTab, setActiveUsageTab] = useState<SettingsUsageTab>("token");
   const [usageRange, setUsageRange] = useState<LocalTokenUsageRange>("thisMonth");
   const [tokenReportsByRange, setTokenReportsByRange] = useState<Partial<Record<LocalTokenUsageRange, LocalTokenUsageReport>>>({});
   const [gitReportsByRange, setGitReportsByRange] = useState<Partial<Record<LocalTokenUsageRange, GitUsageReport>>>({});
@@ -900,13 +989,19 @@ function SettingsPanel({
   const [gitRefreshing, setGitRefreshing] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
+  const [gitRootDraft, setGitRootDraft] = useState(form.git_usage_root);
+  const [gitRootPicking, setGitRootPicking] = useState(false);
 
   useEffect(() => {
     setThresholdDraft(String(form.low_quota_threshold_percent));
   }, [form.low_quota_threshold_percent]);
 
   useEffect(() => {
-    if (activeTab !== "tokens") {
+    setGitRootDraft(form.git_usage_root);
+  }, [form.git_usage_root]);
+
+  useEffect(() => {
+    if (activeTab !== "tokens" || activeUsageTab !== "token") {
       return undefined;
     }
 
@@ -935,10 +1030,10 @@ function SettingsPanel({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, usageRange]);
+  }, [activeTab, activeUsageTab, usageRange]);
 
   useEffect(() => {
-    if (activeTab !== "tokens") {
+    if (activeTab !== "tokens" || activeUsageTab !== "git") {
       return undefined;
     }
 
@@ -967,10 +1062,10 @@ function SettingsPanel({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, usageRange]);
+  }, [activeTab, activeUsageTab, usageRange, form.git_usage_root]);
 
   useEffect(() => {
-    if (!isTauriRuntime || activeTab !== "tokens") {
+    if (!isTauriRuntime || activeTab !== "tokens" || activeUsageTab !== "token") {
       return undefined;
     }
 
@@ -993,10 +1088,10 @@ function SettingsPanel({
       cancelled = true;
       void unlisten.then((dispose) => dispose());
     };
-  }, [activeTab, usageRange]);
+  }, [activeTab, activeUsageTab, usageRange]);
 
   useEffect(() => {
-    if (!isTauriRuntime || activeTab !== "tokens") {
+    if (!isTauriRuntime || activeTab !== "tokens" || activeUsageTab !== "git") {
       return undefined;
     }
 
@@ -1019,7 +1114,7 @@ function SettingsPanel({
       cancelled = true;
       void unlisten.then((dispose) => dispose());
     };
-  }, [activeTab, usageRange]);
+  }, [activeTab, activeUsageTab, usageRange]);
 
   function commitThreshold(value: string) {
     const parsed = Number.parseInt(value, 10);
@@ -1027,6 +1122,32 @@ function SettingsPanel({
     setThresholdDraft(String(nextValue));
     if (nextValue !== form.low_quota_threshold_percent) {
       onChange({ ...form, low_quota_threshold_percent: nextValue });
+    }
+  }
+
+  function commitGitUsageRoot(value: string) {
+    const nextValue = value.trim();
+    setGitRootDraft(nextValue);
+    if (nextValue && nextValue !== form.git_usage_root) {
+      setGitReportsByRange({});
+      onChange({ ...form, git_usage_root: nextValue });
+    }
+  }
+
+  async function handlePickGitUsageRoot() {
+    setGitRootPicking(true);
+    setGitError(null);
+    try {
+      const selected = await chooseGitUsageRoot(gitRootDraft || form.git_usage_root);
+      if (selected) {
+        setGitRootDraft(selected);
+        setGitReportsByRange({});
+        onChange({ ...form, git_usage_root: selected });
+      }
+    } catch (error) {
+      setGitError(errorMessage(error, "选择 Git 统计路径失败"));
+    } finally {
+      setGitRootPicking(false);
     }
   }
 
@@ -1114,7 +1235,8 @@ function SettingsPanel({
                 {isOAuthProvider(account.provider as ProviderKey) ||
                 account.provider === "kimi" ||
                 account.provider === "glm" ||
-                account.provider === "minimax" ? (
+                account.provider === "minimax" ||
+                account.provider === "copilot" ? (
                   <Button
                     variant="secondary"
                     className="account-action-button"
@@ -1122,7 +1244,9 @@ function SettingsPanel({
                   >
                     {account.provider === "kimi"
                       ? "重新导入"
-                      : account.provider === "glm" || account.provider === "minimax"
+                      : account.provider === "copilot"
+                        ? "更新 Token"
+                        : account.provider === "glm" || account.provider === "minimax"
                         ? "更新 Key"
                         : "重新授权"}
                   </Button>
@@ -1214,6 +1338,9 @@ function SettingsPanel({
           report={tokenReport}
           gitReport={gitReport}
           range={usageRange}
+          activeUsageTab={activeUsageTab}
+          gitUsageRoot={gitRootDraft}
+          gitRootPicking={gitRootPicking}
           loading={tokenLoading}
           gitLoading={gitLoading}
           refreshing={tokenRefreshing}
@@ -1221,12 +1348,16 @@ function SettingsPanel({
           error={tokenError}
           gitError={gitError}
           onRangeChange={setUsageRange}
+          onUsageTabChange={setActiveUsageTab}
+          onGitUsageRootDraftChange={setGitRootDraft}
+          onGitUsageRootCommit={commitGitUsageRoot}
+          onGitUsageRootPick={handlePickGitUsageRoot}
           onRefresh={handleTokenRefresh}
           onGitRefresh={handleGitRefresh}
         />
       )}
 
-      {message ? <div className="settings-message">{message}</div> : null}
+      {activeTab === "quota" && message ? <div className="settings-message">{message}</div> : null}
     </Card>
   );
 }
@@ -1235,6 +1366,9 @@ function TokenUsagePanel({
   report,
   gitReport,
   range,
+  activeUsageTab,
+  gitUsageRoot,
+  gitRootPicking,
   loading,
   gitLoading,
   refreshing,
@@ -1242,12 +1376,19 @@ function TokenUsagePanel({
   error,
   gitError,
   onRangeChange,
+  onUsageTabChange,
+  onGitUsageRootDraftChange,
+  onGitUsageRootCommit,
+  onGitUsageRootPick,
   onRefresh,
   onGitRefresh,
 }: {
   report: LocalTokenUsageReport | null;
   gitReport: GitUsageReport | null;
   range: LocalTokenUsageRange;
+  activeUsageTab: SettingsUsageTab;
+  gitUsageRoot: string;
+  gitRootPicking: boolean;
   loading: boolean;
   gitLoading: boolean;
   refreshing: boolean;
@@ -1255,12 +1396,17 @@ function TokenUsagePanel({
   error: string | null;
   gitError: string | null;
   onRangeChange: (range: LocalTokenUsageRange) => void;
+  onUsageTabChange: (tab: SettingsUsageTab) => void;
+  onGitUsageRootDraftChange: (value: string) => void;
+  onGitUsageRootCommit: (value: string) => void;
+  onGitUsageRootPick: () => void;
   onRefresh: () => void;
   onGitRefresh: () => void;
 }) {
   const chartRows = report ? buildTokenUsageChartRows(report) : [];
-  const chartLegend = report ? buildTokenUsageChartLegend(report) : [];
-  const modelRows = report ? modelUsageRows(report, 4) : [];
+  const visibleChartRows = chartRows.length > 7 ? chartRows.slice(-7) : chartRows;
+  const chartLegend = report ? buildTokenUsageChartLegend(report, 3) : [];
+  const modelRows = report ? modelUsageRows(report, 3) : [];
   const tools = report?.tools.filter((tool) => tool.total_tokens > 0) ?? [];
   const notices = [
     ...(report?.warnings ?? []),
@@ -1282,17 +1428,41 @@ function TokenUsagePanel({
         ))}
       </div>
 
-      {error ? <div className="inline-error">{error}</div> : null}
-      {loading && !report ? <div className="token-loading">读取本地日志...</div> : null}
+      <div className="usage-subtabs" role="tablist" aria-label="统计类型">
+        <button
+          type="button"
+          className={`usage-subtab ${activeUsageTab === "token" ? "usage-subtab-active" : ""}`}
+          role="tab"
+          aria-selected={activeUsageTab === "token"}
+          onClick={() => onUsageTabChange("token")}
+        >
+          Token 用量统计
+        </button>
+        <span className="usage-subtab-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className={`usage-subtab ${activeUsageTab === "git" ? "usage-subtab-active" : ""}`}
+          role="tab"
+          aria-selected={activeUsageTab === "git"}
+          onClick={() => onUsageTabChange("git")}
+        >
+          Git 提交统计
+        </button>
+      </div>
 
-      {report ? (
+      {activeUsageTab === "token" ? (
         <>
-          <TokenUsageSummary totals={report.totals} />
-          {report.totals.total_tokens === 0 ? <div className="token-empty">当前时间范围暂无 Token 用量数据</div> : null}
+          {error ? <div className="inline-error">{error}</div> : null}
+          {loading && !report ? <div className="token-loading">读取本地日志...</div> : null}
 
-          <section className="token-card">
+          {report ? (
+            <>
+              <TokenUsageSummary totals={report.totals} />
+              {report.totals.total_tokens === 0 ? <div className="token-empty">当前时间范围暂无 Token 用量数据</div> : null}
+
+          <section className="usage-section">
             <div className="token-section-header">
-              <h2>每日趋势</h2>
+              <h2>Token 用量趋势</h2>
               <div className="token-legend" aria-label="模型图例">
                 {chartLegend.map((item) => (
                   <span className={`token-legend-item ${item.colorClass}`} key={item.model}>
@@ -1302,7 +1472,7 @@ function TokenUsagePanel({
               </div>
             </div>
             <div className={`token-chart token-chart-range-${report.range}`} aria-label="每日 Token 趋势">
-              {chartRows.map((row) => (
+              {visibleChartRows.map((row) => (
                 <div className="token-chart-column" key={row.date}>
                   <div className="token-chart-bar" title={row.label}>
                     {row.segments.map((segment) => (
@@ -1320,10 +1490,9 @@ function TokenUsagePanel({
             </div>
           </section>
 
-          <section className="token-card">
+          <section className="usage-section">
             <div className="token-section-header">
-              <h2>模型排行</h2>
-              <span>{modelRows.length} 个模型</span>
+              <h2>模型用量排行</h2>
             </div>
             {modelRows.length > 0 ? (
               <div className="token-model-list">
@@ -1380,35 +1549,54 @@ function TokenUsagePanel({
               {refreshing ? "计算中" : "刷新用量"}
             </Button>
           </div>
+            </>
+          ) : null}
         </>
-      ) : null}
-
-      <GitUsageSection
-        report={gitReport}
-        loading={gitLoading}
-        refreshing={gitRefreshing}
-        error={gitError}
-        onRefresh={onGitRefresh}
-      />
+      ) : (
+        <GitUsageSection
+          report={gitReport}
+          gitUsageRoot={gitUsageRoot}
+          gitRootPicking={gitRootPicking}
+          loading={gitLoading}
+          refreshing={gitRefreshing}
+          error={gitError}
+          onGitUsageRootDraftChange={onGitUsageRootDraftChange}
+          onGitUsageRootCommit={onGitUsageRootCommit}
+          onGitUsageRootPick={onGitUsageRootPick}
+          onRefresh={onGitRefresh}
+        />
+      )}
     </section>
   );
 }
 
 function GitUsageSection({
   report,
+  gitUsageRoot,
+  gitRootPicking,
   loading,
   refreshing,
   error,
+  onGitUsageRootDraftChange,
+  onGitUsageRootCommit,
+  onGitUsageRootPick,
   onRefresh,
 }: {
   report: GitUsageReport | null;
+  gitUsageRoot: string;
+  gitRootPicking: boolean;
   loading: boolean;
   refreshing: boolean;
   error: string | null;
+  onGitUsageRootDraftChange: (value: string) => void;
+  onGitUsageRootCommit: (value: string) => void;
+  onGitUsageRootPick: () => void;
   onRefresh: () => void;
 }) {
   const chartRows = report ? buildGitUsageChartRows(report) : [];
+  const visibleChartRows = chartRows.length > 7 ? chartRows.slice(-7) : chartRows;
   const metrics = report ? gitUsageSummaryMetrics(report) : [];
+  const repositoryRows = report ? repositoryUsageRows(report, 3) : [];
   const notices = [
     ...(report?.warnings ?? []),
     ...(report?.missing_sources.map((source) => `未找到 ${source}`) ?? []),
@@ -1416,9 +1604,32 @@ function GitUsageSection({
 
   return (
     <section className="git-usage-section">
-      <div className="git-section-title">
-        <h2>Git 提交统计</h2>
-        {report ? <span>{report.repository_count} 个仓库</span> : null}
+      <div className="git-root-field">
+        <label htmlFor="git-usage-root">统计路径</label>
+        <div className="git-root-control">
+          <input
+            id="git-usage-root"
+            value={gitUsageRoot}
+            onChange={(event) => onGitUsageRootDraftChange(event.target.value)}
+            onBlur={() => onGitUsageRootCommit(gitUsageRoot)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.currentTarget.blur();
+              }
+            }}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon-sm"
+            className="git-root-pick-button"
+            aria-label="选择 Git 统计路径"
+            disabled={gitRootPicking}
+            onClick={onGitUsageRootPick}
+          >
+            <FolderOpen />
+          </Button>
+        </div>
       </div>
 
       {error ? <div className="inline-error">{error}</div> : null}
@@ -1426,31 +1637,35 @@ function GitUsageSection({
 
       {report ? (
         <>
-          <div className="git-summary-grid">
-            {metrics.map((metric) => (
-              <TokenUsageMetric
-                key={metric.label}
-                label={metric.label}
-                value={metric.value}
-                tone={metric.tone}
-              />
-            ))}
-          </div>
+          <section className="token-card git-summary-card">
+            <h2>提交概览</h2>
+            <div className="git-summary-grid">
+              {metrics.map((metric) => (
+                <TokenUsageMetric
+                  key={metric.label}
+                  label={metric.label}
+                  value={metric.value}
+                  tone={metric.tone}
+                />
+              ))}
+            </div>
+          </section>
 
           {report.totals.added_lines + report.totals.deleted_lines === 0 ? (
             <div className="token-empty">当前时间范围暂无 Git 提交统计</div>
           ) : null}
 
-          <section className="token-card">
+          <section className="usage-section">
             <div className="token-section-header">
               <h2>代码行数趋势</h2>
               <div className="token-legend" aria-label="代码行数图例">
                 <span className="token-legend-item git-added-legend">新增</span>
                 <span className="token-legend-item git-deleted-legend">删除</span>
+                <span className="token-legend-item git-changed-legend">修改文件</span>
               </div>
             </div>
             <div className={`git-chart git-chart-range-${report.range}`} aria-label="代码行数趋势">
-              {chartRows.map((row) => (
+              {visibleChartRows.map((row) => (
                 <div className="git-chart-column" key={row.date}>
                   <div className="git-chart-bars" title={row.label}>
                     <span
@@ -1463,12 +1678,48 @@ function GitUsageSection({
                       style={gitBarStyle(row.deletedHeight)}
                       title={`删除 ${formatCompactLines(row.deletedLines)}`}
                     />
+                    <span
+                      className="git-chart-bar git-chart-changed"
+                      style={gitBarStyle(row.changedHeight)}
+                      title={`修改文件 ${formatCompactLines(row.changedFiles)}`}
+                    />
                   </div>
                   <span>{row.label}</span>
                 </div>
               ))}
             </div>
           </section>
+
+          {repositoryRows.length > 0 ? (
+            <section className="usage-section git-repository-section">
+              <div className="token-section-header">
+                <h2>项目提交量排行</h2>
+              </div>
+              <div className="git-repository-list">
+                {repositoryRows.map((repository) => (
+                  <div className="git-repository-row" key={repository.path}>
+                    <div className="git-repository-row-header">
+                      <span>{repository.name}</span>
+                      <strong>
+                        <span className="git-repository-added">{repository.displayAdded}</span>
+                        <span className="git-repository-deleted">/ {repository.displayDeleted}</span>
+                      </strong>
+                    </div>
+                    <div className="git-repository-progress">
+                      <span
+                        className="git-repository-progress-added"
+                        style={{ width: `${repository.addedPercent}%` }}
+                      />
+                      <span
+                        className="git-repository-progress-deleted"
+                        style={{ width: `${repository.deletedPercent}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           {notices.length > 0 ? (
             <div className="token-warning-list">
@@ -1503,14 +1754,17 @@ function GitUsageSection({
 
 function TokenUsageSummary({ totals }: { totals: LocalTokenUsageTotals }) {
   return (
-    <div className="token-summary-grid">
-      <TokenUsageMetric label="总 Token" value={formatCompactTokens(totals.total_tokens)} />
-      <TokenUsageMetric label="输入" value={formatCompactTokens(totals.input_tokens)} />
-      <TokenUsageMetric label="输出" value={formatCompactTokens(totals.output_tokens)} />
-      <TokenUsageMetric label="缓存命中" value={formatCompactTokens(totals.cache_read_tokens)} tone="green" />
-      <TokenUsageMetric label="缓存写入" value={formatCompactTokens(totals.cache_creation_tokens)} tone="purple" />
-      <TokenUsageMetric label="命中率" value={`${Math.round(totals.cache_hit_rate_percent)}%`} />
-    </div>
+    <section className="token-card token-summary-card">
+      <h2>用量概览</h2>
+      <div className="token-summary-grid">
+        <TokenUsageMetric label="总 Token" value={formatCompactTokens(totals.total_tokens)} />
+        <TokenUsageMetric label="输入 Token" value={formatCompactTokens(totals.input_tokens)} />
+        <TokenUsageMetric label="输出 Token" value={formatCompactTokens(totals.output_tokens)} />
+        <TokenUsageMetric label="存储缓存" value={formatCompactTokens(totals.cache_creation_tokens)} />
+        <TokenUsageMetric label="缓存命中" value={formatCompactTokens(totals.cache_read_tokens)} />
+        <TokenUsageMetric label="缓存命中率" value={`${Math.round(totals.cache_hit_rate_percent)}%`} />
+      </div>
+    </section>
   );
 }
 
@@ -1893,6 +2147,76 @@ function MiniMaxApiKeyPanel({
   );
 }
 
+function CopilotTokenPanel({
+  accountName,
+  token,
+  importing,
+  message,
+  onBack,
+  onAccountNameChange,
+  onTokenChange,
+  onImport,
+}: {
+  accountName: string;
+  token: string;
+  importing: boolean;
+  message: string | null;
+  onBack: () => void;
+  onAccountNameChange: (value: string) => void;
+  onTokenChange: (value: string) => void;
+  onImport: () => void;
+}) {
+  return (
+    <Card className="settings-panel oauth-panel">
+      <div className="add-header">
+        <Button variant="ghost" size="icon-sm" className="icon-button back-button" onClick={onBack} aria-label="返回">
+          <ArrowLeft data-icon="inline-start" />
+        </Button>
+        <h1>Copilot 账号添加</h1>
+      </div>
+
+      <p className="auth-subtitle">GitHub Token</p>
+      <p className="auth-instruction">使用 GitHub CLI 登录态或手动 Token 读取 Copilot 额度。</p>
+
+      <AuthStepCard number={1} title="账号名称">
+        <label className="auth-input-label" htmlFor="copilot-account-name">
+          <KeyRound />
+          账号名称
+        </label>
+        <input
+          id="copilot-account-name"
+          className="kimi-account-input"
+          value={accountName}
+          onChange={(event) => onAccountNameChange(event.target.value)}
+          placeholder="Copilot Work"
+        />
+      </AuthStepCard>
+
+      <AuthStepCard number={2} title="GitHub Token">
+        <label className="auth-input-label" htmlFor="copilot-token">
+          <KeyRound />
+          GitHub Token
+        </label>
+        <input
+          id="copilot-token"
+          className="kimi-account-input"
+          type="password"
+          autoComplete="off"
+          value={token}
+          onChange={(event) => onTokenChange(event.target.value)}
+          placeholder="留空则从 gh CLI Keychain 导入"
+        />
+        <p className="auth-muted">已运行 gh auth login 的情况下可留空；多账号场景可手动填写不同 GitHub Token。</p>
+      </AuthStepCard>
+
+      <Button className="submit-auth-button" onClick={onImport} disabled={importing || !accountName.trim()}>
+        {importing ? "保存中" : "添加账号"}
+      </Button>
+      {message ? <div className="settings-message">{message}</div> : null}
+    </Card>
+  );
+}
+
 function AuthStepCard({
   number,
   title,
@@ -1913,7 +2237,7 @@ function AuthStepCard({
   );
 }
 
-type ProviderKey = "openai" | "anthropic" | "kimi" | "glm" | "minimax" | "qwen" | "xiaomi" | "custom";
+type ProviderKey = "openai" | "anthropic" | "kimi" | "glm" | "minimax" | "copilot" | "qwen" | "xiaomi" | "custom";
 type ProviderIconMode = "img" | "mask" | "xiaomi";
 
 const refreshIntervalOptions = [
@@ -1925,9 +2249,16 @@ const refreshIntervalOptions = [
 
 const tokenUsageRangeOptions: LocalTokenUsageRange[] = ["thisMonth", "thisWeek", "last3Days", "today"];
 
-const providers: Array<{ key: ProviderKey; name: string; method: "OAuth" | "API Key" | "Kimi CLI"; icon: string; iconMode?: ProviderIconMode }> = [
+const providers: Array<{
+  key: ProviderKey;
+  name: string;
+  method: "OAuth" | "API Key" | "Kimi CLI" | "GitHub Token";
+  icon: string;
+  iconMode?: ProviderIconMode;
+}> = [
   { key: "openai", name: "OpenAI", method: "OAuth", icon: openaiIcon },
   { key: "anthropic", name: "Anthropic", method: "OAuth", icon: anthropicIcon },
+  { key: "copilot", name: "Copilot", method: "GitHub Token", icon: copilotIcon },
   { key: "kimi", name: "Kimi", method: "Kimi CLI", icon: kimiIcon },
   { key: "glm", name: "GLM", method: "API Key", icon: zhipuIcon, iconMode: "mask" },
   { key: "minimax", name: "MiniMax", method: "API Key", icon: minimaxIcon },

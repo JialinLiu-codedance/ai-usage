@@ -517,13 +517,13 @@ textarea {
 }
 
 .settings-tab-active {
-  background: #fff;
-  color: #09090b;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+  background: #18181b;
+  color: #fafafa;
 }
 
 .settings-tab:focus-visible,
-.token-range-button:focus-visible {
+.token-range-button:focus-visible,
+.usage-subtab:focus-visible {
   box-shadow: 0 0 0 2px rgb(24 24 27 / 12%);
 }
 
@@ -537,15 +537,15 @@ textarea {
 .token-range-selector {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
+  gap: 8px;
   width: 100%;
 }
 
 .token-range-button {
-  height: 30px;
-  border: 1px solid #e4e4e7;
+  height: 32px;
+  border: 0;
   border-radius: 6px;
-  background: #fff;
+  background: #f4f4f5;
   color: #71717a;
   font-size: 11px;
   font-weight: 500;
@@ -555,9 +555,40 @@ textarea {
 }
 
 .token-range-button-active {
-  border-color: #18181b;
   background: #18181b;
   color: #fafafa;
+}
+
+.usage-subtabs {
+  display: grid;
+  grid-template-columns: 1fr 1px 1fr;
+  align-items: center;
+  width: 100%;
+  height: 36px;
+}
+
+.usage-subtab {
+  height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #71717a;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 14px;
+  cursor: pointer;
+  outline: none;
+}
+
+.usage-subtab-active {
+  background: #18181b;
+  color: #fafafa;
+}
+
+.usage-subtab-divider {
+  width: 1px;
+  height: 20px;
+  background: #e4e4e7;
 }
 
 .token-loading,
@@ -594,8 +625,8 @@ textarea {
 
 .token-summary-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .token-metric {
@@ -649,11 +680,53 @@ textarea {
   padding: 12px;
 }
 
+.token-card h2,
+.usage-section h2 {
+  color: #09090b;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.token-summary-card,
+.git-summary-card {
+  padding: 16px;
+}
+
+.token-summary-card .token-metric,
+.git-summary-card .token-metric {
+  min-height: 0;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: center;
+}
+
+.token-summary-card .token-metric strong,
+.git-summary-card .token-metric strong {
+  font-size: 20px;
+  line-height: 26px;
+}
+
+.usage-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
 .token-section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.usage-section .token-section-header {
+  flex-direction: column;
+  align-items: flex-start;
 }
 
 .token-section-header > span,
@@ -671,6 +744,14 @@ textarea {
   max-width: 72%;
   justify-content: flex-end;
   overflow: hidden;
+}
+
+.usage-section .token-legend {
+  align-self: center;
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: center;
+  overflow: visible;
 }
 
 .token-legend-item {
@@ -794,6 +875,10 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
 }
 
 .token-model-row-header {
@@ -831,7 +916,7 @@ textarea {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #18181b 0%, #8b5cf6 100%);
+  background: #18181b;
 }
 
 .git-usage-section {
@@ -842,39 +927,63 @@ textarea {
   padding-top: 2px;
 }
 
-.git-section-title {
+.git-root-field {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.git-section-title h2 {
-  color: #09090b;
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 20px;
-}
-
-.git-section-title span {
+.git-root-field label {
   color: #71717a;
   font-size: 11px;
-  line-height: 14px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.git-root-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 8px;
+  width: 100%;
+}
+
+.git-root-control input {
+  min-width: 0;
+  height: 32px;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0 10px;
+  color: #09090b;
+  font-size: 12px;
+  line-height: 16px;
+  outline: none;
+}
+
+.git-root-control input:focus-visible {
+  border-color: #a1a1aa;
+  box-shadow: 0 0 0 2px rgb(24 24 27 / 8%);
+}
+
+.git-root-pick-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.git-root-pick-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 .git-summary-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 12px;
 }
 
 .git-summary-grid .token-metric {
   min-height: 64px;
-}
-
-.git-summary-grid .token-metric strong {
-  font-size: 16px;
-  line-height: 22px;
 }
 
 .git-chart {
@@ -907,19 +1016,18 @@ textarea {
   display: flex;
   width: 24px;
   height: 112px;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 3px;
+  flex-direction: column-reverse;
+  justify-content: flex-start;
   border-radius: 6px;
   background: #f4f4f5;
-  padding: 0 3px;
+  overflow: hidden;
 }
 
 .git-chart-bar {
   display: block;
-  width: 7px;
+  width: 100%;
   min-height: 0;
-  border-radius: 999px 999px 0 0;
+  flex: 0 0 auto;
 }
 
 .git-chart-added,
@@ -930,6 +1038,11 @@ textarea {
 .git-chart-deleted,
 .git-deleted-legend::before {
   background: #ef4444;
+}
+
+.git-chart-changed,
+.git-changed-legend::before {
+  background: #3b82f6;
 }
 
 .git-chart-range-thisMonth {
@@ -943,12 +1056,10 @@ textarea {
 
 .git-chart-range-thisMonth .git-chart-bars {
   width: 16px;
-  gap: 2px;
-  padding-inline: 2px;
 }
 
 .git-chart-range-thisMonth .git-chart-bar {
-  width: 5px;
+  width: 100%;
 }
 
 .git-chart-range-today,
@@ -964,6 +1075,78 @@ textarea {
 .git-chart-range-today .git-chart-bars,
 .git-chart-range-last3Days .git-chart-bars {
   width: 20px;
+}
+
+.git-repository-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.git-repository-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.git-repository-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #09090b;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.git-repository-row-header > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.git-repository-row-header strong {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.git-repository-added {
+  color: #22c55e;
+}
+
+.git-repository-deleted {
+  color: #ef4444;
+}
+
+.git-repository-progress {
+  display: flex;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #f4f4f5;
+}
+
+.git-repository-progress span {
+  display: block;
+  height: 100%;
+}
+
+.git-repository-progress-added {
+  background: #22c55e;
+}
+
+.git-repository-progress-deleted {
+  background: #ef4444;
 }
 
 .token-tool-strip {

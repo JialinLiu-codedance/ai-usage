@@ -1,18 +1,27 @@
-import type { GitUsageReport, LocalTokenUsageRange } from "./types";
+import type { GitUsageReport, GitUsageRepository, LocalTokenUsageRange } from "./types";
 
 export interface GitUsageChartRow {
   date: string;
   label: string;
   addedLines: number;
   deletedLines: number;
+  changedFiles: number;
   addedHeight: number;
   deletedHeight: number;
+  changedHeight: number;
 }
 
 export interface GitUsageSummaryMetric {
   label: string;
   value: string;
   tone: "green" | "red" | "blue";
+}
+
+export interface RepositoryUsageDisplayRow extends GitUsageRepository {
+  displayAdded: string;
+  displayDeleted: string;
+  addedPercent: number;
+  deletedPercent: number;
 }
 
 export function formatCompactLines(value: number): string {
@@ -38,7 +47,7 @@ export function gitUsageSummaryMetrics(report: GitUsageReport): GitUsageSummaryM
 
 export function buildGitUsageChartRows(report: GitUsageReport): GitUsageChartRow[] {
   const maxLines = Math.max(
-    ...report.buckets.flatMap((bucket) => [bucket.added_lines, bucket.deleted_lines]),
+    ...report.buckets.flatMap((bucket) => [bucket.added_lines, bucket.deleted_lines, bucket.changed_files]),
     0,
   );
 
@@ -47,9 +56,37 @@ export function buildGitUsageChartRows(report: GitUsageReport): GitUsageChartRow
     label: formatBucketLabel(bucket.date, report.range),
     addedLines: bucket.added_lines,
     deletedLines: bucket.deleted_lines,
+    changedFiles: bucket.changed_files,
     addedHeight: scaledHeight(bucket.added_lines, maxLines),
     deletedHeight: scaledHeight(bucket.deleted_lines, maxLines),
+    changedHeight: scaledHeight(bucket.changed_files, maxLines),
   }));
+}
+
+export function repositoryUsageRows(report: GitUsageReport, limit = 3): RepositoryUsageDisplayRow[] {
+  const repositories = [...report.repositories]
+    .filter((repository) => repository.added_lines + repository.deleted_lines + repository.changed_files > 0)
+    .sort((a, b) => {
+      const aLineTotal = a.added_lines + a.deleted_lines;
+      const bLineTotal = b.added_lines + b.deleted_lines;
+      return bLineTotal - aLineTotal || b.changed_files - a.changed_files || a.name.localeCompare(b.name);
+    })
+    .slice(0, limit);
+  const maxLineTotal = Math.max(...repositories.map((repository) => repository.added_lines + repository.deleted_lines), 0);
+
+  return repositories.map((repository) => {
+    const lineTotal = repository.added_lines + repository.deleted_lines;
+    const totalPercent = scaledHeight(lineTotal, maxLineTotal);
+    const addedPercent = scaledHeight(repository.added_lines, maxLineTotal);
+
+    return {
+      ...repository,
+      displayAdded: `+${formatCompactLines(repository.added_lines)}`,
+      displayDeleted: `-${formatCompactLines(repository.deleted_lines)}`,
+      addedPercent,
+      deletedPercent: Math.max(0, totalPercent - addedPercent),
+    };
+  });
 }
 
 function scaledHeight(value: number, maxValue: number): number {

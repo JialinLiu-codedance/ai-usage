@@ -1,11 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub const PROVIDER_OPENAI: &str = "openai";
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_KIMI: &str = "kimi";
 pub const PROVIDER_GLM: &str = "glm";
 pub const PROVIDER_MINIMAX: &str = "minimax";
+pub const PROVIDER_COPILOT: &str = "copilot";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +26,8 @@ impl Default for AuthMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub used_percent: f64,
     pub remaining_percent: f64,
     pub reset_at: Option<DateTime<Utc>>,
@@ -97,6 +101,8 @@ pub struct AppSettings {
     pub notify_on_low_quota: bool,
     pub notify_on_reset: bool,
     pub reset_notify_lead_minutes: u32,
+    #[serde(default = "default_git_usage_root")]
+    pub git_usage_root: String,
     pub secret_configured: bool,
 }
 
@@ -114,6 +120,7 @@ impl Default for AppSettings {
             notify_on_low_quota: false,
             notify_on_reset: false,
             reset_notify_lead_minutes: 15,
+            git_usage_root: default_git_usage_root(),
             secret_configured: false,
         }
     }
@@ -142,11 +149,23 @@ pub struct SaveSettingsInput {
     pub notify_on_low_quota: bool,
     pub notify_on_reset: bool,
     pub reset_notify_lead_minutes: u32,
+    #[serde(default = "default_git_usage_root")]
+    pub git_usage_root: String,
     pub auth_secret: Option<String>,
 }
 
 pub fn default_account_id() -> String {
     "default".into()
+}
+
+pub fn default_git_usage_root() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let project = PathBuf::from(&home).join("project");
+    if project.is_dir() {
+        project.to_string_lossy().to_string()
+    } else {
+        home
+    }
 }
 
 fn default_provider() -> String {
@@ -310,10 +329,21 @@ pub struct GitUsageBucket {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitUsageRepository {
+    pub name: String,
+    pub path: String,
+    pub added_lines: u64,
+    pub deleted_lines: u64,
+    pub changed_files: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitUsageReport {
     pub range: LocalTokenUsageRange,
     pub totals: GitUsageTotals,
     pub buckets: Vec<GitUsageBucket>,
+    #[serde(default)]
+    pub repositories: Vec<GitUsageRepository>,
     pub repository_count: usize,
     pub missing_sources: Vec<String>,
     pub warnings: Vec<String>,

@@ -1,0 +1,192 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1777342111554,
+  "projectRoot": "/Users/liujialin/project/ai-usage",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "react",
+        "version": "19.2.0",
+        "category": "frontend"
+      },
+      {
+        "name": "react-dom",
+        "version": "19.2.0",
+        "category": "frontend"
+      },
+      {
+        "name": "vite",
+        "version": "7.1.12",
+        "category": "build"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": "npm run dev",
+    "scripts": {
+      "dev": "vite",
+      "build": "tsc && vite build",
+      "package:mac": "sh scripts/package-app.sh",
+      "preview": "vite preview",
+      "tauri": "tauri"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": "*.test.ts",
+    "fileOrganization": "type-based"
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts",
+      "src",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 1,
+      "lastAccessed": 1777342111325,
+      "keyFiles": [
+        "index.html"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 1,
+      "lastAccessed": 1777342111325,
+      "keyFiles": [
+        "logo-options-preview.svg"
+      ]
+    },
+    "icons": {
+      "path": "icons",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1777342111332,
+      "keyFiles": [
+        "ai-usage-logo.svg"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1777342111332,
+      "keyFiles": [
+        "package-app.sh"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 4,
+      "lastAccessed": 1777342111332,
+      "keyFiles": [
+        "App.tsx",
+        "main.tsx",
+        "styles.css",
+        "vite-env.d.ts"
+      ]
+    },
+    "src-tauri": {
+      "path": "src-tauri",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1777342111333,
+      "keyFiles": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "build.rs",
+        "tauri.conf.json"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 12,
+      "lastAccessed": 1777342111333,
+      "keyFiles": [
+        "git-usage-display.test.ts",
+        "mock-account-management.test.ts",
+        "mock-anthropic-oauth.test.ts",
+        "mock-glm-account.test.ts",
+        "mock-kimi-account.test.ts"
+      ]
+    },
+    "dist/assets": {
+      "path": "dist/assets",
+      "purpose": "Static assets",
+      "fileCount": 6,
+      "lastAccessed": 1777342111333,
+      "keyFiles": [
+        "geist-cyrillic-wght-normal-CHSlOQsW.woff2",
+        "geist-latin-ext-wght-normal-DMtmJ5ZE.woff2",
+        "geist-latin-wght-normal-Dm3htQBi.woff2"
+      ]
+    },
+    "src/components": {
+      "path": "src/components",
+      "purpose": "UI components",
+      "fileCount": 0,
+      "lastAccessed": 1777342111334,
+      "keyFiles": []
+    },
+    "src/lib": {
+      "path": "src/lib",
+      "purpose": "Library code",
+      "fileCount": 7,
+      "lastAccessed": 1777342111334,
+      "keyFiles": [
+        "git-usage-display.ts",
+        "oauth-auth-state.ts",
+        "quota-display.ts"
+      ]
+    },
+    "src-tauri/src": {
+      "path": "src-tauri/src",
+      "purpose": "Source code",
+      "fileCount": 14,
+      "lastAccessed": 1777342111334,
+      "keyFiles": [
+        "commands.rs",
+        "errors.rs",
+        "git_usage.rs"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

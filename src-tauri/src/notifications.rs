@@ -205,6 +205,7 @@ mod tests {
 
     fn quota_window(remaining_percent: f64) -> QuotaWindow {
         QuotaWindow {
+            label: None,
             used_percent: 100.0 - remaining_percent,
             remaining_percent,
             reset_at: None,

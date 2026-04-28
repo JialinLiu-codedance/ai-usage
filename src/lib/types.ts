@@ -3,6 +3,7 @@ export type RefreshStatus = "idle" | "refreshing" | "ok" | "error";
 export type AuthMode = "apiKey" | "oauth" | "sessionToken" | "cookie";
 
 export interface QuotaWindow {
+  label?: string | null;
   used_percent: number;
   remaining_percent: number;
   reset_at: string | null;
@@ -30,6 +31,7 @@ export interface AppSettings {
   notify_on_low_quota: boolean;
   notify_on_reset: boolean;
   reset_notify_lead_minutes: number;
+  git_usage_root: string;
   secret_configured: boolean;
 }
 
@@ -44,6 +46,7 @@ export interface SaveSettingsInput {
   notify_on_low_quota: boolean;
   notify_on_reset: boolean;
   reset_notify_lead_minutes: number;
+  git_usage_root: string;
   auth_secret?: string | null;
 }
 
@@ -132,10 +135,16 @@ export interface GitUsageBucket extends GitUsageTotals {
   date: string;
 }
 
+export interface GitUsageRepository extends GitUsageTotals {
+  name: string;
+  path: string;
+}
+
 export interface GitUsageReport {
   range: LocalTokenUsageRange;
   totals: GitUsageTotals;
   buckets: GitUsageBucket[];
+  repositories: GitUsageRepository[];
   repository_count: number;
   missing_sources: string[];
   warnings: string[];

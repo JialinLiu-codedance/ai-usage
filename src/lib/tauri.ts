@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AccountQuotaStatus,
   AppSettings,
@@ -7,6 +8,7 @@ import type {
   ConnectionTestResult,
   GitUsageBucket,
   GitUsageReport,
+  GitUsageRepository,
   GitUsageTotals,
   LocalTokenUsageDay,
   LocalTokenUsageModel,
@@ -19,12 +21,13 @@ import type {
 } from "./types";
 
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const mockGitUsageRoot = "/Users/test/project";
 let mockOAuthSequence = 0;
 let mockOAuthCompleteSequence = 0;
 let mockPendingOAuthAccountId: string | null = null;
 
 type OAuthProviderKey = "openai" | "anthropic";
-type MockProviderKey = OAuthProviderKey | "kimi" | "glm" | "minimax";
+type MockProviderKey = OAuthProviderKey | "kimi" | "glm" | "minimax" | "copilot";
 
 const oauthProviderConfig: Record<
   OAuthProviderKey,
@@ -81,6 +84,7 @@ function initialMockSettings(): AppSettings {
     notify_on_low_quota: false,
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
+    git_usage_root: mockGitUsageRoot,
     secret_configured: true,
   };
 }
@@ -98,6 +102,7 @@ function emptyMockSettings(): AppSettings {
     notify_on_low_quota: false,
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
+    git_usage_root: mockGitUsageRoot,
     secret_configured: false,
   };
 }
@@ -339,6 +344,50 @@ export async function importMiniMaxAccount(
   });
 }
 
+export async function importCopilotAccount(
+  accountName: string,
+  githubToken?: string | null,
+  accountId?: string | null,
+): Promise<AppSettings> {
+  const normalizedName = accountName.trim() || "Copilot Account";
+  const normalizedToken = githubToken?.trim() || "";
+  if (!isTauriRuntime && !normalizedToken) {
+    throw new Error("请填写 GitHub Token，或先运行 gh auth login 后再导入");
+  }
+  if (!isTauriRuntime) {
+    const nextAccountId = accountId?.trim() || uniqueMockAccountId("copilot", normalizedName);
+    const nextAccount = mockAccount(nextAccountId, normalizedName, "copilot", "apiKey");
+    const existingIndex = mockSettings.accounts.findIndex((account) => account.account_id === nextAccountId);
+    const accounts =
+      existingIndex >= 0
+        ? mockSettings.accounts.map((account, index) => (index === existingIndex ? nextAccount : account))
+        : [...mockSettings.accounts, nextAccount];
+
+    mockSettings = {
+      ...mockSettings,
+      account_id: nextAccountId,
+      account_name: normalizedName,
+      auth_mode: "apiKey",
+      chatgpt_account_id: null,
+      accounts,
+      secret_configured: true,
+    };
+    mockStatus = {
+      ...mockStatus,
+      accounts: mockAccountStatuses(accounts),
+      snapshot: mockStatus.snapshot
+        ? { ...mockStatus.snapshot, account_id: nextAccountId, account_name: normalizedName }
+        : null,
+    };
+    return mockSettings;
+  }
+  return invoke("import_copilot_account", {
+    accountName: normalizedName,
+    githubToken: normalizedToken || null,
+    accountId: accountId?.trim() || null,
+  });
+}
+
 export async function testConnection(): Promise<ConnectionTestResult> {
   if (!isTauriRuntime) {
     return { success: true, message: "Mock connection succeeded" };
@@ -510,6 +559,20 @@ export async function refreshGitUsage(range: LocalTokenUsageRange = "thisMonth")
   return invoke("refresh_git_usage", { range });
 }
 
+export async function chooseGitUsageRoot(currentPath?: string | null): Promise<string | null> {
+  if (!isTauriRuntime) {
+    return currentPath || mockGitUsageRoot;
+  }
+
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    defaultPath: currentPath || undefined,
+  });
+
+  return typeof selected === "string" ? selected : null;
+}
+
 function mockStatusWithAccounts(): AppStatus {
   return {
     ...mockStatus,
@@ -602,16 +665,38 @@ function mockGitUsageReport(range: LocalTokenUsageRange): GitUsageReport {
     };
   });
   const totals = sumGitStats(buckets);
+  const repositories = mockGitRepositories(totals);
 
   return {
     range,
     totals,
     buckets,
+    repositories,
     repository_count: 8,
     missing_sources: [],
     warnings: [],
     generated_at: generatedAt.toISOString(),
   };
+}
+
+function mockGitRepositories(totals: GitUsageTotals): GitUsageRepository[] {
+  if (totals.added_lines + totals.deleted_lines + totals.changed_files === 0) {
+    return [];
+  }
+
+  const rows = [
+    { name: "ai-usage", path: "/Users/local/project/ai-usage", addedRatio: 0.48, deletedRatio: 0.46, filesRatio: 0.38 },
+    { name: "backend-api", path: "/Users/local/project/backend-api", addedRatio: 0.32, deletedRatio: 0.31, filesRatio: 0.34 },
+    { name: "docs-site", path: "/Users/local/project/docs-site", addedRatio: 0.18, deletedRatio: 0.19, filesRatio: 0.2 },
+  ];
+
+  return rows.map((row) => ({
+    name: row.name,
+    path: row.path,
+    added_lines: Math.max(1, Math.round(totals.added_lines * row.addedRatio)),
+    deleted_lines: Math.max(1, Math.round(totals.deleted_lines * row.deletedRatio)),
+    changed_files: Math.max(1, Math.round(totals.changed_files * row.filesRatio)),
+  }));
 }
 
 function mockTokenBucketDates(range: LocalTokenUsageRange, now: Date): Date[] {

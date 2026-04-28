@@ -42,10 +42,10 @@ export function quotaAccountCardState(account: QuotaAccountCardStateInput): Quot
 export function quotaDisplayRows(account: QuotaDisplayRowsInput): QuotaDisplayRow[] {
   const rows: QuotaDisplayRow[] = [];
   if (account.five_hour) {
-    rows.push({ label: "5H", window: account.five_hour });
+    rows.push({ label: account.five_hour.label?.trim() || "5H", window: account.five_hour });
   }
   if (account.seven_day) {
-    rows.push({ label: "7D", window: account.seven_day });
+    rows.push({ label: account.seven_day.label?.trim() || "7D", window: account.seven_day });
   }
   return rows;
 }

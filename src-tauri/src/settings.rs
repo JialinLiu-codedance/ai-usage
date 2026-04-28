@@ -1,11 +1,12 @@
 use crate::{
     models::{
-        default_account_id, AppSettings, AuthMode, ConnectedAccount, SaveSettingsInput,
-        PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        default_account_id, default_git_usage_root, AppSettings, AuthMode, ConnectedAccount,
+        SaveSettingsInput, PROVIDER_COPILOT, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX,
+        PROVIDER_OPENAI,
     },
     secrets, storage,
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, path::PathBuf};
 use tauri::AppHandle;
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -68,6 +69,7 @@ fn settings_from_save_input(existing: AppSettings, input: SaveSettingsInput) -> 
         notify_on_low_quota: input.notify_on_low_quota,
         notify_on_reset: false,
         reset_notify_lead_minutes: input.reset_notify_lead_minutes.max(1),
+        git_usage_root: sanitize_git_usage_root(input.git_usage_root),
         secret_configured: false,
     }
 }
@@ -287,7 +289,10 @@ fn secret_configured_for_account(account: &ConnectedAccount) -> Result<bool, Str
             secrets::account_secret_configured(&account.account_id).map(|configured| {
                 configured
                     || account.secret_configured
-                        && !matches!(account.provider.as_str(), PROVIDER_GLM | PROVIDER_MINIMAX)
+                        && !matches!(
+                            account.provider.as_str(),
+                            PROVIDER_COPILOT | PROVIDER_GLM | PROVIDER_MINIMAX
+                        )
             })
         }
         _ => Ok(account.secret_configured),
@@ -406,6 +411,7 @@ fn normalize_provider(provider: &str) -> String {
 fn default_account_name_for_provider(provider: &str) -> &'static str {
     match provider {
         crate::models::PROVIDER_ANTHROPIC => "Anthropic Account",
+        PROVIDER_COPILOT => "Copilot Account",
         PROVIDER_GLM => "GLM Account",
         PROVIDER_KIMI => "Kimi Account",
         PROVIDER_MINIMAX => "MiniMax Account",
@@ -431,6 +437,31 @@ fn sanitize_account_id(input: String) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn sanitize_git_usage_root(input: String) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return default_git_usage_root();
+    }
+
+    expand_home_path(trimmed).to_string_lossy().to_string()
+}
+
+fn expand_home_path(input: &str) -> PathBuf {
+    if input == "~" {
+        return std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(input));
+    }
+
+    if let Some(rest) = input.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+
+    PathBuf::from(input)
 }
 
 #[cfg(test)]
@@ -693,6 +724,52 @@ mod tests {
     }
 
     #[test]
+    fn upsert_api_key_account_appends_multiple_copilot_accounts() {
+        let mut settings = AppSettings::default();
+
+        let first_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_COPILOT,
+            None,
+            "Copilot Work".into(),
+        );
+        let second_id = upsert_api_key_account(
+            &mut settings,
+            crate::models::PROVIDER_COPILOT,
+            None,
+            "Copilot Personal".into(),
+        );
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(settings.accounts.len(), 2);
+        assert_eq!(
+            settings
+                .accounts
+                .iter()
+                .map(|account| (
+                    account.provider.as_str(),
+                    account.auth_mode.clone(),
+                    account.account_name.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    crate::models::PROVIDER_COPILOT,
+                    AuthMode::ApiKey,
+                    "Copilot Work"
+                ),
+                (
+                    crate::models::PROVIDER_COPILOT,
+                    AuthMode::ApiKey,
+                    "Copilot Personal"
+                ),
+            ]
+        );
+        assert_eq!(settings.account_id, second_id);
+        assert_eq!(settings.account_name, "Copilot Personal");
+    }
+
+    #[test]
     fn deleting_active_account_selects_remaining_account_and_preserves_preferences() {
         let mut settings = AppSettings {
             account_id: "second".into(),
@@ -756,10 +833,41 @@ mod tests {
                 notify_on_low_quota: true,
                 notify_on_reset: true,
                 reset_notify_lead_minutes: 30,
+                git_usage_root: " ~/project ".into(),
                 auth_secret: None,
             },
         );
 
         assert!(!settings.notify_on_reset);
+    }
+
+    #[test]
+    fn save_settings_normalizes_git_usage_root() {
+        let settings = settings_from_save_input(
+            AppSettings::default(),
+            SaveSettingsInput {
+                account_id: default_account_id(),
+                account_name: "OpenAI Account".into(),
+                auth_mode: AuthMode::ApiKey,
+                base_url_override: None,
+                chatgpt_account_id: None,
+                refresh_interval_minutes: 30,
+                low_quota_threshold_percent: 15.0,
+                notify_on_low_quota: false,
+                notify_on_reset: false,
+                reset_notify_lead_minutes: 30,
+                git_usage_root: " ~/project ".into(),
+                auth_secret: None,
+            },
+        );
+
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(
+            settings.git_usage_root,
+            std::path::PathBuf::from(home)
+                .join("project")
+                .to_string_lossy()
+                .to_string()
+        );
     }
 }

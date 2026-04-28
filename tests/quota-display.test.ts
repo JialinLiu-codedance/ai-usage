@@ -74,6 +74,34 @@ test("quota display rows hide only the missing quota window", () => {
   );
 });
 
+test("quota display rows use provider labels when present", () => {
+  const premium = {
+    label: "Premium",
+    used_percent: 20,
+    remaining_percent: 80,
+    reset_at: null,
+    window_minutes: 43200,
+  };
+  const chat = {
+    label: "Chat",
+    used_percent: 5,
+    remaining_percent: 95,
+    reset_at: null,
+    window_minutes: 43200,
+  };
+
+  assert.deepEqual(
+    quotaDisplayRows({
+      five_hour: premium,
+      seven_day: chat,
+    }),
+    [
+      { label: "Premium", window: premium },
+      { label: "Chat", window: chat },
+    ],
+  );
+});
+
 test("quota card state shows errors only on the failed account", () => {
   const successful = quotaAccountCardState({
     five_hour: {

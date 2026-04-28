@@ -1,4 +1,6 @@
-use crate::models::{GitUsageBucket, GitUsageReport, GitUsageTotals, LocalTokenUsageRange};
+use crate::models::{
+    GitUsageBucket, GitUsageReport, GitUsageRepository, GitUsageTotals, LocalTokenUsageRange,
+};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -10,7 +12,10 @@ use std::{
 
 #[derive(Debug, Clone)]
 struct GitCommitStat {
+    commit_hash: String,
     timestamp: DateTime<Utc>,
+    repository_name: String,
+    repository_path: String,
     added_lines: u64,
     deleted_lines: u64,
     changed_files: u64,
@@ -32,6 +37,8 @@ enum BucketGranularity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitUsageCache {
+    #[serde(default)]
+    pub root_path: String,
     pub generated_at: DateTime<Utc>,
     pub today: GitUsageReport,
     pub last3_days: GitUsageReport,
@@ -41,22 +48,28 @@ pub struct GitUsageCache {
 
 impl GitUsageCache {
     pub fn report(&self, range: LocalTokenUsageRange) -> GitUsageReport {
-        match range {
+        let mut report = match range {
             LocalTokenUsageRange::Today => self.today.clone(),
             LocalTokenUsageRange::Last3Days => self.last3_days.clone(),
             LocalTokenUsageRange::ThisWeek => self.this_week.clone(),
             LocalTokenUsageRange::ThisMonth => self.this_month.clone(),
-        }
+        };
+        report
+            .warnings
+            .retain(|warning| !is_stale_worktree_warning(warning));
+        report
     }
 }
 
-pub fn build_cache() -> Result<GitUsageCache, String> {
+pub fn build_cache(root: PathBuf) -> Result<GitUsageCache, String> {
     let now = Utc::now();
-    let home = home_dir();
-    let repositories = discover_git_repositories(&home)?;
+    let root_path = root.to_string_lossy().to_string();
+    let (repositories, mut warnings) = match discover_git_repositories(&root) {
+        Ok(repositories) => (repositories, Vec::new()),
+        Err(error) => (Vec::new(), vec![error]),
+    };
     let since = earliest_range_start(now);
     let mut stats = Vec::new();
-    let mut warnings = Vec::new();
 
     for repository in &repositories {
         match load_repository_stats(repository, since) {
@@ -67,6 +80,7 @@ pub fn build_cache() -> Result<GitUsageCache, String> {
 
     Ok(build_cache_from_stats(
         now,
+        root_path,
         stats,
         repositories.len(),
         warnings,
@@ -85,11 +99,14 @@ pub fn empty_report(range: LocalTokenUsageRange, warning: Option<String>) -> Git
 
 fn build_cache_from_stats(
     now: DateTime<Utc>,
+    root_path: String,
     stats: Vec<GitCommitStat>,
     repository_count: usize,
     warnings: Vec<String>,
 ) -> GitUsageCache {
+    let stats = dedupe_git_stats_by_commit_hash(stats);
     GitUsageCache {
+        root_path,
         generated_at: now,
         today: aggregate_git_stats(
             LocalTokenUsageRange::Today,
@@ -147,10 +164,13 @@ fn discover_git_repositories_inner(
             continue;
         };
         let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
-        if name == ".git" && (path.is_dir() || path.is_file()) {
+        if name == ".git" && valid_git_marker(&path, &file_type) && !is_linked_worktree(root) {
             let repository = root.to_path_buf();
             if seen.insert(repository.clone()) {
                 repositories.push(repository);
@@ -158,7 +178,7 @@ fn discover_git_repositories_inner(
             continue;
         }
 
-        if path.is_dir() && !should_skip_directory(&name) {
+        if file_type.is_dir() && !should_skip_directory(&path, &name) {
             discover_git_repositories_inner(&path, repositories, seen, false)?;
         }
     }
@@ -166,12 +186,38 @@ fn discover_git_repositories_inner(
     Ok(())
 }
 
-fn should_skip_directory(name: &str) -> bool {
+fn should_skip_directory(path: &Path, name: &str) -> bool {
+    if name.ends_with(".app") || name.ends_with(".framework") || name.ends_with(".bundle") {
+        return true;
+    }
+
+    if name == ".worktrees"
+        || (name == "worktrees"
+            && path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|parent| parent.to_str())
+                == Some(".claude"))
+    {
+        return true;
+    }
+
     matches!(
         name,
         ".git"
             | ".cache"
             | ".Trash"
+            | ".cargo"
+            | ".codex"
+            | ".docker"
+            | ".local"
+            | ".npm"
+            | ".nvm"
+            | ".rustup"
+            | "Application Support"
+            | "Applications"
+            | "Caches"
+            | "Library"
             | "node_modules"
             | "target"
             | "dist"
@@ -179,6 +225,96 @@ fn should_skip_directory(name: &str) -> bool {
             | ".next"
             | ".nuxt"
     )
+}
+
+fn is_linked_worktree(repository: &Path) -> bool {
+    let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["rev-parse", "--absolute-git-dir", "--git-common-dir"])
+        .output()
+    else {
+        return false;
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let Some(git_dir) = lines.next().map(str::trim).filter(|line| !line.is_empty()) else {
+        return false;
+    };
+    let Some(common_dir) = lines.next().map(str::trim).filter(|line| !line.is_empty()) else {
+        return false;
+    };
+
+    resolve_git_path(repository, git_dir) != resolve_git_path(repository, common_dir)
+}
+
+fn resolve_git_path(repository: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repository.join(path)
+    };
+    resolved.canonicalize().unwrap_or(resolved)
+}
+
+fn valid_git_marker(path: &Path, file_type: &fs::FileType) -> bool {
+    if file_type.is_dir() {
+        return true;
+    }
+
+    if !file_type.is_file() {
+        return false;
+    }
+
+    resolve_gitdir_marker(path)
+        .map(|resolved| resolved.exists())
+        .unwrap_or(false)
+}
+
+fn resolve_gitdir_marker(path: &Path) -> Option<PathBuf> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return None;
+    };
+    let Some(gitdir) = content.trim().strip_prefix("gitdir:") else {
+        return None;
+    };
+    let gitdir = gitdir.trim();
+    if gitdir.is_empty() {
+        return None;
+    }
+
+    let gitdir_path = Path::new(gitdir);
+    Some(if gitdir_path.is_absolute() {
+        gitdir_path.to_path_buf()
+    } else {
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(gitdir_path)
+    })
+}
+
+fn is_stale_worktree_warning(warning: &str) -> bool {
+    let Some((repository, gitdir)) = warning.split_once(": fatal: not a git repository: ") else {
+        return false;
+    };
+    let git_file = Path::new(repository).join(".git");
+    if !git_file.is_file() {
+        return false;
+    }
+    let Some(resolved) = resolve_gitdir_marker(&git_file) else {
+        return false;
+    };
+    if resolved.exists() {
+        return false;
+    }
+    let reported = Path::new(gitdir.trim());
+    reported.is_absolute() && reported == resolved
 }
 
 fn load_repository_stats(
@@ -191,12 +327,16 @@ fn load_repository_stats(
         .args([
             "log",
             "--date=iso-strict",
-            "--pretty=format:commit%x09%cI",
+            "--pretty=format:commit%x09%H%x09%cI",
             "--numstat",
             "--branches",
             "--tags",
             &format!("--since={}", since.to_rfc3339()),
         ])
+        .arg("--")
+        .arg(".")
+        .arg(":(exclude)node_modules/**")
+        .arg(":(exclude,glob)**/node_modules/**")
         .output()
         .map_err(|error| format!("执行 git log 失败: {error}"))?;
 
@@ -210,7 +350,21 @@ fn load_repository_stats(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_git_log_numstat_output(&stdout))
+    let repository_name = repository
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("repository")
+        .to_string();
+    let repository_path = repository.to_string_lossy().to_string();
+    Ok(parse_git_log_numstat_output(&stdout)
+        .into_iter()
+        .map(|mut stat| {
+            stat.repository_name = repository_name.clone();
+            stat.repository_path = repository_path.clone();
+            stat
+        })
+        .collect())
 }
 
 fn parse_git_log_numstat_output(output: &str) -> Vec<GitCommitStat> {
@@ -223,14 +377,18 @@ fn parse_git_log_numstat_output(output: &str) -> Vec<GitCommitStat> {
             continue;
         }
 
-        if let Some(timestamp) = line.strip_prefix("commit\t") {
+        if let Some(commit) = line.strip_prefix("commit\t") {
             if let Some(stat) = current.take() {
                 stats.push(stat);
             }
+            let (commit_hash, timestamp) = parse_commit_header(commit).unwrap_or(("", commit));
             current = DateTime::parse_from_rfc3339(timestamp)
                 .ok()
                 .map(|timestamp| GitCommitStat {
+                    commit_hash: commit_hash.to_string(),
                     timestamp: timestamp.with_timezone(&Utc),
+                    repository_name: String::new(),
+                    repository_path: String::new(),
                     added_lines: 0,
                     deleted_lines: 0,
                     changed_files: 0,
@@ -256,6 +414,19 @@ fn parse_git_log_numstat_output(output: &str) -> Vec<GitCommitStat> {
     }
 
     stats
+}
+
+fn parse_commit_header(header: &str) -> Option<(&str, &str)> {
+    let (commit_hash, timestamp) = header.split_once('\t')?;
+    Some((commit_hash.trim(), timestamp.trim()))
+}
+
+fn dedupe_git_stats_by_commit_hash(stats: Vec<GitCommitStat>) -> Vec<GitCommitStat> {
+    let mut seen = HashSet::new();
+    stats
+        .into_iter()
+        .filter(|stat| stat.commit_hash.is_empty() || seen.insert(stat.commit_hash.clone()))
+        .collect()
 }
 
 fn parse_numstat_line(line: &str) -> Option<(u64, u64)> {
@@ -288,6 +459,7 @@ fn aggregate_git_stats(
         })
         .collect::<HashMap<_, _>>();
     let mut totals = GitUsageTotals::default();
+    let mut repositories_by_path = HashMap::<String, GitUsageRepository>::new();
 
     for stat in stats {
         if stat.timestamp < start || stat.timestamp > now {
@@ -304,6 +476,28 @@ fn aggregate_git_stats(
         totals.added_lines = totals.added_lines.saturating_add(stat.added_lines);
         totals.deleted_lines = totals.deleted_lines.saturating_add(stat.deleted_lines);
         totals.changed_files = totals.changed_files.saturating_add(stat.changed_files);
+
+        let repository_key = if stat.repository_path.is_empty() {
+            "unknown".to_string()
+        } else {
+            stat.repository_path.clone()
+        };
+        let repository = repositories_by_path
+            .entry(repository_key.clone())
+            .or_insert_with(|| GitUsageRepository {
+                name: if stat.repository_name.is_empty() {
+                    "repository".to_string()
+                } else {
+                    stat.repository_name.clone()
+                },
+                path: repository_key,
+                added_lines: 0,
+                deleted_lines: 0,
+                changed_files: 0,
+            });
+        repository.added_lines = repository.added_lines.saturating_add(stat.added_lines);
+        repository.deleted_lines = repository.deleted_lines.saturating_add(stat.deleted_lines);
+        repository.changed_files = repository.changed_files.saturating_add(stat.changed_files);
     }
 
     let buckets = starts
@@ -319,11 +513,30 @@ fn aggregate_git_stats(
             }
         })
         .collect();
+    let mut repositories = repositories_by_path
+        .into_values()
+        .filter(|repository| {
+            repository
+                .added_lines
+                .saturating_add(repository.deleted_lines)
+                .saturating_add(repository.changed_files)
+                > 0
+        })
+        .collect::<Vec<_>>();
+    repositories.sort_by(|a, b| {
+        let a_total = a.added_lines.saturating_add(a.deleted_lines);
+        let b_total = b.added_lines.saturating_add(b.deleted_lines);
+        b_total
+            .cmp(&a_total)
+            .then_with(|| b.changed_files.cmp(&a.changed_files))
+            .then_with(|| a.name.cmp(&b.name))
+    });
 
     GitUsageReport {
         range,
         totals,
         buckets,
+        repositories,
         repository_count,
         missing_sources: Vec::new(),
         warnings,
@@ -411,18 +624,12 @@ fn bucket_key(granularity: BucketGranularity, timestamp: DateTime<Utc>) -> Strin
     }
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::LocalTokenUsageRange;
     use chrono::{TimeZone, Utc};
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, process::Command};
 
     fn temp_dir(name: &str) -> PathBuf {
         let path =
@@ -433,37 +640,81 @@ mod tests {
     }
 
     fn git_stat(timestamp: &str, added: u64, deleted: u64, changed_files: u64) -> GitCommitStat {
+        git_stat_with_hash(
+            &format!("hash-{timestamp}-{added}-{deleted}-{changed_files}"),
+            timestamp,
+            added,
+            deleted,
+            changed_files,
+            "ai-usage",
+            "/tmp/ai-usage",
+        )
+    }
+
+    fn git_stat_with_hash(
+        commit_hash: &str,
+        timestamp: &str,
+        added: u64,
+        deleted: u64,
+        changed_files: u64,
+        repository_name: &str,
+        repository_path: &str,
+    ) -> GitCommitStat {
         GitCommitStat {
+            commit_hash: commit_hash.to_string(),
             timestamp: chrono::DateTime::parse_from_rfc3339(timestamp)
                 .unwrap()
                 .with_timezone(&Utc),
+            repository_name: repository_name.to_string(),
+            repository_path: repository_path.to_string(),
             added_lines: added,
             deleted_lines: deleted,
             changed_files,
         }
     }
 
+    fn run_git(repository: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run git {args:?}: {error}"));
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
-    fn discover_git_repositories_finds_git_directories_files_and_hidden_worktrees() {
+    fn discover_git_repositories_excludes_worktree_directories_and_linked_worktrees() {
         let root = temp_dir("discover");
         let regular_repo = root.join("project").join("repo-a");
         fs::create_dir_all(regular_repo.join(".git")).unwrap();
 
-        let worktree_repo = root.join("worktrees").join("repo-b");
-        fs::create_dir_all(&worktree_repo).unwrap();
-        fs::write(
-            worktree_repo.join(".git"),
-            "gitdir: /tmp/repo-b/.git/worktrees/repo-b",
-        )
-        .unwrap();
+        let claude_worktree = root.join(".claude").join("worktrees").join("repo-b");
+        fs::create_dir_all(claude_worktree.join(".git")).unwrap();
 
-        let hidden_worktree = root.join(".hidden-worktree");
-        fs::create_dir_all(&hidden_worktree).unwrap();
-        fs::write(
-            hidden_worktree.join(".git"),
-            "gitdir: /tmp/hidden/.git/worktrees/hidden",
-        )
-        .unwrap();
+        let dot_worktree = root.join(".worktrees").join("repo-c");
+        fs::create_dir_all(dot_worktree.join(".git")).unwrap();
+
+        let main_repo = root.join("main-repo");
+        fs::create_dir_all(&main_repo).unwrap();
+        run_git(&main_repo, &["init"]);
+        run_git(&main_repo, &["config", "user.email", "test@example.com"]);
+        run_git(&main_repo, &["config", "user.name", "Test User"]);
+        fs::write(main_repo.join("README.md"), "hello\n").unwrap();
+        run_git(&main_repo, &["add", "README.md"]);
+        run_git(&main_repo, &["commit", "-m", "init"]);
+        let linked_worktree = root.join("linked-worktree");
+        let linked_worktree_arg = linked_worktree.to_string_lossy().to_string();
+        run_git(
+            &main_repo,
+            &["worktree", "add", &linked_worktree_arg, "-b", "feature"],
+        );
 
         let ignored_dependency = root
             .join("project")
@@ -474,28 +725,191 @@ mod tests {
 
         let repos = discover_git_repositories(&root).unwrap();
 
-        assert_eq!(repos, vec![hidden_worktree, regular_repo, worktree_repo]);
+        assert_eq!(repos, vec![main_repo, regular_repo]);
+    }
+
+    #[test]
+    fn load_repository_stats_excludes_node_modules_from_committed_history() {
+        let root = temp_dir("exclude-node-modules-history");
+        let repository = root.join("repo");
+        fs::create_dir_all(repository.join("src")).unwrap();
+        fs::create_dir_all(repository.join("node_modules").join("dep")).unwrap();
+        run_git(&repository, &["init"]);
+        run_git(&repository, &["config", "user.email", "test@example.com"]);
+        run_git(&repository, &["config", "user.name", "Test User"]);
+        fs::write(repository.join("src").join("app.ts"), "one\ntwo\nthree\n").unwrap();
+        fs::write(
+            repository.join("node_modules").join("dep").join("index.js"),
+            "ignored\n".repeat(100),
+        )
+        .unwrap();
+        run_git(&repository, &["add", "."]);
+        run_git(&repository, &["commit", "-m", "init"]);
+
+        let stats = load_repository_stats(
+            &repository,
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(stats.len(), 1);
+        assert!(!stats[0].commit_hash.is_empty());
+        assert_eq!(stats[0].added_lines, 3);
+        assert_eq!(stats[0].deleted_lines, 0);
+    }
+
+    #[test]
+    fn discover_git_repositories_skips_stale_worktree_gitdir_files() {
+        let root = temp_dir("stale-worktree");
+        let regular_repo = root.join("repo-a");
+        fs::create_dir_all(regular_repo.join(".git")).unwrap();
+
+        let stale_worktree = root.join("backup").join(".worktrees").join("old-branch");
+        fs::create_dir_all(&stale_worktree).unwrap();
+        fs::write(
+            stale_worktree.join(".git"),
+            format!(
+                "gitdir: {}",
+                root.join("missing").join("old-branch").display()
+            ),
+        )
+        .unwrap();
+
+        let repos = discover_git_repositories(&root).unwrap();
+
+        assert_eq!(repos, vec![regular_repo]);
+    }
+
+    #[test]
+    fn build_cache_ignores_stale_worktrees_without_warnings() {
+        let root = temp_dir("stale-worktree-cache");
+        let stale_worktree = root.join("backup").join(".worktrees").join("glm-v1");
+        fs::create_dir_all(&stale_worktree).unwrap();
+        fs::write(
+            stale_worktree.join(".git"),
+            format!(
+                "gitdir: {}",
+                root.join("missing")
+                    .join(".git")
+                    .join("worktrees")
+                    .join("glm-v1")
+                    .display()
+            ),
+        )
+        .unwrap();
+
+        let cache = build_cache(root).unwrap();
+        let report = cache.report(LocalTokenUsageRange::ThisMonth);
+
+        assert_eq!(report.repository_count, 0);
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn cached_report_filters_previous_stale_worktree_warnings() {
+        let root = temp_dir("stale-worktree-existing-cache");
+        let stale_worktree = root.join("backup").join(".worktrees").join("glm-v1");
+        let missing_gitdir = root
+            .join("missing")
+            .join(".git")
+            .join("worktrees")
+            .join("glm-v1");
+        fs::create_dir_all(&stale_worktree).unwrap();
+        fs::write(
+            stale_worktree.join(".git"),
+            format!("gitdir: {}", missing_gitdir.display()),
+        )
+        .unwrap();
+        let stale_warning = format!(
+            "{}: fatal: not a git repository: {}",
+            stale_worktree.display(),
+            missing_gitdir.display()
+        );
+
+        let cache = GitUsageCache {
+            root_path: root.to_string_lossy().to_string(),
+            generated_at: Utc::now(),
+            today: empty_report(LocalTokenUsageRange::Today, None),
+            last3_days: empty_report(LocalTokenUsageRange::Last3Days, None),
+            this_week: empty_report(LocalTokenUsageRange::ThisWeek, None),
+            this_month: empty_report(LocalTokenUsageRange::ThisMonth, Some(stale_warning)),
+        };
+
+        let report = cache.report(LocalTokenUsageRange::ThisMonth);
+
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn discover_git_repositories_skips_noisy_application_and_library_roots() {
+        let root = temp_dir("skip-noisy");
+        let regular_repo = root.join("project").join("repo-a");
+        fs::create_dir_all(regular_repo.join(".git")).unwrap();
+
+        let library_repo = root
+            .join("Library")
+            .join("Application Support")
+            .join("app-cache")
+            .join("repo-b");
+        fs::create_dir_all(library_repo.join(".git")).unwrap();
+
+        let application_repo = root
+            .join("Applications")
+            .join("Example.app")
+            .join("Contents")
+            .join("repo-c");
+        fs::create_dir_all(application_repo.join(".git")).unwrap();
+
+        let repos = discover_git_repositories(&root).unwrap();
+
+        assert_eq!(repos, vec![regular_repo]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_git_repositories_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs as unix_fs;
+
+        let root = temp_dir("skip-symlink-root");
+        let external = temp_dir("skip-symlink-external");
+        let regular_repo = root.join("repo-a");
+        let external_repo = external.join("repo-b");
+        fs::create_dir_all(regular_repo.join(".git")).unwrap();
+        fs::create_dir_all(external_repo.join(".git")).unwrap();
+        unix_fs::symlink(&external, root.join("linked-external")).unwrap();
+
+        let repos = discover_git_repositories(&root).unwrap();
+
+        assert_eq!(repos, vec![regular_repo]);
     }
 
     #[test]
     fn parse_git_log_numstat_output_sums_lines_changed_files_and_ignores_binary_entries() {
         let output = "\
-commit\t2026-04-27T08:00:00+00:00
+commit\t1111111111111111111111111111111111111111\t2026-04-27T08:00:00+00:00
 12\t3\tsrc/app.ts
 8\t0\tsrc/new.ts
 0\t5\tsrc/delete.ts
 -\t-\tassets/logo.png
 
-commit\t2026-04-26T20:30:00+00:00
+commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
 2\t2\tsrc/lib.rs
 ";
 
         let stats = parse_git_log_numstat_output(output);
 
         assert_eq!(stats.len(), 2);
+        assert_eq!(
+            stats[0].commit_hash,
+            "1111111111111111111111111111111111111111"
+        );
         assert_eq!(stats[0].added_lines, 20);
         assert_eq!(stats[0].deleted_lines, 8);
         assert_eq!(stats[0].changed_files, 1);
+        assert_eq!(
+            stats[1].commit_hash,
+            "2222222222222222222222222222222222222222"
+        );
         assert_eq!(stats[1].added_lines, 2);
         assert_eq!(stats[1].deleted_lines, 2);
         assert_eq!(stats[1].changed_files, 1);
@@ -576,6 +990,9 @@ commit\t2026-04-26T20:30:00+00:00
         );
         assert_eq!(this_month.totals.added_lines, 37);
         assert_eq!(this_month.repository_count, 3);
+        assert_eq!(this_month.repositories.len(), 1);
+        assert_eq!(this_month.repositories[0].name, "ai-usage");
+        assert_eq!(this_month.repositories[0].added_lines, 37);
     }
 
     #[test]
@@ -587,8 +1004,9 @@ commit\t2026-04-26T20:30:00+00:00
             git_stat("2026-04-01T06:10:00Z", 40, 9, 3),
         ];
 
-        let cache = build_cache_from_stats(now, stats, 4, vec![]);
+        let cache = build_cache_from_stats(now, "/tmp/workspace".into(), stats, 4, vec![]);
 
+        assert_eq!(cache.root_path, "/tmp/workspace");
         assert_eq!(
             cache.report(LocalTokenUsageRange::Today).totals.added_lines,
             20
@@ -611,5 +1029,51 @@ commit\t2026-04-26T20:30:00+00:00
             cache.report(LocalTokenUsageRange::ThisWeek).generated_at,
             now
         );
+    }
+
+    #[test]
+    fn cache_from_git_stats_dedupes_commits_across_repositories_by_hash() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 27, 7, 30, 0).unwrap();
+        let stats = vec![
+            git_stat_with_hash(
+                "duplicate-commit",
+                "2026-04-27T06:10:00Z",
+                20,
+                5,
+                1,
+                "repo-a",
+                "/tmp/repo-a",
+            ),
+            git_stat_with_hash(
+                "duplicate-commit",
+                "2026-04-27T06:10:00Z",
+                20,
+                5,
+                1,
+                "repo-b",
+                "/tmp/repo-b",
+            ),
+            git_stat_with_hash(
+                "unique-commit",
+                "2026-04-27T06:20:00Z",
+                7,
+                2,
+                1,
+                "repo-b",
+                "/tmp/repo-b",
+            ),
+        ];
+
+        let report = build_cache_from_stats(now, "/tmp/workspace".into(), stats, 2, vec![])
+            .report(LocalTokenUsageRange::Today);
+
+        assert_eq!(report.totals.added_lines, 27);
+        assert_eq!(report.totals.deleted_lines, 7);
+        assert_eq!(report.totals.changed_files, 2);
+        assert_eq!(report.repositories.len(), 2);
+        assert_eq!(report.repositories[0].name, "repo-a");
+        assert_eq!(report.repositories[0].added_lines, 20);
+        assert_eq!(report.repositories[1].name, "repo-b");
+        assert_eq!(report.repositories[1].added_lines, 7);
     }
 }

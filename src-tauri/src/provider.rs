@@ -1,11 +1,11 @@
 use crate::{
     errors::{ProviderError, ProviderErrorKind},
     models::{
-        AuthMode, ProbeCredentials, QuotaSnapshot, QuotaWindow, PROVIDER_ANTHROPIC, PROVIDER_GLM,
-        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        AuthMode, ProbeCredentials, QuotaSnapshot, QuotaWindow, PROVIDER_ANTHROPIC,
+        PROVIDER_COPILOT, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
 };
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use reqwest::{
     header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE},
     Client, StatusCode,
@@ -18,6 +18,7 @@ const DEFAULT_API_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_ANTHROPIC_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const DEFAULT_KIMI_USAGE_URL: &str = "https://api.kimi.com/coding/v1/usages";
 const DEFAULT_GLM_USAGE_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
+const DEFAULT_COPILOT_USAGE_URL: &str = "https://api.github.com/copilot_internal/user";
 const MINIMAX_GLOBAL_USAGE_URLS: [&str; 3] = [
     "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
     "https://api.minimax.io/v1/coding_plan/remains",
@@ -37,6 +38,7 @@ const MINIMAX_CODING_PLAN_WINDOW_MS: f64 = 5.0 * 60.0 * 60.0 * 1000.0;
 const MINIMAX_CODING_PLAN_WINDOW_TOLERANCE_MS: f64 = 10.0 * 60.0 * 1000.0;
 const GLM_SESSION_WINDOW_MINUTES: u32 = 300;
 const GLM_WEEKLY_WINDOW_MINUTES: u32 = 10080;
+const COPILOT_MONTHLY_WINDOW_MINUTES: u32 = 30 * 24 * 60;
 
 #[derive(Debug, Clone)]
 struct RawWindow {
@@ -135,6 +137,9 @@ pub async fn fetch_quota(
         }
         PROVIDER_MINIMAX => {
             fetch_minimax_quota(account_id, account_name, base_url_override, credentials).await
+        }
+        PROVIDER_COPILOT => {
+            fetch_copilot_quota(account_id, account_name, base_url_override, credentials).await
         }
         provider => Err(ProviderError::new(
             ProviderErrorKind::Unknown,
@@ -471,9 +476,75 @@ async fn fetch_minimax_quota(
     }))
 }
 
+async fn fetch_copilot_quota(
+    account_id: &str,
+    account_name: &str,
+    base_url_override: Option<&str>,
+    credentials: &ProbeCredentials,
+) -> Result<QuotaSnapshot, ProviderError> {
+    if !matches!(credentials.auth_mode, AuthMode::ApiKey) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            "Copilot 额度刷新当前仅支持 GitHub Token 账号",
+        ));
+    }
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| {
+            ProviderError::new(
+                ProviderErrorKind::Unknown,
+                format!("创建 HTTP 客户端失败: {error}"),
+            )
+        })?;
+
+    let response = client
+        .get(resolve_copilot_usage_url(base_url_override))
+        .headers(build_copilot_usage_headers(credentials)?)
+        .send()
+        .await
+        .map_err(map_request_error)?;
+
+    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unauthorized,
+            "Copilot Token 认证失败，请重新导入 GitHub CLI 登录态或更新 Token",
+        ));
+    }
+
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            "Copilot 使用量接口被限流，请稍后重试",
+        ));
+    }
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("无法读取响应体"));
+        return Err(ProviderError::new(
+            ProviderErrorKind::Unknown,
+            format!("Copilot 使用量接口返回 {status}：{}", compact_body(&body)),
+        ));
+    }
+
+    let body = response.text().await.map_err(|error| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            format!("读取 Copilot 使用量响应失败: {error}"),
+        )
+    })?;
+    parse_copilot_usage_snapshot(account_id, account_name, &body)
+}
+
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         PROVIDER_ANTHROPIC => "Anthropic",
+        PROVIDER_COPILOT => "Copilot",
         PROVIDER_GLM => "GLM",
         PROVIDER_KIMI => "Kimi",
         PROVIDER_MINIMAX => "MiniMax",
@@ -488,17 +559,22 @@ pub async fn test_connection(
     credentials: &ProbeCredentials,
 ) -> Result<String, ProviderError> {
     let snapshot = fetch_quota(account_id, account_name, base_url_override, credentials).await?;
-    let five = snapshot
-        .five_hour
-        .as_ref()
-        .map(|window| format!("{:.0}%", window.remaining_percent))
-        .unwrap_or_else(|| "未知".into());
-    let seven = snapshot
-        .seven_day
-        .as_ref()
-        .map(|window| format!("{:.0}%", window.remaining_percent))
-        .unwrap_or_else(|| "未知".into());
-    Ok(format!("连接成功，5H 剩余 {five}，7D 剩余 {seven}"))
+    let mut parts = Vec::new();
+    if let Some(window) = snapshot.five_hour.as_ref() {
+        parts.push(format_window_status(window, "5H"));
+    }
+    if let Some(window) = snapshot.seven_day.as_ref() {
+        parts.push(format_window_status(window, "7D"));
+    }
+    if parts.is_empty() {
+        parts.push("额度未知".into());
+    }
+    Ok(format!("连接成功，{}", parts.join("，")))
+}
+
+fn format_window_status(window: &QuotaWindow, fallback_label: &str) -> String {
+    let label = window.label.as_deref().unwrap_or(fallback_label);
+    format!("{label} 剩余 {:.0}%", window.remaining_percent)
 }
 
 fn parse_snapshot(
@@ -614,6 +690,7 @@ fn to_window(raw: RawWindow, fetched_at: DateTime<Utc>) -> QuotaWindow {
     if let Some(reset_at) = reset_at {
         if reset_at <= fetched_at {
             return QuotaWindow {
+                label: None,
                 used_percent: 0.0,
                 remaining_percent: 100.0,
                 reset_at: Some(reset_at),
@@ -623,6 +700,7 @@ fn to_window(raw: RawWindow, fetched_at: DateTime<Utc>) -> QuotaWindow {
     }
 
     QuotaWindow {
+        label: None,
         used_percent: raw.used_percent,
         remaining_percent: (100.0 - raw.used_percent).clamp(0.0, 100.0),
         reset_at,
@@ -708,6 +786,18 @@ fn format_auth_header(credentials: &ProbeCredentials) -> Result<HeaderValue, Pro
         ProviderError::new(
             ProviderErrorKind::InvalidResponse,
             "认证头构造失败，请检查认证值格式",
+        )
+    })
+}
+
+fn format_github_token_header(
+    credentials: &ProbeCredentials,
+) -> Result<HeaderValue, ProviderError> {
+    let value = format!("token {}", credentials.secret.trim());
+    HeaderValue::from_str(&value).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            "GitHub Token 认证头构造失败，请检查认证值格式",
         )
     })
 }
@@ -819,6 +909,26 @@ fn build_minimax_usage_headers(credentials: &ProbeCredentials) -> Result<HeaderM
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert("User-Agent", HeaderValue::from_static("ai-usage"));
     headers.insert(AUTHORIZATION, format_auth_header(credentials)?);
+    Ok(headers)
+}
+
+fn build_copilot_usage_headers(credentials: &ProbeCredentials) -> Result<HeaderMap, ProviderError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert("Editor-Version", HeaderValue::from_static("vscode/1.96.2"));
+    headers.insert(
+        "Editor-Plugin-Version",
+        HeaderValue::from_static("copilot-chat/0.26.7"),
+    );
+    headers.insert(
+        "User-Agent",
+        HeaderValue::from_static("GitHubCopilotChat/0.26.7"),
+    );
+    headers.insert(
+        "X-Github-Api-Version",
+        HeaderValue::from_static("2025-04-01"),
+    );
+    headers.insert(AUTHORIZATION, format_github_token_header(credentials)?);
     Ok(headers)
 }
 
@@ -934,6 +1044,21 @@ fn minimax_usage_urls(base_url_override: Option<&str>, endpoint: MiniMaxEndpoint
     }
 }
 
+fn resolve_copilot_usage_url(base_url_override: Option<&str>) -> String {
+    let Some(raw) = base_url_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return DEFAULT_COPILOT_USAGE_URL.to_string();
+    };
+
+    if raw.ends_with("/copilot_internal/user") || raw.contains("/copilot_internal/") {
+        raw.to_string()
+    } else {
+        format!("{}/copilot_internal/user", raw.trim_end_matches('/'))
+    }
+}
+
 async fn request_minimax_usage(
     client: &Client,
     url: &str,
@@ -1018,6 +1143,7 @@ fn anthropic_usage_window(
     let raw = raw?;
     let used_percent = raw.utilization?.clamp(0.0, 100.0);
     Some(QuotaWindow {
+        label: None,
         used_percent,
         remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
         reset_at: raw.resets_at,
@@ -1205,6 +1331,7 @@ fn parse_minimax_usage_snapshot(
     let window_minutes = minimax_window_minutes(item).or(Some(MINIMAX_CODING_PLAN_WINDOW_MINUTES));
     let used_percent = ((used / total) * 100.0).clamp(0.0, 100.0);
     let five_hour = Some(QuotaWindow {
+        label: None,
         used_percent,
         remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
         reset_at,
@@ -1222,6 +1349,119 @@ fn parse_minimax_usage_snapshot(
             MiniMaxEndpoint::Cn => "minimax_coding_plan_cn",
         }
         .into(),
+    })
+}
+
+fn parse_copilot_usage_snapshot(
+    account_id: &str,
+    account_name: &str,
+    body: &str,
+) -> Result<QuotaSnapshot, ProviderError> {
+    let payload = serde_json::from_str::<serde_json::Value>(body).map_err(|error| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidResponse,
+            format!("解析 Copilot 使用量响应失败: {error}"),
+        )
+    })?;
+
+    let reset_at = payload
+        .get("quota_reset_date")
+        .or_else(|| payload.get("limited_user_reset_date"))
+        .and_then(parse_copilot_reset_at_value);
+    let windows = copilot_usage_windows(&payload, reset_at);
+
+    if windows.is_empty() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::MissingHeaders,
+            "Copilot 使用量接口没有返回可识别的额度窗口",
+        ));
+    }
+
+    Ok(QuotaSnapshot {
+        account_id: account_id.to_string(),
+        account_name: account_name.to_string(),
+        five_hour: windows.get(0).cloned(),
+        seven_day: windows.get(1).cloned(),
+        fetched_at: Utc::now(),
+        source: "copilot_internal_user".into(),
+    })
+}
+
+fn copilot_usage_windows(
+    payload: &serde_json::Value,
+    reset_at: Option<DateTime<Utc>>,
+) -> Vec<QuotaWindow> {
+    let mut windows = Vec::new();
+    if let Some(snapshots) = payload
+        .get("quota_snapshots")
+        .filter(|value| value.is_object())
+    {
+        if let Some(window) =
+            copilot_snapshot_window("Premium", snapshots.get("premium_interactions"), reset_at)
+        {
+            windows.push(window);
+        }
+        if let Some(window) = copilot_snapshot_window("Chat", snapshots.get("chat"), reset_at) {
+            windows.push(window);
+        }
+    }
+
+    if windows.is_empty() {
+        if let Some(window) = copilot_limited_window(payload, "Chat", "chat", reset_at) {
+            windows.push(window);
+        }
+        if let Some(window) =
+            copilot_limited_window(payload, "Completions", "completions", reset_at)
+        {
+            windows.push(window);
+        }
+    }
+
+    windows
+}
+
+fn copilot_snapshot_window(
+    label: &str,
+    value: Option<&serde_json::Value>,
+    reset_at: Option<DateTime<Utc>>,
+) -> Option<QuotaWindow> {
+    let percent_remaining = value?.get("percent_remaining").and_then(json_number)?;
+    let remaining_percent = percent_remaining.clamp(0.0, 100.0);
+    Some(QuotaWindow {
+        label: Some(label.to_string()),
+        used_percent: (100.0 - percent_remaining).clamp(0.0, 100.0),
+        remaining_percent,
+        reset_at,
+        window_minutes: Some(COPILOT_MONTHLY_WINDOW_MINUTES),
+    })
+}
+
+fn copilot_limited_window(
+    payload: &serde_json::Value,
+    label: &str,
+    key: &str,
+    reset_at: Option<DateTime<Utc>>,
+) -> Option<QuotaWindow> {
+    let remaining = payload
+        .get("limited_user_quotas")
+        .and_then(|value| value.get(key))
+        .and_then(json_number)?;
+    let total = payload
+        .get("monthly_quotas")
+        .and_then(|value| value.get(key))
+        .and_then(json_number)?;
+    if total <= 0.0 {
+        return None;
+    }
+
+    let used = (total - remaining).clamp(0.0, total);
+    let used_percent = ((used / total) * 100.0).round().clamp(0.0, 100.0);
+    Some(QuotaWindow {
+        label: Some(label.to_string()),
+        used_percent,
+        remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
+        reset_at,
+        window_minutes: Some(COPILOT_MONTHLY_WINDOW_MINUTES),
     })
 }
 
@@ -1273,6 +1513,7 @@ fn glm_is_token_limit(item: &serde_json::Value) -> bool {
 fn glm_limit_to_window(limit: &serde_json::Value, window_minutes: Option<u32>) -> QuotaWindow {
     let used_percent = glm_used_percent(limit);
     QuotaWindow {
+        label: None,
         used_percent,
         remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
         reset_at: glm_reset_at(limit),
@@ -1584,6 +1825,7 @@ fn pick_kimi_weekly_index(
 fn kimi_quota_to_window(quota: &KimiQuota, window_minutes: Option<u32>) -> QuotaWindow {
     let used_percent = ((quota.used / quota.limit) * 100.0).clamp(0.0, 100.0);
     QuotaWindow {
+        label: None,
         used_percent,
         remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
         reset_at: quota.reset_at,
@@ -1610,6 +1852,25 @@ fn parse_reset_at_value(value: &serde_json::Value) -> Option<DateTime<Utc>> {
                 .or_else(|| number.as_f64().map(|value| value as i64))?;
             Utc.timestamp_opt(seconds, 0).single()
         }
+        _ => None,
+    }
+}
+
+fn parse_copilot_reset_at_value(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    match value {
+        serde_json::Value::String(raw) => {
+            let trimmed = raw.trim();
+            DateTime::parse_from_rfc3339(trimmed)
+                .ok()
+                .map(|time| time.with_timezone(&Utc))
+                .or_else(|| {
+                    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+                        .ok()
+                        .and_then(|date| date.and_hms_opt(0, 0, 0))
+                        .map(|time| Utc.from_utc_datetime(&time))
+                })
+        }
+        serde_json::Value::Number(_) => parse_reset_at_value(value),
         _ => None,
     }
 }
@@ -1753,6 +2014,105 @@ mod tests {
         assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer access-token");
         assert_eq!(headers.get("anthropic-beta").unwrap(), "oauth-2025-04-20");
         assert_eq!(headers.get(ACCEPT).unwrap(), "application/json");
+    }
+
+    #[test]
+    fn copilot_headers_use_github_token_format_and_editor_headers() {
+        let credentials = ProbeCredentials {
+            provider: PROVIDER_COPILOT.into(),
+            auth_mode: AuthMode::ApiKey,
+            secret: "gho_token".into(),
+            chatgpt_account_id: None,
+        };
+
+        let headers = build_copilot_usage_headers(&credentials).unwrap();
+
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "token gho_token");
+        assert_eq!(headers.get(ACCEPT).unwrap(), "application/json");
+        assert_eq!(
+            headers.get("User-Agent").unwrap(),
+            "GitHubCopilotChat/0.26.7"
+        );
+        assert_eq!(headers.get("Editor-Version").unwrap(), "vscode/1.96.2");
+        assert_eq!(
+            headers.get("Editor-Plugin-Version").unwrap(),
+            "copilot-chat/0.26.7"
+        );
+        assert_eq!(headers.get("X-Github-Api-Version").unwrap(), "2025-04-01");
+    }
+
+    #[test]
+    fn copilot_paid_usage_response_maps_premium_and_chat_labels() {
+        let body = r#"{
+            "copilot_plan": "pro",
+            "quota_reset_date": "2099-01-15T00:00:00Z",
+            "quota_snapshots": {
+                "premium_interactions": {
+                    "percent_remaining": 80,
+                    "entitlement": 300,
+                    "remaining": 240,
+                    "quota_id": "premium"
+                },
+                "chat": {
+                    "percent_remaining": 95,
+                    "entitlement": 1000,
+                    "remaining": 950,
+                    "quota_id": "chat"
+                }
+            }
+        }"#;
+
+        let snapshot = parse_copilot_usage_snapshot("copilot-work", "Copilot Work", body).unwrap();
+
+        assert_eq!(snapshot.account_id, "copilot-work");
+        assert_eq!(snapshot.account_name, "Copilot Work");
+        assert_eq!(snapshot.source, "copilot_internal_user");
+        let premium = snapshot.five_hour.unwrap();
+        assert_eq!(premium.label.as_deref(), Some("Premium"));
+        assert_eq!(premium.used_percent, 20.0);
+        assert_eq!(premium.remaining_percent, 80.0);
+        assert_eq!(premium.window_minutes, Some(43200));
+        assert_eq!(
+            premium.reset_at.unwrap().to_rfc3339(),
+            "2099-01-15T00:00:00+00:00"
+        );
+        let chat = snapshot.seven_day.unwrap();
+        assert_eq!(chat.label.as_deref(), Some("Chat"));
+        assert_eq!(chat.used_percent, 5.0);
+        assert_eq!(chat.remaining_percent, 95.0);
+        assert_eq!(chat.window_minutes, Some(43200));
+    }
+
+    #[test]
+    fn copilot_free_usage_response_maps_chat_and_completions_labels() {
+        let body = r#"{
+            "copilot_plan": "individual",
+            "access_type_sku": "free_limited_copilot",
+            "limited_user_quotas": {
+                "chat": 410,
+                "completions": 4000
+            },
+            "monthly_quotas": {
+                "chat": 500,
+                "completions": 4000
+            },
+            "limited_user_reset_date": "2026-02-11"
+        }"#;
+
+        let snapshot = parse_copilot_usage_snapshot("copilot-free", "Copilot Free", body).unwrap();
+
+        let chat = snapshot.five_hour.unwrap();
+        assert_eq!(chat.label.as_deref(), Some("Chat"));
+        assert_eq!(chat.used_percent, 18.0);
+        assert_eq!(chat.remaining_percent, 82.0);
+        assert_eq!(
+            chat.reset_at.unwrap().to_rfc3339(),
+            "2026-02-11T00:00:00+00:00"
+        );
+        let completions = snapshot.seven_day.unwrap();
+        assert_eq!(completions.label.as_deref(), Some("Completions"));
+        assert_eq!(completions.used_percent, 0.0);
+        assert_eq!(completions.remaining_percent, 100.0);
     }
 
     #[test]

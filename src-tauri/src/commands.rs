@@ -4,8 +4,8 @@ use crate::{
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ConnectedAccount,
         ConnectionTestResult, GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport,
-        QuotaSnapshot, SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_GLM, PROVIDER_KIMI,
-        PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        QuotaSnapshot, SaveSettingsInput, PROVIDER_ANTHROPIC, PROVIDER_COPILOT, PROVIDER_GLM,
+        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     notifications, oauth, panel, provider, secrets, settings,
     state::StateStore,
@@ -15,6 +15,7 @@ use chrono::Utc;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
+    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
 use tauri::{AppHandle, Emitter, State};
@@ -187,6 +188,37 @@ pub async fn import_minimax_account(
 }
 
 #[tauri::command]
+pub async fn import_copilot_account(
+    app: AppHandle,
+    store: State<'_, StateStore>,
+    account_name: Option<String>,
+    github_token: Option<String>,
+    account_id: Option<String>,
+) -> Result<AppSettings, String> {
+    let display_name = account_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Copilot Account")
+        .to_string();
+    let token = github_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| secrets::load_github_cli_token().ok().flatten())
+        .ok_or_else(|| "请填写 GitHub Token，或先运行 gh auth login 后再导入".to_string())?;
+
+    let mut current = settings::load_settings(&app)?;
+    let account_id =
+        settings::upsert_api_key_account(&mut current, PROVIDER_COPILOT, account_id, display_name);
+    secrets::save_account_secret(&account_id, &token)?;
+    let next_settings = settings::write_settings(&app, &current)?;
+    hydrate_cached_snapshot(&app, &store).await?;
+    Ok(next_settings)
+}
+
+#[tauri::command]
 pub async fn start_openai_oauth(
     oauth_store: State<'_, oauth::OAuthStore>,
     account_id: Option<String>,
@@ -299,19 +331,19 @@ pub fn get_git_usage(
     range: LocalTokenUsageRange,
 ) -> Result<GitUsageReport, String> {
     let cache = read_git_usage_cache(&app)?;
-    let max_age_minutes = settings::load_settings(&app)
-        .map(|settings| i64::from(settings.refresh_interval_minutes))
-        .unwrap_or(15);
+    let settings = settings::load_settings(&app).unwrap_or_default();
+    let max_age_minutes = i64::from(settings.refresh_interval_minutes);
 
-    if cache
+    let cache_is_stale = cache
         .as_ref()
-        .map(|cache| git_usage_cache_is_stale(cache, max_age_minutes))
-        .unwrap_or(true)
-    {
+        .map(|cache| git_usage_cache_is_stale(cache, max_age_minutes, &settings.git_usage_root))
+        .unwrap_or(true);
+
+    if cache_is_stale {
         start_git_usage_cache_refresh(app.clone());
     }
 
-    if let Some(cache) = cache {
+    if let Some(cache) = cache.filter(|cache| cache.root_path == settings.git_usage_root) {
         return Ok(cache.report(range));
     }
 
@@ -344,12 +376,12 @@ pub fn ensure_local_token_usage_cache(app: &AppHandle, max_age_minutes: i64) {
     }
 }
 
-pub fn ensure_git_usage_cache(app: &AppHandle, max_age_minutes: i64) {
+pub fn ensure_git_usage_cache(app: &AppHandle, max_age_minutes: i64, root_path: &str) {
     let should_refresh = read_git_usage_cache(app)
         .map(|cache| {
             cache
                 .as_ref()
-                .map(|cache| git_usage_cache_is_stale(cache, max_age_minutes))
+                .map(|cache| git_usage_cache_is_stale(cache, max_age_minutes, root_path))
                 .unwrap_or(true)
         })
         .unwrap_or(true);
@@ -400,7 +432,10 @@ async fn refresh_git_usage_cache(
     emit_update: bool,
 ) -> Result<git_usage::GitUsageCache, String> {
     let _guard = claim_git_usage_refresh()?;
-    let cache = tauri::async_runtime::spawn_blocking(git_usage::build_cache)
+    let root = settings::load_settings(&app)
+        .map(|settings| PathBuf::from(settings.git_usage_root))
+        .unwrap_or_else(|_| PathBuf::from(crate::models::default_git_usage_root()));
+    let cache = tauri::async_runtime::spawn_blocking(move || git_usage::build_cache(root))
         .await
         .map_err(|error| format!("Git 统计缓存任务失败: {error}"))??;
     storage::write_json(&app, GIT_USAGE_CACHE_FILE, &cache)?;
@@ -606,13 +641,19 @@ fn settings_for_refresh_account(settings: &AppSettings, account: &ConnectedAccou
 fn account_supports_quota_refresh(provider: &str) -> bool {
     matches!(
         provider,
-        PROVIDER_OPENAI | PROVIDER_ANTHROPIC | PROVIDER_KIMI | PROVIDER_GLM | PROVIDER_MINIMAX
+        PROVIDER_OPENAI
+            | PROVIDER_ANTHROPIC
+            | PROVIDER_KIMI
+            | PROVIDER_GLM
+            | PROVIDER_MINIMAX
+            | PROVIDER_COPILOT
     )
 }
 
 fn provider_display_label(provider: &str) -> &'static str {
     match provider {
         crate::models::PROVIDER_ANTHROPIC => "Anthropic",
+        crate::models::PROVIDER_COPILOT => "Copilot",
         crate::models::PROVIDER_GLM => "GLM",
         crate::models::PROVIDER_KIMI => "Kimi",
         crate::models::PROVIDER_MINIMAX => "MiniMax",
@@ -689,7 +730,15 @@ fn local_token_usage_cache_is_stale(
     (Utc::now() - cache.generated_at).num_minutes() >= max_age_minutes
 }
 
-fn git_usage_cache_is_stale(cache: &git_usage::GitUsageCache, max_age_minutes: i64) -> bool {
+fn git_usage_cache_is_stale(
+    cache: &git_usage::GitUsageCache,
+    max_age_minutes: i64,
+    root_path: &str,
+) -> bool {
+    if cache.root_path != root_path {
+        return true;
+    }
+
     if max_age_minutes <= 0 {
         return true;
     }
@@ -920,6 +969,7 @@ mod tests {
                 account_id: "first".into(),
                 account_name: "first@example.com".into(),
                 five_hour: Some(QuotaWindow {
+                    label: None,
                     used_percent: 4.0,
                     remaining_percent: 96.0,
                     reset_at: None,
@@ -1003,6 +1053,22 @@ mod tests {
         assert_eq!(error, "Git 统计正在刷新，请稍后再试");
         drop(guard);
         assert!(claim_git_usage_refresh().is_ok());
+    }
+
+    #[test]
+    fn git_usage_cache_is_stale_when_root_path_changes() {
+        let now = chrono::Utc::now();
+        let cache = git_usage::GitUsageCache {
+            root_path: "/tmp/old".into(),
+            generated_at: now,
+            today: git_usage::empty_report(LocalTokenUsageRange::Today, None),
+            last3_days: git_usage::empty_report(LocalTokenUsageRange::Last3Days, None),
+            this_week: git_usage::empty_report(LocalTokenUsageRange::ThisWeek, None),
+            this_month: git_usage::empty_report(LocalTokenUsageRange::ThisMonth, None),
+        };
+
+        assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/new"));
+        assert!(!git_usage_cache_is_stale(&cache, 15, "/tmp/old"));
     }
 
     #[test]
@@ -1110,6 +1176,28 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(account_ids, vec!["glm-work"]);
+    }
+
+    #[test]
+    fn refreshable_accounts_include_copilot_accounts() {
+        let settings = AppSettings {
+            accounts: vec![crate::models::ConnectedAccount {
+                account_id: "copilot-work".into(),
+                account_name: "Copilot Work".into(),
+                provider: crate::models::PROVIDER_COPILOT.into(),
+                auth_mode: AuthMode::ApiKey,
+                chatgpt_account_id: None,
+                secret_configured: true,
+            }],
+            ..AppSettings::default()
+        };
+
+        let account_ids = refreshable_quota_accounts(&settings)
+            .into_iter()
+            .map(|account| account.account_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(account_ids, vec!["copilot-work"]);
     }
 
     #[test]

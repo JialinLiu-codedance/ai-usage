@@ -4,6 +4,7 @@ import {
   buildGitUsageChartRows,
   formatCompactLines,
   gitUsageSummaryMetrics,
+  repositoryUsageRows,
 } from "../src/lib/git-usage-display.ts";
 import { getGitUsage, resetMockTauriStateForTests } from "../src/lib/tauri.ts";
 import type { GitUsageReport } from "../src/lib/types.ts";
@@ -33,6 +34,29 @@ const report: GitUsageReport = {
       changed_files: 3,
     },
   ],
+  repositories: [
+    {
+      name: "docs-site",
+      path: "/Users/test/docs-site",
+      added_lines: 450,
+      deleted_lines: 120,
+      changed_files: 4,
+    },
+    {
+      name: "ai-usage",
+      path: "/Users/test/ai-usage",
+      added_lines: 1_200,
+      deleted_lines: 350,
+      changed_files: 7,
+    },
+    {
+      name: "backend-api",
+      path: "/Users/test/backend-api",
+      added_lines: 800,
+      deleted_lines: 200,
+      changed_files: 5,
+    },
+  ],
 };
 
 test("formatCompactLines uses compact K and M suffixes", () => {
@@ -49,16 +73,52 @@ test("gitUsageSummaryMetrics formats added, deleted, and changed file totals", (
   ]);
 });
 
-test("buildGitUsageChartRows scales added and deleted series against max line bucket", () => {
+test("buildGitUsageChartRows scales added, deleted, and changed file series against max bucket", () => {
   assert.deepEqual(
     buildGitUsageChartRows(report).map((row) => ({
       label: row.label,
       addedHeight: row.addedHeight,
       deletedHeight: row.deletedHeight,
+      changedHeight: row.changedHeight,
     })),
     [
-      { label: "00", addedHeight: 25, deletedHeight: 6 },
-      { label: "03", addedHeight: 100, deletedHeight: 20 },
+      { label: "00", addedHeight: 25, deletedHeight: 6, changedHeight: 1 },
+      { label: "03", addedHeight: 100, deletedHeight: 20, changedHeight: 1 },
+    ],
+  );
+});
+
+test("repositoryUsageRows sorts repositories and scales bars against the highest line total", () => {
+  assert.deepEqual(
+    repositoryUsageRows(report).map((row) => ({
+      name: row.name,
+      displayAdded: row.displayAdded,
+      displayDeleted: row.displayDeleted,
+      addedPercent: row.addedPercent,
+      deletedPercent: row.deletedPercent,
+    })),
+    [
+      {
+        name: "ai-usage",
+        displayAdded: "+1.2K",
+        displayDeleted: "-350",
+        addedPercent: 77,
+        deletedPercent: 23,
+      },
+      {
+        name: "backend-api",
+        displayAdded: "+800",
+        displayDeleted: "-200",
+        addedPercent: 52,
+        deletedPercent: 13,
+      },
+      {
+        name: "docs-site",
+        displayAdded: "+450",
+        displayDeleted: "-120",
+        addedPercent: 29,
+        deletedPercent: 8,
+      },
     ],
   );
 });
@@ -74,4 +134,5 @@ test("mock getGitUsage returns a complete visible report outside Tauri", async (
   assert.ok(mock.totals.deleted_lines > 0);
   assert.ok(mock.totals.changed_files > 0);
   assert.ok(mock.buckets.length > 0);
+  assert.ok(mock.repositories.length > 0);
 });
