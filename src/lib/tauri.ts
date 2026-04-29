@@ -12,10 +12,13 @@ import type {
   ClaudeProxyProfileSummary,
   ConnectedAccount,
   ConnectionTestResult,
+  CopilotAuthStatus,
+  GitHubDeviceCodeResponse,
   GitUsageBucket,
   GitUsageReport,
   LocalProxySettingsState,
   LocalProxyStatus,
+  ManagedAuthAccount,
   GitUsageRepository,
   GitUsageTotals,
   LocalTokenUsageDay,
@@ -29,7 +32,10 @@ import type {
   PrKpiMetric,
   PrKpiReport,
   SaveLocalProxySettingsInput,
+  SaveReverseProxySettingsInput,
   SaveSettingsInput,
+  ReverseProxySettingsState,
+  ReverseProxyStatus,
   UsageRangeSelection,
 } from "./types";
 
@@ -40,6 +46,11 @@ const defaultMockClaudeProxyConfig: ClaudeProxyConfig = {
   listen_port: 16555,
   routes: [],
 };
+const defaultMockReverseProxyConfig = {
+  enabled: false,
+  default_openai_account_id: null,
+  default_copilot_account_id: null,
+} as const;
 let mockOAuthSequence = 0;
 let mockOAuthCompleteSequence = 0;
 let mockPendingOAuthAccountId: string | null = null;
@@ -105,6 +116,7 @@ function initialMockSettings(): AppSettings {
     git_usage_root: mockGitUsageRoot,
     claude_proxy: defaultMockClaudeProxyConfig,
     claude_proxy_profiles: {},
+    reverse_proxy: defaultMockReverseProxyConfig,
     secret_configured: true,
   };
 }
@@ -125,6 +137,7 @@ function emptyMockSettings(): AppSettings {
     git_usage_root: mockGitUsageRoot,
     claude_proxy: defaultMockClaudeProxyConfig,
     claude_proxy_profiles: {},
+    reverse_proxy: defaultMockReverseProxyConfig,
     secret_configured: false,
   };
 }
@@ -147,7 +160,7 @@ let mockStatus: AppStatus = {
       reset_at: null,
       window_minutes: 10080,
     },
-    fetched_at: new Date().toISOString(),
+    fetched_at: localIsoString(new Date()),
     source: "probe_headers",
   },
   accounts: [
@@ -167,14 +180,14 @@ let mockStatus: AppStatus = {
         reset_at: null,
         window_minutes: 10080,
       },
-      fetched_at: new Date().toISOString(),
+      fetched_at: localIsoString(new Date()),
       source: "probe_headers",
       last_error: null,
     },
   ],
   refresh_status: "ok",
   last_error: null,
-  last_refreshed_at: new Date().toISOString(),
+  last_refreshed_at: localIsoString(new Date()),
 };
 
 let mockLocalProxySettingsState: LocalProxySettingsState = {
@@ -193,6 +206,22 @@ let mockLocalProxyStatus: LocalProxyStatus = {
   success_rate: 0,
   uptime_seconds: 0,
   last_error: null,
+};
+
+let mockReverseProxySettingsState: ReverseProxySettingsState = {
+  enabled: false,
+  copilot_accounts: [],
+  openai_accounts: [],
+  default_copilot_account_id: null,
+  default_openai_account_id: null,
+};
+
+let mockReverseProxyStatus: ReverseProxyStatus = {
+  enabled: false,
+  copilot_ready: false,
+  openai_ready: false,
+  available_copilot_accounts: 0,
+  available_openai_accounts: 0,
 };
 
 export function resetMockTauriStateForTests(): void {
@@ -215,6 +244,20 @@ export function resetMockTauriStateForTests(): void {
     uptime_seconds: 0,
     last_error: null,
   };
+  mockReverseProxySettingsState = {
+    enabled: false,
+    copilot_accounts: [],
+    openai_accounts: [],
+    default_copilot_account_id: null,
+    default_openai_account_id: null,
+  };
+  mockReverseProxyStatus = {
+    enabled: false,
+    copilot_ready: false,
+    openai_ready: false,
+    available_copilot_accounts: 0,
+    available_openai_accounts: 0,
+  };
   mockSettings = emptyMockSettings();
   mockStatus = {
     snapshot: null,
@@ -223,6 +266,7 @@ export function resetMockTauriStateForTests(): void {
     last_error: null,
     last_refreshed_at: null,
   };
+  syncMockReverseProxyState();
   syncMockLocalProxyState();
 }
 
@@ -341,6 +385,154 @@ export async function stopLocalProxy(): Promise<LocalProxyStatus> {
     return mockLocalProxyStatus;
   }
   return invoke("stop_local_proxy");
+}
+
+export async function getReverseProxySettings(): Promise<ReverseProxySettingsState> {
+  if (!isTauriRuntime) {
+    syncMockReverseProxyState();
+    return mockReverseProxySettingsState;
+  }
+  return invoke("get_reverse_proxy_settings");
+}
+
+export async function saveReverseProxySettings(
+  input: SaveReverseProxySettingsInput,
+): Promise<ReverseProxySettingsState> {
+  if (!isTauriRuntime) {
+    mockSettings = {
+      ...mockSettings,
+      reverse_proxy: {
+        enabled: input.enabled,
+        default_openai_account_id: input.default_openai_account_id ?? mockSettings.reverse_proxy.default_openai_account_id,
+        default_copilot_account_id:
+          input.default_copilot_account_id ?? mockSettings.reverse_proxy.default_copilot_account_id,
+      },
+    };
+    syncMockReverseProxyState();
+    syncMockLocalProxyState();
+    return mockReverseProxySettingsState;
+  }
+  return invoke("save_reverse_proxy_settings", { input });
+}
+
+export async function getReverseProxyStatus(): Promise<ReverseProxyStatus> {
+  if (!isTauriRuntime) {
+    syncMockReverseProxyState();
+    return mockReverseProxyStatus;
+  }
+  return invoke("get_reverse_proxy_status");
+}
+
+export async function copilotStartDeviceFlow(): Promise<GitHubDeviceCodeResponse> {
+  if (!isTauriRuntime) {
+    return {
+      device_code: `preview-device-${Date.now()}`,
+      user_code: "MOCK-CODE",
+      verification_uri: "https://github.com/login/device",
+      expires_in: 900,
+      interval: 5,
+    };
+  }
+  return invoke("copilot_start_device_flow");
+}
+
+export async function copilotPollForAccount(deviceCode: string): Promise<ManagedAuthAccount | null> {
+  if (!isTauriRuntime) {
+    if (!deviceCode) {
+      return null;
+    }
+    const account: ManagedAuthAccount = {
+      id: `copilot-${Date.now()}`,
+      login: `github-${Date.now().toString(36)}`,
+      avatar_url: null,
+      authenticated_at: Math.floor(Date.now() / 1000),
+      domain: "github.com",
+    };
+    mockReverseProxySettingsState = {
+      ...mockReverseProxySettingsState,
+      copilot_accounts: [account, ...mockReverseProxySettingsState.copilot_accounts],
+      default_copilot_account_id:
+        mockReverseProxySettingsState.default_copilot_account_id ?? account.id,
+    };
+    mockSettings = {
+      ...mockSettings,
+      reverse_proxy: {
+        ...mockSettings.reverse_proxy,
+        default_copilot_account_id:
+          mockSettings.reverse_proxy.default_copilot_account_id ?? account.id,
+      },
+    };
+    syncMockReverseProxyState();
+    syncMockLocalProxyState();
+    return account;
+  }
+  return invoke("copilot_poll_for_account", { deviceCode });
+}
+
+export async function copilotListAccounts(): Promise<ManagedAuthAccount[]> {
+  if (!isTauriRuntime) {
+    return mockReverseProxySettingsState.copilot_accounts;
+  }
+  return invoke("copilot_list_accounts");
+}
+
+export async function copilotSetDefaultAccount(accountId: string): Promise<void> {
+  if (!isTauriRuntime) {
+    mockSettings = {
+      ...mockSettings,
+      reverse_proxy: {
+        ...mockSettings.reverse_proxy,
+        default_copilot_account_id: accountId,
+      },
+    };
+    syncMockReverseProxyState();
+    syncMockLocalProxyState();
+    return;
+  }
+  return invoke("copilot_set_default_account", { accountId });
+}
+
+export async function copilotRemoveAccount(accountId: string): Promise<void> {
+  if (!isTauriRuntime) {
+    const nextAccounts = mockReverseProxySettingsState.copilot_accounts.filter((account) => account.id !== accountId);
+    const nextDefault =
+      mockSettings.reverse_proxy.default_copilot_account_id === accountId ? nextAccounts[0]?.id ?? null : mockSettings.reverse_proxy.default_copilot_account_id;
+    mockSettings = {
+      ...mockSettings,
+      reverse_proxy: {
+        ...mockSettings.reverse_proxy,
+        default_copilot_account_id: nextDefault,
+      },
+    };
+    mockReverseProxySettingsState = {
+      ...mockReverseProxySettingsState,
+      copilot_accounts: nextAccounts,
+      default_copilot_account_id: nextDefault,
+    };
+    syncMockReverseProxyState();
+    syncMockLocalProxyState();
+    return;
+  }
+  return invoke("copilot_remove_account", { accountId });
+}
+
+export async function copilotGetAuthStatus(): Promise<CopilotAuthStatus> {
+  if (!isTauriRuntime) {
+    return {
+      accounts: mockReverseProxySettingsState.copilot_accounts,
+      default_account_id: mockReverseProxySettingsState.default_copilot_account_id,
+      authenticated: mockReverseProxySettingsState.copilot_accounts.length > 0,
+    };
+  }
+  return invoke("copilot_get_auth_status");
+}
+
+export async function startCopilotOAuthDeviceFlow(): Promise<GitHubDeviceCodeResponse> {
+  return copilotStartDeviceFlow();
+}
+
+export async function pollCopilotOAuthAccount(deviceCode: string): Promise<ManagedAuthAccount | null> {
+  return copilotPollForAccount(deviceCode);
 }
 
 export async function ensureNotificationPermission(): Promise<boolean> {
@@ -743,7 +935,8 @@ export async function chooseGitUsageRoot(currentPath?: string | null): Promise<s
 }
 
 function syncMockLocalProxyState(): void {
-  const capabilities = mockSettings.accounts.map((account) => {
+  syncMockReverseProxyState();
+  const capabilities: ClaudeProxyCapability[] = mockSettings.accounts.map((account) => {
     const compatibleProviders = new Set(["anthropic", "glm", "minimax", "kimi", "qwen", "xiaomi", "custom"]);
     const isCompatible = compatibleProviders.has(account.provider);
     const defaults = mockDefaultClaudeProfile(account.provider);
@@ -763,19 +956,96 @@ function syncMockLocalProxyState(): void {
       : [];
     return {
       account_id: account.account_id,
+      kind: "direct_account",
       provider: account.provider,
       display_name: account.account_name,
       is_claude_compatible_provider: isCompatible,
       can_direct_connect: isCompatible && missing_fields.length === 0,
       missing_fields,
+      status: !isCompatible ? "unsupported" : missing_fields.length === 0 ? "direct_ready" : "needs_profile",
       profile,
       resolved_profile: isCompatible && missing_fields.length === 0 ? profile : null,
     } satisfies ClaudeProxyCapability;
   });
 
+  capabilities.push({
+    account_id: "reverse:copilot",
+    kind: "reverse_copilot",
+    provider: "copilot",
+    display_name: "GitHub Copilot",
+    is_claude_compatible_provider: true,
+    can_direct_connect: mockReverseProxyStatus.copilot_ready,
+    missing_fields: mockReverseProxyStatus.copilot_ready ? [] : ["reverse_proxy"],
+    status: mockReverseProxyStatus.copilot_ready ? "reverse_ready" : "reverse_pending",
+    profile: {
+      base_url: null,
+      api_format: "anthropic",
+      auth_field: "ANTHROPIC_AUTH_TOKEN",
+      secret_configured: mockReverseProxyStatus.copilot_ready,
+    },
+    resolved_profile: null,
+  });
+  capabilities.push({
+    account_id: "reverse:openai",
+    kind: "reverse_openai",
+    provider: "openai",
+    display_name: "ChatGPT (Codex OAuth)",
+    is_claude_compatible_provider: true,
+    can_direct_connect: mockReverseProxyStatus.openai_ready,
+    missing_fields: mockReverseProxyStatus.openai_ready ? [] : ["reverse_proxy"],
+    status: mockReverseProxyStatus.openai_ready ? "reverse_ready" : "reverse_pending",
+    profile: {
+      base_url: null,
+      api_format: "anthropic",
+      auth_field: "ANTHROPIC_AUTH_TOKEN",
+      secret_configured: mockReverseProxyStatus.openai_ready,
+    },
+    resolved_profile: null,
+  });
+
   mockLocalProxySettingsState = {
     config: mockSettings.claude_proxy,
     capabilities,
+  };
+}
+
+function syncMockReverseProxyState(): void {
+  const openaiAccounts = mockSettings.accounts
+    .filter((account) => account.provider === "openai" && account.auth_mode === "oauth")
+    .map((account) => ({
+      id: account.account_id,
+      login: account.account_name,
+      avatar_url: null,
+      authenticated_at: 0,
+      domain: null,
+    }));
+
+  mockReverseProxySettingsState = {
+    enabled: mockSettings.reverse_proxy.enabled,
+    copilot_accounts: mockReverseProxySettingsState.copilot_accounts,
+    openai_accounts: openaiAccounts,
+    default_copilot_account_id: mockSettings.reverse_proxy.default_copilot_account_id,
+    default_openai_account_id: mockSettings.reverse_proxy.default_openai_account_id,
+  };
+
+  mockReverseProxyStatus = {
+    enabled: mockSettings.reverse_proxy.enabled,
+    copilot_ready:
+      mockSettings.reverse_proxy.enabled &&
+      Boolean(
+        mockReverseProxySettingsState.default_copilot_account_id &&
+          mockReverseProxySettingsState.copilot_accounts.some(
+            (account) => account.id === mockReverseProxySettingsState.default_copilot_account_id,
+          ),
+      ),
+    openai_ready:
+      mockSettings.reverse_proxy.enabled &&
+      Boolean(
+        mockSettings.reverse_proxy.default_openai_account_id &&
+          openaiAccounts.some((account) => account.id === mockSettings.reverse_proxy.default_openai_account_id),
+      ),
+    available_copilot_accounts: mockReverseProxySettingsState.copilot_accounts.length,
+    available_openai_accounts: openaiAccounts.length,
   };
 }
 
@@ -911,7 +1181,7 @@ function mockLocalTokenUsageReport(selection: UsageRangeSelection): LocalTokenUs
     tools: mockTokenUsageTools(totals),
     missing_sources: ["OpenCode: ~/.local/share/opencode/storage/message"],
     warnings: [],
-    generated_at: generatedAt.toISOString(),
+    generated_at: localIsoString(generatedAt),
   };
 }
 
@@ -938,13 +1208,13 @@ function mockGitUsageReport(selection: UsageRangeSelection): GitUsageReport {
     repository_count: 8,
     missing_sources: [],
     warnings: [],
-    generated_at: generatedAt.toISOString(),
+    generated_at: localIsoString(generatedAt),
   };
 }
 
 function mockPrKpiReport(selection: UsageRangeSelection): PrKpiReport {
   const range = reportRangeFromSelection(selection);
-  const generatedAt = new Date().toISOString();
+  const generatedAt = localIsoString(new Date());
   const tokenReport = mockLocalTokenUsageReport(selection);
   const gitReport = mockGitUsageReport(selection);
   const netLines = gitReport.totals.added_lines - gitReport.totals.deleted_lines;
@@ -1058,7 +1328,7 @@ function mockTokenBucketDates(selection: UsageRangeSelection, now: Date): Date[]
 
 function mockTokenBucketKey(range: LocalTokenUsageRange, date: Date): string {
   if (range === "today" || range === "last3Days") {
-    return `${localDateKey(date)}T${String(date.getHours()).padStart(2, "0")}:00:00Z`;
+    return localIsoHourKey(date);
   }
   return localDateKey(date);
 }
@@ -1270,6 +1540,23 @@ function parseLocalDateKey(value: string): Date {
 
 function localDateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function localIsoHourKey(date: Date): string {
+  return `${localDateKey(date)}T${String(date.getHours()).padStart(2, "0")}:00:00${localOffsetSuffix(date)}`;
+}
+
+function localIsoString(date: Date): string {
+  return `${localDateKey(date)}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}${localOffsetSuffix(date)}`;
+}
+
+function localOffsetSuffix(date: Date): string {
+  const totalMinutes = -date.getTimezoneOffset();
+  const sign = totalMinutes >= 0 ? "+" : "-";
+  const absoluteMinutes = Math.abs(totalMinutes);
+  const hours = Math.floor(absoluteMinutes / 60);
+  const minutes = absoluteMinutes % 60;
+  return `${sign}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
 function roundOneDecimal(value: number): number {

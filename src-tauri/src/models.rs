@@ -34,6 +34,7 @@ pub struct QuotaWindow {
     pub label: Option<String>,
     pub used_percent: f64,
     pub remaining_percent: f64,
+    #[serde(with = "crate::app_time::local_datetime_serde::option")]
     pub reset_at: Option<DateTime<Utc>>,
     pub window_minutes: Option<u32>,
 }
@@ -44,6 +45,7 @@ pub struct QuotaSnapshot {
     pub account_name: String,
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub fetched_at: DateTime<Utc>,
     pub source: String,
 }
@@ -85,6 +87,7 @@ pub struct AccountQuotaStatus {
     pub provider: String,
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
+    #[serde(with = "crate::app_time::local_datetime_serde::option")]
     pub fetched_at: Option<DateTime<Utc>>,
     pub source: Option<String>,
     pub last_error: Option<String>,
@@ -111,6 +114,8 @@ pub struct AppSettings {
     pub claude_proxy: ClaudeProxyConfig,
     #[serde(default)]
     pub claude_proxy_profiles: HashMap<String, ClaudeProxyProfileSettings>,
+    #[serde(default)]
+    pub reverse_proxy: ReverseProxyConfig,
     pub secret_configured: bool,
 }
 
@@ -131,6 +136,7 @@ impl Default for AppSettings {
             git_usage_root: default_git_usage_root(),
             claude_proxy: ClaudeProxyConfig::default(),
             claude_proxy_profiles: HashMap::new(),
+            reverse_proxy: ReverseProxyConfig::default(),
             secret_configured: false,
         }
     }
@@ -202,6 +208,7 @@ pub struct StoredOAuthTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub expires_at: DateTime<Utc>,
     pub email: Option<String>,
     pub chatgpt_account_id: Option<String>,
@@ -215,6 +222,7 @@ pub struct AppStatus {
     pub accounts: Vec<AccountQuotaStatus>,
     pub refresh_status: RefreshStatus,
     pub last_error: Option<String>,
+    #[serde(with = "crate::app_time::local_datetime_serde::option")]
     pub last_refreshed_at: Option<DateTime<Utc>>,
 }
 
@@ -300,11 +308,15 @@ pub struct ClaudeProxyProfileSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeProxyCapability {
     pub account_id: String,
+    #[serde(default)]
+    pub kind: ProxyTargetKind,
     pub provider: String,
     pub display_name: String,
     pub is_claude_compatible_provider: bool,
     pub can_direct_connect: bool,
     pub missing_fields: Vec<String>,
+    #[serde(default)]
+    pub status: ProxyTargetStatus,
     pub profile: ClaudeProxyProfileSummary,
     pub resolved_profile: Option<ClaudeProxyProfileSummary>,
 }
@@ -353,6 +365,98 @@ impl Default for ClaudeProxyConfig {
 pub struct LocalProxySettingsState {
     pub config: ClaudeProxyConfig,
     pub capabilities: Vec<ClaudeProxyCapability>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyTargetKind {
+    #[default]
+    DirectAccount,
+    ReverseCopilot,
+    ReverseOpenai,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyTargetStatus {
+    #[default]
+    Unsupported,
+    DirectReady,
+    NeedsProfile,
+    ReversePending,
+    ReverseReady,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReverseProxyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_openai_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_copilot_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedAuthAccount {
+    pub id: String,
+    pub login: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    pub authenticated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubDeviceCodeResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopilotAuthStatus {
+    pub accounts: Vec<ManagedAuthAccount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_account_id: Option<String>,
+    pub authenticated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverseProxySettingsState {
+    pub enabled: bool,
+    pub copilot_accounts: Vec<ManagedAuthAccount>,
+    pub openai_accounts: Vec<ManagedAuthAccount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_copilot_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_openai_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveReverseProxySettingsInput {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_copilot_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_openai_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReverseProxyStatus {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub copilot_ready: bool,
+    #[serde(default)]
+    pub openai_ready: bool,
+    #[serde(default)]
+    pub available_copilot_accounts: usize,
+    #[serde(default)]
+    pub available_openai_accounts: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,6 +635,7 @@ pub struct LocalTokenUsageReport {
     pub tools: Vec<LocalTokenUsageTool>,
     pub missing_sources: Vec<String>,
     pub warnings: Vec<String>,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub generated_at: DateTime<Utc>,
 }
 
@@ -574,6 +679,7 @@ pub struct GitUsageReport {
     pub repository_count: usize,
     pub missing_sources: Vec<String>,
     pub warnings: Vec<String>,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub generated_at: DateTime<Utc>,
 }
 
@@ -626,5 +732,6 @@ pub struct PrKpiReport {
     pub overall_score: Option<f64>,
     pub missing_sources: Vec<String>,
     pub warnings: Vec<String>,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub generated_at: DateTime<Utc>,
 }

@@ -1352,7 +1352,7 @@ fn parse_minimax_usage_snapshot(
     })
 }
 
-fn parse_copilot_usage_snapshot(
+pub(crate) fn parse_copilot_usage_snapshot(
     account_id: &str,
     account_name: &str,
     body: &str,

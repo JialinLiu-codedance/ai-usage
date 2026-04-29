@@ -34,6 +34,7 @@ export interface AppSettings {
   git_usage_root: string;
   claude_proxy: ClaudeProxyConfig;
   claude_proxy_profiles: Record<string, ClaudeProxyProfileSummary>;
+  reverse_proxy: ReverseProxyConfig;
   secret_configured: boolean;
 }
 
@@ -64,14 +65,24 @@ export interface ClaudeProxyProfileSummary {
 
 export interface ClaudeProxyCapability {
   account_id: string;
+  kind: ProxyTargetKind;
   provider: string;
   display_name: string;
   is_claude_compatible_provider: boolean;
   can_direct_connect: boolean;
   missing_fields: string[];
+  status: ProxyTargetStatus;
   profile: ClaudeProxyProfileSummary;
   resolved_profile: ClaudeProxyProfileSummary | null;
 }
+
+export type ProxyTargetKind = "direct_account" | "reverse_copilot" | "reverse_openai";
+export type ProxyTargetStatus =
+  | "unsupported"
+  | "direct_ready"
+  | "needs_profile"
+  | "reverse_pending"
+  | "reverse_ready";
 
 export interface ClaudeModelRoute {
   id: string;
@@ -114,6 +125,56 @@ export interface LocalProxyStatus {
   success_rate: number;
   uptime_seconds: number;
   last_error: string | null;
+}
+
+export interface ReverseProxyConfig {
+  enabled: boolean;
+  default_openai_account_id: string | null;
+  default_copilot_account_id: string | null;
+}
+
+export interface ManagedAuthAccount {
+  id: string;
+  login: string;
+  avatar_url: string | null;
+  authenticated_at: number;
+  domain: string | null;
+}
+
+export interface GitHubDeviceCodeResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+}
+
+export interface CopilotAuthStatus {
+  accounts: ManagedAuthAccount[];
+  default_account_id: string | null;
+  authenticated: boolean;
+}
+
+export interface ReverseProxySettingsState {
+  enabled: boolean;
+  copilot_accounts: ManagedAuthAccount[];
+  openai_accounts: ManagedAuthAccount[];
+  default_copilot_account_id: string | null;
+  default_openai_account_id: string | null;
+}
+
+export interface SaveReverseProxySettingsInput {
+  enabled: boolean;
+  default_copilot_account_id?: string | null;
+  default_openai_account_id?: string | null;
+}
+
+export interface ReverseProxyStatus {
+  enabled: boolean;
+  copilot_ready: boolean;
+  openai_ready: boolean;
+  available_copilot_accounts: number;
+  available_openai_accounts: number;
 }
 
 export interface ConnectedAccount {

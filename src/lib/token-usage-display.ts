@@ -186,7 +186,7 @@ function emptyRecentDays(): LocalTokenUsageDay[] {
     const date = new Date();
     date.setDate(date.getDate() - (6 - index));
     return {
-      date: date.toISOString().slice(0, 10),
+      date: localDateKey(date),
       input_tokens: 0,
       output_tokens: 0,
       cache_read_tokens: 0,
@@ -218,6 +218,10 @@ function uniqueDayModels(days: LocalTokenUsageDay[]): LocalTokenUsageModel[] {
 
 function chartModelColorClass(index: number): string {
   return `token-model-color-${index % 6}`;
+}
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 function trimTrailingZero(value: number, integerAt = 10): string {

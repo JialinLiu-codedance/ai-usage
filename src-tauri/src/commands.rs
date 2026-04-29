@@ -1,13 +1,15 @@
 use crate::{
+    copilot_oauth::CopilotAuthState,
     errors::{ProviderError, ProviderErrorKind},
     git_usage, local_proxy, local_usage, pr_kpi,
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ClaudeProxyProfileInput,
-        ConnectedAccount, ConnectionTestResult, GitUsageReport, LocalProxySettingsState,
-        LocalProxyStatus, LocalTokenUsageRange, LocalTokenUsageReport, PrKpiOverview,
-        PrKpiReport, QuotaSnapshot, SaveLocalProxySettingsInput, SaveSettingsInput,
-        UsageRangeRequest, CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC, PROVIDER_COPILOT,
-        PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        ConnectedAccount, ConnectionTestResult, GitHubDeviceCodeResponse, GitUsageReport,
+        LocalProxySettingsState, LocalProxyStatus, LocalTokenUsageRange, LocalTokenUsageReport,
+        ManagedAuthAccount, PrKpiOverview, PrKpiReport, ProbeCredentials, QuotaSnapshot, ReverseProxySettingsState,
+        ReverseProxyStatus, SaveLocalProxySettingsInput, SaveReverseProxySettingsInput,
+        SaveSettingsInput, UsageRangeRequest, CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC,
+        PROVIDER_COPILOT, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     notifications, oauth, panel, provider, secrets, settings,
     state::StateStore,
@@ -20,7 +22,7 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const SNAPSHOTS_FILE: &str = "snapshots.json";
 const TOKEN_USAGE_CACHE_FILE: &str = "local-token-usage-cache.json";
@@ -109,28 +111,208 @@ pub fn save_settings(app: AppHandle, input: SaveSettingsInput) -> Result<AppSett
 }
 
 #[tauri::command]
-pub fn get_local_proxy_settings(app: AppHandle) -> Result<LocalProxySettingsState, String> {
+pub async fn get_local_proxy_settings(
+    app: AppHandle,
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<LocalProxySettingsState, String> {
     let settings = settings::load_settings(&app)?;
-    local_proxy::build_local_proxy_settings_state(&settings)
+    let reverse_status = build_reverse_proxy_status(&settings, &copilot_state).await?;
+    local_proxy::build_local_proxy_settings_state(&settings, &reverse_status)
 }
 
 #[tauri::command]
-pub fn save_local_proxy_settings(
+pub async fn save_local_proxy_settings(
     app: AppHandle,
+    copilot_state: State<'_, CopilotAuthState>,
     input: SaveLocalProxySettingsInput,
 ) -> Result<LocalProxySettingsState, String> {
     let settings = settings::save_local_proxy_settings(&app, input)?;
-    local_proxy::build_local_proxy_settings_state(&settings)
+    let reverse_status = build_reverse_proxy_status(&settings, &copilot_state).await?;
+    local_proxy::build_local_proxy_settings_state(&settings, &reverse_status)
 }
 
 #[tauri::command]
-pub fn save_claude_proxy_profile(
+pub async fn save_claude_proxy_profile(
     app: AppHandle,
+    copilot_state: State<'_, CopilotAuthState>,
     input: ClaudeProxyProfileInput,
 ) -> Result<LocalProxySettingsState, String> {
     let _ = settings::save_claude_proxy_profile(&app, input)?;
     let settings = settings::load_settings(&app)?;
-    local_proxy::build_local_proxy_settings_state(&settings)
+    let reverse_status = build_reverse_proxy_status(&settings, &copilot_state).await?;
+    local_proxy::build_local_proxy_settings_state(&settings, &reverse_status)
+}
+
+#[tauri::command]
+pub async fn get_reverse_proxy_settings(
+    app: AppHandle,
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<ReverseProxySettingsState, String> {
+    let settings = settings::load_settings(&app)?;
+    build_reverse_proxy_settings_state(&settings, &copilot_state).await
+}
+
+#[tauri::command]
+pub async fn save_reverse_proxy_settings(
+    app: AppHandle,
+    copilot_state: State<'_, CopilotAuthState>,
+    input: SaveReverseProxySettingsInput,
+) -> Result<ReverseProxySettingsState, String> {
+    let settings = settings::save_reverse_proxy_settings(&app, input)?;
+    build_reverse_proxy_settings_state(&settings, &copilot_state).await
+}
+
+#[tauri::command]
+pub async fn get_reverse_proxy_status(
+    app: AppHandle,
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<ReverseProxyStatus, String> {
+    let settings = settings::load_settings(&app)?;
+    build_reverse_proxy_status(&settings, &copilot_state).await
+}
+
+#[tauri::command]
+pub async fn copilot_start_device_flow(
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<GitHubDeviceCodeResponse, String> {
+    let manager = copilot_state.0.read().await;
+    manager.start_device_flow().await.map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn copilot_poll_for_account(
+    device_code: String,
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<Option<ManagedAuthAccount>, String> {
+    let manager = copilot_state.0.read().await;
+    manager
+        .poll_for_account(&device_code)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn copilot_list_accounts(
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<Vec<ManagedAuthAccount>, String> {
+    let manager = copilot_state.0.read().await;
+    Ok(manager.list_accounts().await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn copilot_set_default_account(
+    account_id: String,
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<(), String> {
+    let manager = copilot_state.0.read().await;
+    manager
+        .set_default_account(&account_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn copilot_remove_account(
+    account_id: String,
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<(), String> {
+    let manager = copilot_state.0.read().await;
+    manager
+        .remove_account(&account_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn copilot_get_auth_status(
+    copilot_state: State<'_, CopilotAuthState>,
+) -> Result<crate::models::CopilotAuthStatus, String> {
+    let manager = copilot_state.0.read().await;
+    Ok(manager.get_status().await)
+}
+
+async fn build_reverse_proxy_settings_state(
+    settings: &AppSettings,
+    copilot_state: &State<'_, CopilotAuthState>,
+) -> Result<ReverseProxySettingsState, String> {
+    let copilot_accounts = {
+        let manager = copilot_state.0.read().await;
+        manager.list_accounts().await
+    };
+    let openai_accounts = openai_oauth_managed_accounts(settings);
+    let default_copilot_account_id =
+        resolve_default_copilot_reverse_account_id(settings, &copilot_accounts);
+    let default_openai_account_id =
+        resolve_default_openai_reverse_account_id(settings, &openai_accounts);
+    Ok(ReverseProxySettingsState {
+        enabled: settings.reverse_proxy.enabled,
+        copilot_accounts,
+        default_copilot_account_id,
+        openai_accounts,
+        default_openai_account_id,
+    })
+}
+
+pub(crate) async fn build_reverse_proxy_status(
+    settings: &AppSettings,
+    copilot_state: &State<'_, CopilotAuthState>,
+) -> Result<ReverseProxyStatus, String> {
+    let settings_state = build_reverse_proxy_settings_state(settings, copilot_state).await?;
+    let copilot_ready = settings.reverse_proxy.enabled
+        && settings_state
+            .default_copilot_account_id
+            .as_ref()
+            .is_some_and(|id| settings_state.copilot_accounts.iter().any(|account| &account.id == id));
+    let openai_ready = settings.reverse_proxy.enabled
+        && settings_state
+            .default_openai_account_id
+            .as_ref()
+            .is_some_and(|id| settings_state.openai_accounts.iter().any(|account| &account.id == id));
+
+    Ok(ReverseProxyStatus {
+        enabled: settings.reverse_proxy.enabled,
+        copilot_ready,
+        openai_ready,
+        available_copilot_accounts: settings_state.copilot_accounts.len(),
+        available_openai_accounts: settings_state.openai_accounts.len(),
+    })
+}
+
+fn openai_oauth_managed_accounts(settings: &AppSettings) -> Vec<ManagedAuthAccount> {
+    settings
+        .accounts
+        .iter()
+        .filter(|account| account.provider == PROVIDER_OPENAI && matches!(account.auth_mode, AuthMode::OAuth))
+        .map(|account| ManagedAuthAccount {
+            id: account.account_id.clone(),
+            login: account.account_name.clone(),
+            avatar_url: None,
+            authenticated_at: 0,
+            domain: None,
+        })
+        .collect()
+}
+
+fn resolve_default_openai_reverse_account_id(
+    settings: &AppSettings,
+    openai_accounts: &[ManagedAuthAccount],
+) -> Option<String> {
+    settings
+        .reverse_proxy
+        .default_openai_account_id
+        .clone()
+        .or_else(|| openai_accounts.first().map(|account| account.id.clone()))
+}
+
+fn resolve_default_copilot_reverse_account_id(
+    settings: &AppSettings,
+    copilot_accounts: &[ManagedAuthAccount],
+) -> Option<String> {
+    settings
+        .reverse_proxy
+        .default_copilot_account_id
+        .clone()
+        .or_else(|| copilot_accounts.first().map(|account| account.id.clone()))
 }
 
 #[tauri::command]
@@ -827,6 +1009,7 @@ fn claim_pr_kpi_refresh() -> Result<PrKpiRefreshGuard, String> {
 
 pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), String> {
     let settings = settings::load_settings(app)?;
+    let copilot_state = app.state::<CopilotAuthState>();
 
     {
         let mut guard = store.inner.write().await;
@@ -835,7 +1018,12 @@ pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), St
     }
 
     let accounts = refreshable_quota_accounts(&settings);
-    if accounts.is_empty() {
+    let has_managed_copilot = settings
+        .reverse_proxy
+        .default_copilot_account_id
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if accounts.is_empty() && !has_managed_copilot {
         let snapshots = read_account_snapshots(app)?;
         let mut guard = store.inner.write().await;
         guard.snapshot = snapshots.get(&settings.account_id).cloned();
@@ -866,6 +1054,14 @@ pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), St
                 account_errors.insert(account.account_id.clone(), error.message.clone());
                 errors.push(format!("{}: {}", account.account_name, error.message));
             }
+        }
+    }
+
+    if let Some(snapshot) = refresh_managed_copilot_quota(app, &settings, &copilot_state).await? {
+        write_account_snapshot(app, &snapshot.account_id, &snapshot)?;
+        updated_account_ids.insert(snapshot.account_id.clone());
+        if settings.account_id == snapshot.account_id {
+            latest_active_snapshot = Some(snapshot);
         }
     }
 
@@ -909,7 +1105,7 @@ pub async fn hydrate_cached_snapshot(app: &AppHandle, store: &StateStore) -> Res
     if !settings.secret_configured {
         let mut guard = store.inner.write().await;
         guard.snapshot = None;
-        guard.accounts = Vec::new();
+        guard.accounts = account_statuses_from_settings_and_snapshots(&settings, &read_account_snapshots(app)?);
         guard.refresh_status = crate::models::RefreshStatus::Idle;
         guard.last_error = None;
         guard.last_refreshed_at = None;
@@ -994,7 +1190,6 @@ fn account_supports_quota_refresh(provider: &str) -> bool {
             | PROVIDER_KIMI
             | PROVIDER_GLM
             | PROVIDER_MINIMAX
-            | PROVIDER_COPILOT
     )
 }
 
@@ -1006,6 +1201,54 @@ fn provider_display_label(provider: &str) -> &'static str {
         crate::models::PROVIDER_KIMI => "Kimi",
         crate::models::PROVIDER_MINIMAX => "MiniMax",
         _ => "OpenAI",
+    }
+}
+
+async fn refresh_managed_copilot_quota(
+    _app: &AppHandle,
+    settings: &AppSettings,
+    copilot_state: &State<'_, CopilotAuthState>,
+) -> Result<Option<QuotaSnapshot>, String> {
+    let default_account_id = settings.reverse_proxy.default_copilot_account_id.clone();
+    let Some(account_id) = default_account_id else {
+        return Ok(None);
+    };
+
+    let manager = copilot_state.0.read().await;
+    let Some(account) = manager.get_account(&account_id).await else {
+        return Ok(None);
+    };
+    let github_token = manager
+        .get_github_token_for_account(&account_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    provider::fetch_quota(
+        &managed_copilot_snapshot_id(&account.id),
+        &account.login,
+        None,
+        &managed_copilot_probe_credentials(github_token),
+    )
+    .await
+    .map(Some)
+    .map_err(|error| {
+        if matches!(error.kind, ProviderErrorKind::Unauthorized) {
+            "Copilot OAuth 认证失败，请重新登录 GitHub Copilot".into()
+        } else {
+            error.message
+        }
+    })
+}
+
+pub(crate) fn managed_copilot_snapshot_id(account_id: &str) -> String {
+    format!("managed:copilot:{account_id}")
+}
+
+fn managed_copilot_probe_credentials(github_token: String) -> ProbeCredentials {
+    ProbeCredentials {
+        provider: PROVIDER_COPILOT.into(),
+        auth_mode: AuthMode::ApiKey,
+        secret: github_token,
+        chatgpt_account_id: None,
     }
 }
 
@@ -1155,16 +1398,20 @@ fn delete_account_snapshot(app: &AppHandle, account_id: &str) -> Result<(), Stri
 fn account_statuses_from_settings_and_snapshots(
     settings: &AppSettings,
     snapshots: &HashMap<String, QuotaSnapshot>,
-) -> Vec<AccountQuotaStatus> {
-    account_statuses_from_settings_snapshots_and_errors(settings, snapshots, &HashMap::new())
+ ) -> Vec<AccountQuotaStatus> {
+    account_statuses_from_settings_snapshots_and_errors(
+        settings,
+        snapshots,
+        &HashMap::new(),
+    )
 }
 
 fn account_statuses_from_settings_snapshots_and_errors(
     settings: &AppSettings,
     snapshots: &HashMap<String, QuotaSnapshot>,
     errors: &HashMap<String, String>,
-) -> Vec<AccountQuotaStatus> {
-    accounts_for_status(settings)
+ ) -> Vec<AccountQuotaStatus> {
+    let mut statuses = accounts_for_status(settings)
         .into_iter()
         .map(|account| {
             account_status_from_snapshot(
@@ -1173,12 +1420,35 @@ fn account_statuses_from_settings_snapshots_and_errors(
                 errors.get(&account.account_id),
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if let Some(default_copilot_account_id) = settings.reverse_proxy.default_copilot_account_id.as_deref() {
+        let managed_account_id = managed_copilot_snapshot_id(default_copilot_account_id);
+        if let Some(snapshot) = snapshots.get(&managed_account_id) {
+            statuses.push(AccountQuotaStatus {
+                account_id: managed_account_id.clone(),
+                account_name: snapshot.account_name.clone(),
+                provider: PROVIDER_COPILOT.into(),
+                five_hour: snapshot.five_hour.clone(),
+                seven_day: snapshot.seven_day.clone(),
+                fetched_at: Some(snapshot.fetched_at),
+                source: Some(snapshot.source.clone()),
+                last_error: errors.get(&managed_account_id).cloned(),
+            });
+        }
+    }
+
+    statuses
 }
 
 fn accounts_for_status(settings: &AppSettings) -> Vec<ConnectedAccount> {
     if !settings.accounts.is_empty() {
-        return settings.accounts.clone();
+        return settings
+            .accounts
+            .iter()
+            .filter(|account| account.provider != PROVIDER_COPILOT)
+            .cloned()
+            .collect();
     }
     if !settings.secret_configured {
         return Vec::new();
@@ -1244,6 +1514,47 @@ mod tests {
         let error = ProviderError::new(ProviderErrorKind::Network, "offline");
 
         assert!(!should_force_refresh_after_probe_error(&error, false));
+    }
+
+    #[test]
+    fn managed_copilot_probe_credentials_use_github_token_semantics() {
+        let credentials = managed_copilot_probe_credentials("ghu_test_token".into());
+
+        assert_eq!(credentials.provider, PROVIDER_COPILOT);
+        assert!(matches!(credentials.auth_mode, AuthMode::ApiKey));
+        assert_eq!(credentials.secret, "ghu_test_token");
+        assert_eq!(credentials.chatgpt_account_id, None);
+    }
+
+    #[test]
+    fn reverse_proxy_settings_fall_back_to_first_openai_oauth_account() {
+        let settings = AppSettings {
+            accounts: vec![
+                ConnectedAccount {
+                    account_id: "openai-1".into(),
+                    account_name: "OpenAI 1".into(),
+                    provider: PROVIDER_OPENAI.into(),
+                    auth_mode: AuthMode::OAuth,
+                    chatgpt_account_id: Some("openai-1".into()),
+                    secret_configured: true,
+                },
+                ConnectedAccount {
+                    account_id: "openai-2".into(),
+                    account_name: "OpenAI 2".into(),
+                    provider: PROVIDER_OPENAI.into(),
+                    auth_mode: AuthMode::OAuth,
+                    chatgpt_account_id: Some("openai-2".into()),
+                    secret_configured: true,
+                },
+            ],
+            ..AppSettings::default()
+        };
+
+        let managed = openai_oauth_managed_accounts(&settings);
+        assert_eq!(
+            resolve_default_openai_reverse_account_id(&settings, &managed).as_deref(),
+            Some("openai-1")
+        );
     }
 
     #[tokio::test]
@@ -1613,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn refreshable_accounts_include_copilot_accounts() {
+    fn refreshable_accounts_exclude_legacy_copilot_accounts() {
         let settings = AppSettings {
             accounts: vec![crate::models::ConnectedAccount {
                 account_id: "copilot-work".into(),
@@ -1631,7 +1942,7 @@ mod tests {
             .map(|account| account.account_id)
             .collect::<Vec<_>>();
 
-        assert_eq!(account_ids, vec!["copilot-work"]);
+        assert!(account_ids.is_empty());
     }
 
     #[test]

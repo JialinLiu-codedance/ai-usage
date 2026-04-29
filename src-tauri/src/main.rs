@@ -1,6 +1,13 @@
+mod app_time;
+mod copilot_oauth;
 mod commands;
 mod errors;
 mod git_usage;
+mod local_proxy_error;
+mod local_proxy_sse;
+mod local_proxy_streaming_responses;
+mod local_proxy_transform_chat;
+mod local_proxy_transform_responses;
 mod local_proxy;
 mod local_usage;
 mod models;
@@ -38,6 +45,10 @@ fn main() {
         .manage(state::StateStore::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            let data_dir = storage::app_dir(&handle)?;
+            app.manage(copilot_oauth::CopilotAuthState(std::sync::Arc::new(tokio::sync::RwLock::new(
+                copilot_oauth::CopilotOAuthManager::new(data_dir),
+            ))));
             set_main_window_dock_visible(&handle, false);
             let tray_menu = build_tray_menu(&handle, &models::AppStatus::default())?;
 
@@ -145,6 +156,15 @@ fn main() {
             commands::get_local_proxy_settings,
             commands::save_local_proxy_settings,
             commands::save_claude_proxy_profile,
+            commands::get_reverse_proxy_settings,
+            commands::save_reverse_proxy_settings,
+            commands::get_reverse_proxy_status,
+            commands::copilot_start_device_flow,
+            commands::copilot_poll_for_account,
+            commands::copilot_list_accounts,
+            commands::copilot_set_default_account,
+            commands::copilot_remove_account,
+            commands::copilot_get_auth_status,
             commands::get_local_proxy_status,
             commands::start_local_proxy,
             commands::stop_local_proxy,

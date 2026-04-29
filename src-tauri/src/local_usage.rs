@@ -1,8 +1,11 @@
-use crate::models::{
+use crate::{
+    app_time,
+    models::{
     LocalTokenUsageDay, LocalTokenUsageModel, LocalTokenUsageRange, LocalTokenUsageReport,
     LocalTokenUsageTool, LocalTokenUsageTotals, CUSTOM_USAGE_WINDOW_DAYS,
+    },
 };
-use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -57,6 +60,7 @@ struct RawCodexUsage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalTokenUsageCache {
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub generated_at: DateTime<Utc>,
     pub today: LocalTokenUsageReport,
     pub last3_days: LocalTokenUsageReport,
@@ -333,7 +337,9 @@ fn build_cache_from_events(
     missing_sources: Vec<String>,
     warnings: Vec<String>,
 ) -> LocalTokenUsageCache {
-    let (custom_window_start, custom_window_end, custom_days) = build_custom_days(now, &events);
+    let offset = app_time::local_offset();
+    let (custom_window_start, custom_window_end, custom_days) =
+        build_custom_days(now, &events, offset);
     LocalTokenUsageCache {
         generated_at: now,
         today: aggregate_events(
@@ -373,11 +379,12 @@ fn build_cache_from_events(
 fn build_custom_days(
     now: DateTime<Utc>,
     events: &[LocalUsageEvent],
+    offset: FixedOffset,
 ) -> (NaiveDate, NaiveDate, Vec<LocalTokenUsageCachedDay>) {
-    let window_end = now.date_naive();
+    let window_end = app_time::local_date(now, offset);
     let window_start = window_end - Duration::days(CUSTOM_USAGE_WINDOW_DAYS - 1);
-    let start = Utc.from_utc_datetime(&window_start.and_hms_opt(0, 0, 0).unwrap());
-    let end = Utc.from_utc_datetime(&window_end.and_hms_opt(23, 59, 59).unwrap());
+    let start = app_time::local_start_of_day_utc(window_start, offset);
+    let end = app_time::local_end_of_day_utc(window_end, offset);
     let mut by_day = HashMap::<String, TokenStats>::new();
     let mut by_day_model = HashMap::<String, HashMap<String, TokenStats>>::new();
     let mut by_day_tool = HashMap::<String, HashMap<String, TokenStats>>::new();
@@ -386,10 +393,7 @@ fn build_custom_days(
         if event.timestamp < start || event.timestamp > end {
             continue;
         }
-        let date = bucket_key(
-            BucketGranularity::Day,
-            bucket_start_for_event(BucketGranularity::Day, event.timestamp),
-        );
+        let date = bucket_key(BucketGranularity::Day, event.timestamp, offset);
         add_event(by_day.entry(date.clone()).or_default(), event);
         add_event(
             by_day_model
@@ -412,7 +416,7 @@ fn build_custom_days(
     let mut days = Vec::new();
     let mut current = window_start;
     while current <= window_end {
-        let date = current.format("%Y-%m-%d").to_string();
+        let date = app_time::local_day_key(current);
         let stats = by_day.remove(&date).unwrap_or_default();
         let mut models = by_day_model
             .remove(&date)
@@ -862,21 +866,23 @@ fn aggregate_events(
     missing_sources: Vec<String>,
     warnings: Vec<String>,
 ) -> LocalTokenUsageReport {
-    let start = range_start(range, now);
+    let offset = app_time::local_offset();
+    let start = range_start(range, now, offset);
     let granularity = bucket_granularity(range);
-    let bucket_starts = range_bucket_starts(range, now);
+    let bucket_keys = range_bucket_keys(range, now, offset);
     aggregate_events_for_window(
         range,
         now,
         start,
         now,
         granularity,
-        bucket_starts,
+        bucket_keys,
         None,
         None,
         events,
         missing_sources,
         warnings,
+        offset,
     )
 }
 
@@ -888,8 +894,9 @@ fn aggregate_custom_events(
     missing_sources: Vec<String>,
     warnings: Vec<String>,
 ) -> LocalTokenUsageReport {
-    let start = Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap());
-    let inclusive_end = Utc.from_utc_datetime(&end_date.and_hms_opt(23, 59, 59).unwrap());
+    let offset = app_time::local_offset();
+    let start = app_time::local_start_of_day_utc(start_date, offset);
+    let inclusive_end = app_time::local_end_of_day_utc(end_date, offset);
     let end = if inclusive_end > now {
         now
     } else {
@@ -901,12 +908,13 @@ fn aggregate_custom_events(
         start,
         end,
         BucketGranularity::Day,
-        day_bucket_starts(start_date, end_date),
+        day_bucket_keys(start_date, end_date),
         Some(start_date.format("%Y-%m-%d").to_string()),
         Some(end_date.format("%Y-%m-%d").to_string()),
         events,
         missing_sources,
         warnings,
+        offset,
     )
 }
 
@@ -916,12 +924,13 @@ fn aggregate_events_for_window(
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
     granularity: BucketGranularity,
-    bucket_starts: Vec<DateTime<Utc>>,
+    bucket_keys: Vec<String>,
     start_date: Option<String>,
     end_date: Option<String>,
     events: Vec<LocalUsageEvent>,
     missing_sources: Vec<String>,
     warnings: Vec<String>,
+    offset: FixedOffset,
 ) -> LocalTokenUsageReport {
     let filtered = events
         .into_iter()
@@ -937,10 +946,7 @@ fn aggregate_events_for_window(
 
     for event in &filtered {
         add_event(&mut totals, event);
-        let bucket = bucket_key(
-            granularity,
-            bucket_start_for_event(granularity, event.timestamp),
-        );
+        let bucket = bucket_key(granularity, event.timestamp, offset);
         add_event(by_bucket.entry(bucket.clone()).or_default(), event);
         add_event(
             by_bucket_model
@@ -960,10 +966,9 @@ fn aggregate_events_for_window(
         sessions_seen.insert((event.tool.as_str(), event.session_id.as_str()));
     }
 
-    let days = bucket_starts
+    let days = bucket_keys
         .into_iter()
-        .map(|bucket_start| {
-            let date = bucket_key(granularity, bucket_start);
+        .map(|date| {
             let stats = by_bucket.remove(&date).unwrap_or_default();
             let mut models = by_bucket_model
                 .remove(&date)
@@ -1068,8 +1073,8 @@ fn model_usage(model: String, stats: TokenStats) -> LocalTokenUsageModel {
     }
 }
 
-fn range_start(range: LocalTokenUsageRange, now: DateTime<Utc>) -> DateTime<Utc> {
-    let today = now.date_naive();
+fn range_start(range: LocalTokenUsageRange, now: DateTime<Utc>, offset: FixedOffset) -> DateTime<Utc> {
+    let today = app_time::local_date(now, offset);
     let start_date = match range {
         LocalTokenUsageRange::Today => today,
         LocalTokenUsageRange::Last3Days => today - Duration::days(2),
@@ -1081,7 +1086,7 @@ fn range_start(range: LocalTokenUsageRange, now: DateTime<Utc>) -> DateTime<Utc>
         }
         LocalTokenUsageRange::Custom => today,
     };
-    Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
+    app_time::local_start_of_day_utc(start_date, offset)
 }
 
 fn bucket_granularity(range: LocalTokenUsageRange) -> BucketGranularity {
@@ -1094,69 +1099,65 @@ fn bucket_granularity(range: LocalTokenUsageRange) -> BucketGranularity {
     }
 }
 
-fn range_bucket_starts(range: LocalTokenUsageRange, now: DateTime<Utc>) -> Vec<DateTime<Utc>> {
-    let granularity = bucket_granularity(range);
-    let step = match granularity {
-        BucketGranularity::Day => Duration::days(1),
-        BucketGranularity::Hour => Duration::hours(1),
-        BucketGranularity::ThreeHours => Duration::hours(3),
-    };
-    let mut current = range_start(range, now);
-    let end = match range {
-        LocalTokenUsageRange::Today => current + Duration::hours(23),
-        LocalTokenUsageRange::ThisWeek => current + Duration::days(6),
-        LocalTokenUsageRange::ThisMonth => {
-            let month_end = month_end_date(now.date_naive());
-            Utc.from_utc_datetime(&month_end.and_hms_opt(0, 0, 0).unwrap())
+fn range_bucket_keys(range: LocalTokenUsageRange, now: DateTime<Utc>, offset: FixedOffset) -> Vec<String> {
+    let today = app_time::local_date(now, offset);
+    match bucket_granularity(range) {
+        BucketGranularity::Day => {
+            let start_date = match range {
+                LocalTokenUsageRange::Today => today,
+                LocalTokenUsageRange::Last3Days => today - Duration::days(2),
+                LocalTokenUsageRange::ThisWeek => {
+                    today - Duration::days(i64::from(today.weekday().num_days_from_monday()))
+                }
+                LocalTokenUsageRange::ThisMonth => {
+                    NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today)
+                }
+                LocalTokenUsageRange::Custom => today,
+            };
+            let end_date = match range {
+                LocalTokenUsageRange::ThisWeek => start_date + Duration::days(6),
+                LocalTokenUsageRange::ThisMonth => app_time::month_end_date(today),
+                _ => today,
+            };
+            day_bucket_keys(start_date, end_date)
         }
-        _ => now,
-    };
-    let mut starts = Vec::new();
-    while current <= end {
-        starts.push(current);
-        current = current + step;
+        BucketGranularity::Hour => (0..24)
+            .map(|hour| app_time::local_hour_bucket_key(today, hour, offset))
+            .collect(),
+        BucketGranularity::ThreeHours => {
+            let start_date = today - Duration::days(2);
+            let end_local = now.with_timezone(&offset);
+            let end_date = end_local.date_naive();
+            let last_hour = end_local.hour() - (end_local.hour() % 3);
+            let mut keys = Vec::new();
+            let mut current = start_date;
+            while current <= end_date {
+                let max_hour = if current == end_date { last_hour } else { 21 };
+                for hour in (0..=max_hour).step_by(3usize) {
+                    keys.push(app_time::local_hour_bucket_key(current, hour, offset));
+                }
+                current += Duration::days(1);
+            }
+            keys
+        }
     }
-    starts
 }
 
-fn month_end_date(date: NaiveDate) -> NaiveDate {
-    let (next_year, next_month) = if date.month() == 12 {
-        (date.year() + 1, 1)
-    } else {
-        (date.year(), date.month() + 1)
-    };
-    NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(date) - Duration::days(1)
-}
-
-fn day_bucket_starts(start_date: NaiveDate, end_date: NaiveDate) -> Vec<DateTime<Utc>> {
+fn day_bucket_keys(start_date: NaiveDate, end_date: NaiveDate) -> Vec<String> {
     let mut current = start_date;
-    let mut starts = Vec::new();
+    let mut keys = Vec::new();
     while current <= end_date {
-        starts.push(Utc.from_utc_datetime(&current.and_hms_opt(0, 0, 0).unwrap()));
+        keys.push(app_time::local_day_key(current));
         current = current + Duration::days(1);
     }
-    starts
+    keys
 }
 
-fn bucket_start_for_event(
-    granularity: BucketGranularity,
-    timestamp: DateTime<Utc>,
-) -> DateTime<Utc> {
-    let date = timestamp.date_naive();
-    let hour = match granularity {
-        BucketGranularity::Day => 0,
-        BucketGranularity::Hour => timestamp.hour(),
-        BucketGranularity::ThreeHours => timestamp.hour() - (timestamp.hour() % 3),
-    };
-    Utc.from_utc_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
-}
-
-fn bucket_key(granularity: BucketGranularity, timestamp: DateTime<Utc>) -> String {
+fn bucket_key(granularity: BucketGranularity, timestamp: DateTime<Utc>, offset: FixedOffset) -> String {
     match granularity {
-        BucketGranularity::Day => timestamp.date_naive().format("%Y-%m-%d").to_string(),
-        BucketGranularity::Hour | BucketGranularity::ThreeHours => {
-            timestamp.format("%Y-%m-%dT%H:00:00Z").to_string()
-        }
+        BucketGranularity::Day => app_time::local_bucket_key(timestamp, None, offset),
+        BucketGranularity::Hour => app_time::local_bucket_key(timestamp, Some(1), offset),
+        BucketGranularity::ThreeHours => app_time::local_bucket_key(timestamp, Some(3), offset),
     }
 }
 
@@ -1357,7 +1358,7 @@ impl TokenStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{Local, Offset, TimeZone};
     use std::{fs, path::Path};
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -1500,10 +1501,26 @@ mod tests {
 
     #[test]
     fn report_filters_this_month_and_calculates_cache_hit_rate() {
-        let now = chrono::Utc.with_ymd_and_hms(2026, 4, 27, 12, 0, 0).unwrap();
+        let now = local_time_utc(2026, 4, 27, 20, 0, 0);
         let events = vec![
-            usage_event("claude", "gpt-a", "2026-04-01T00:00:00Z", 70, 20, 30, 0),
-            usage_event("codex", "gpt-b", "2026-03-31T23:00:00Z", 999, 999, 999, 999),
+            usage_event(
+                "claude",
+                "gpt-a",
+                &local_timestamp_rfc3339(2026, 4, 1, 0, 0, 0),
+                70,
+                20,
+                30,
+                0,
+            ),
+            usage_event(
+                "codex",
+                "gpt-b",
+                &local_timestamp_rfc3339(2026, 3, 31, 23, 0, 0),
+                999,
+                999,
+                999,
+                999,
+            ),
         ];
 
         let report = aggregate_events(LocalTokenUsageRange::ThisMonth, now, events, vec![], vec![]);
@@ -1557,18 +1574,27 @@ mod tests {
 
     #[test]
     fn report_today_returns_hourly_buckets_for_full_day() {
-        let now = chrono::Utc.with_ymd_and_hms(2026, 4, 27, 3, 30, 0).unwrap();
+        let offset = local_offset();
+        let now = local_time_utc(2026, 4, 27, 11, 30, 0);
         let events = vec![
             usage_event(
                 "claude",
                 "claude-sonnet",
-                "2026-04-27T00:10:00Z",
+                &local_timestamp_rfc3339(2026, 4, 27, 8, 10, 0),
                 10,
                 0,
                 0,
                 0,
             ),
-            usage_event("codex", "gpt-codex", "2026-04-27T03:10:00Z", 20, 0, 0, 0),
+            usage_event(
+                "codex",
+                "gpt-codex",
+                &local_timestamp_rfc3339(2026, 4, 27, 11, 10, 0),
+                20,
+                0,
+                0,
+                0,
+            ),
         ];
 
         let report = aggregate_events(LocalTokenUsageRange::Today, now, events, vec![], vec![]);
@@ -1580,22 +1606,19 @@ mod tests {
                 .take(4)
                 .map(|day| day.date.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "2026-04-27T00:00:00Z",
-                "2026-04-27T01:00:00Z",
-                "2026-04-27T02:00:00Z",
-                "2026-04-27T03:00:00Z",
-            ]
+            (0..4)
+                .map(|hour| local_bucket_key_string(2026, 4, 27, hour, offset))
+                .collect::<Vec<_>>()
         );
         assert_eq!(report.days.len(), 24);
         assert_eq!(
             report.days.last().map(|day| day.date.as_str()),
-            Some("2026-04-27T23:00:00Z")
+            Some(local_bucket_key_string(2026, 4, 27, 23, offset).as_str())
         );
-        assert_eq!(report.days[0].models[0].model, "claude-sonnet");
-        assert!(report.days[1].models.is_empty());
-        assert!(report.days[2].models.is_empty());
-        assert_eq!(report.days[3].models[0].model, "gpt-codex");
+        assert!(report.days[7].models.is_empty());
+        assert_eq!(report.days[8].models[0].model, "claude-sonnet");
+        assert!(report.days[9].models.is_empty());
+        assert_eq!(report.days[11].models[0].model, "gpt-codex");
     }
 
     #[test]
@@ -1623,11 +1646,12 @@ mod tests {
 
     #[test]
     fn report_last_three_days_returns_three_hour_buckets() {
-        let now = chrono::Utc.with_ymd_and_hms(2026, 4, 27, 7, 30, 0).unwrap();
+        let offset = local_offset();
+        let now = local_time_utc(2026, 4, 27, 15, 30, 0);
         let events = vec![usage_event(
             "codex",
             "gpt-codex",
-            "2026-04-27T06:10:00Z",
+            &local_timestamp_rfc3339(2026, 4, 27, 14, 10, 0),
             20,
             0,
             0,
@@ -1638,29 +1662,44 @@ mod tests {
 
         assert_eq!(
             report.days.first().map(|day| day.date.as_str()),
-            Some("2026-04-25T00:00:00Z")
+            Some(local_bucket_key_string(2026, 4, 25, 0, offset).as_str())
         );
         assert_eq!(
             report.days.last().map(|day| day.date.as_str()),
-            Some("2026-04-27T06:00:00Z")
+            Some(local_bucket_key_string(2026, 4, 27, 15, offset).as_str())
         );
-        assert_eq!(report.days.len(), 19);
-        assert_eq!(report.days[18].models[0].model, "gpt-codex");
+        assert_eq!(report.days.len(), 22);
+        assert_eq!(report.days[20].models[0].model, "gpt-codex");
     }
 
     #[test]
     fn report_custom_range_returns_daily_buckets_for_inclusive_dates() {
-        let now = chrono::Utc.with_ymd_and_hms(2026, 4, 27, 7, 30, 0).unwrap();
+        let now = local_time_utc(2026, 4, 27, 15, 30, 0);
         let start = NaiveDate::from_ymd_opt(2026, 4, 20).unwrap();
-        let end = NaiveDate::from_ymd_opt(2026, 4, 22).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 4, 20).unwrap();
         let events = vec![
-            usage_event("codex", "gpt-codex", "2026-04-19T23:59:00Z", 999, 0, 0, 0),
-            usage_event("codex", "gpt-codex", "2026-04-20T00:00:00Z", 10, 0, 0, 0),
-            usage_event("kimi", "kimi-cli", "2026-04-22T23:59:00Z", 20, 0, 0, 0),
+            usage_event(
+                "codex",
+                "gpt-codex",
+                &local_timestamp_rfc3339(2026, 4, 19, 23, 30, 0),
+                999,
+                0,
+                0,
+                0,
+            ),
+            usage_event(
+                "codex",
+                "gpt-codex",
+                &local_timestamp_rfc3339(2026, 4, 20, 0, 30, 0),
+                10,
+                0,
+                0,
+                0,
+            ),
             usage_event(
                 "claude",
                 "claude-sonnet",
-                "2026-04-23T00:00:00Z",
+                &local_timestamp_rfc3339(2026, 4, 21, 0, 30, 0),
                 999,
                 0,
                 0,
@@ -1672,19 +1711,17 @@ mod tests {
 
         assert_eq!(report.range, LocalTokenUsageRange::Custom);
         assert_eq!(report.start_date.as_deref(), Some("2026-04-20"));
-        assert_eq!(report.end_date.as_deref(), Some("2026-04-22"));
-        assert_eq!(report.totals.total_tokens, 30);
+        assert_eq!(report.end_date.as_deref(), Some("2026-04-20"));
+        assert_eq!(report.totals.total_tokens, 10);
         assert_eq!(
             report
                 .days
                 .iter()
                 .map(|day| day.date.as_str())
                 .collect::<Vec<_>>(),
-            vec!["2026-04-20", "2026-04-21", "2026-04-22"]
+            vec!["2026-04-20"]
         );
         assert_eq!(report.days[0].models[0].model, "gpt-codex");
-        assert!(report.days[1].models.is_empty());
-        assert_eq!(report.days[2].models[0].model, "kimi-cli");
     }
 
     #[test]
@@ -1852,5 +1889,48 @@ mod tests {
             cache_read_tokens,
             cache_creation_tokens,
         }
+    }
+
+    fn local_offset() -> chrono::FixedOffset {
+        Local::now().offset().fix()
+    }
+
+    fn local_time_utc(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> chrono::DateTime<chrono::Utc> {
+        local_offset()
+            .with_ymd_and_hms(year, month, day, hour, minute, second)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn local_timestamp_rfc3339(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> String {
+        local_time_utc(year, month, day, hour, minute, second).to_rfc3339()
+    }
+
+    fn local_bucket_key_string(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        offset: chrono::FixedOffset,
+    ) -> String {
+        offset
+            .with_ymd_and_hms(year, month, day, hour, 0, 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:00:00%:z")
+            .to_string()
     }
 }

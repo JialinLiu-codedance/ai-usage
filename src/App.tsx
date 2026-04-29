@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import anthropicIcon from "../icons/extracted/anthropic.svg";
-import copilotIcon from "../icons/extracted/copilot.svg";
+import githubCopilotIcon from "../icons/extracted/githubcopilot.svg";
 import kimiIcon from "../icons/extracted/kimi.svg";
 import minimaxIcon from "../icons/extracted/minimax.svg";
 import openaiIcon from "../icons/extracted/openai.svg";
@@ -23,6 +23,10 @@ import qwenIcon from "../icons/extracted/qwen.svg";
 import zhipuIcon from "../icons/extracted/zhipu.svg";
 import aiUsageLogo from "../icons/ai-usage-logo.svg";
 import {
+  copilotGetAuthStatus,
+  copilotListAccounts,
+  copilotRemoveAccount,
+  copilotSetDefaultAccount,
   deleteConnectedAccount,
   ensureNotificationPermission,
   chooseGitUsageRoot,
@@ -30,6 +34,8 @@ import {
   getLocalProxySettings,
   getLocalProxyStatus,
   getLocalTokenUsage,
+  getReverseProxySettings,
+  getReverseProxyStatus,
   getSettings,
   completeAnthropicOAuth,
   completeOpenAIOAuth,
@@ -46,12 +52,25 @@ import {
   refreshLocalTokenUsage,
   saveClaudeProxyProfile,
   saveLocalProxySettings,
+  saveReverseProxySettings,
   saveSettings,
+  startCopilotOAuthDeviceFlow,
   startLocalProxy,
   startAnthropicOAuth,
   stopLocalProxy,
+  pollCopilotOAuthAccount,
   startOpenAIOAuth,
 } from "./lib/tauri";
+import {
+  connectedAccountSubtitle,
+  connectedAccounts,
+  hasConnectedAccount,
+  isManagedCopilotAccountId,
+} from "./lib/connected-accounts";
+import { copyCopilotDeviceValue } from "./lib/copilot-device-copy";
+import {
+  startCopilotDevicePolling,
+} from "./lib/copilot-device-polling";
 import {
   hasGeneratedOAuthAuthLink,
   shouldApplyOAuthStartResult,
@@ -99,13 +118,19 @@ import type {
   ClaudeAuthField,
   ClaudeProxyCapability,
   ConnectedAccount,
+  CopilotAuthStatus,
   GitUsageReport,
+  GitHubDeviceCodeResponse,
   LocalProxySettingsState,
   LocalProxyStatus,
   LocalTokenUsageReport,
   LocalTokenUsageTotals,
+  ManagedAuthAccount,
   PrKpiReport,
   QuotaWindow,
+  ReverseProxySettingsState,
+  ReverseProxyStatus,
+  SaveReverseProxySettingsInput,
   SaveSettingsInput,
   UsageRangeSelection,
 } from "./lib/types";
@@ -124,6 +149,7 @@ type OAuthProviderKey = "openai" | "anthropic";
 type SettingsTab = "quota" | "tokens" | "proxy";
 type SettingsUsageTab = "token" | "git" | "kpi";
 type ProxySubTab = "local" | "reverse";
+type ReverseManagerKind = "copilot" | "openai";
 type Tone = "success" | "warning" | "danger" | "muted";
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const PANEL_WIDTH = 420;
@@ -163,43 +189,6 @@ function errorMessage(error: unknown, fallback: string): string {
     return error;
   }
   return fallback;
-}
-
-function accountLabel(settings: AppSettings, status: AppStatus): string {
-  return status.snapshot?.account_name || settings.account_name || "OpenAI Account";
-}
-
-function hasConnectedAccount(settings: AppSettings, status: AppStatus): boolean {
-  return settings.accounts.some((account) => account.secret_configured) || settings.secret_configured || Boolean(status.snapshot);
-}
-
-function accountSubtitle(settings: AppSettings, status: AppStatus): string {
-  const label = accountLabel(settings, status);
-  return label.trim() || "OpenAI Account";
-}
-
-function connectedAccounts(settings: AppSettings, status: AppStatus): ConnectedAccount[] {
-  const configuredAccounts = settings.accounts.filter((account) => account.secret_configured);
-  if (configuredAccounts.length > 0) {
-    return configuredAccounts;
-  }
-  if (!hasConnectedAccount(settings, status)) {
-    return [];
-  }
-  return [
-    {
-      account_id: settings.account_id,
-      account_name: accountSubtitle(settings, status),
-      provider: "openai",
-      auth_mode: settings.auth_mode,
-      chatgpt_account_id: settings.chatgpt_account_id,
-      secret_configured: settings.secret_configured,
-    },
-  ];
-}
-
-function connectedAccountSubtitle(account: ConnectedAccount): string {
-  return account.account_name.trim() || defaultProviderAccountName(account.provider);
 }
 
 function quotaAccounts(settings: AppSettings, status: AppStatus): AccountQuotaStatus[] {
@@ -294,18 +283,26 @@ function proxyCapabilityStatus(capability: ClaudeProxyCapability): {
   label: string;
   tone: "ready" | "pending" | "unsupported";
 } {
-  if (!capability.is_claude_compatible_provider) {
-    return { label: "当前不支持", tone: "unsupported" };
+  switch (capability.status) {
+    case "direct_ready":
+      return { label: "可直接接入", tone: "ready" };
+    case "needs_profile":
+      return { label: "待补充", tone: "pending" };
+    case "reverse_ready":
+      return { label: "反代接入", tone: "ready" };
+    case "reverse_pending":
+      return { label: "待接入", tone: "pending" };
+    default:
+      return { label: "当前不支持", tone: "unsupported" };
   }
-  if (capability.can_direct_connect) {
-    return { label: "已接入", tone: "ready" };
-  }
-  return { label: "需补充信息", tone: "pending" };
 }
 
 function proxyCapabilityHint(capability: ClaudeProxyCapability): string {
-  if (!capability.is_claude_compatible_provider) {
+  if (capability.status === "unsupported") {
     return "当前账号类型暂不支持 Claude 调用模式";
+  }
+  if (capability.status === "reverse_pending") {
+    return "开启反向代理并完成认证后可接入";
   }
   if (capability.missing_fields.length === 0) {
     return "当前账号已具备 Claude 代理所需信息";
@@ -365,6 +362,15 @@ export default function App() {
   const oauthRequestIdRef = useRef(0);
   const [view, setView] = useState<PanelView>("overview");
   const [addAccountBackView, setAddAccountBackView] = useState<AddAccountBackView>("settings");
+  const [settingsEntryProxy, setSettingsEntryProxy] = useState<{
+    subTab: ProxySubTab;
+    manager: ReverseManagerKind | null;
+    nonce: number;
+  }>({
+    subTab: "local",
+    manager: null,
+    nonce: 0,
+  });
   const [status, setStatus] = useState<AppStatus>(emptyStatus);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loading, setLoading] = useState(true);
@@ -772,10 +778,20 @@ export default function App() {
     }
   }
 
-  async function handleDeleteConnectedAccount(accountId: string) {
+  async function handleDeleteConnectedAccount(account: ConnectedAccount) {
+    if (isManagedCopilotAccountId(account.account_id)) {
+      setSettingsEntryProxy((current) => ({
+        subTab: "reverse",
+        manager: "copilot",
+        nonce: current.nonce + 1,
+      }));
+      navigateToView("settings");
+      return;
+    }
+
     setSettingsMessage(null);
     try {
-      const nextSettings = await deleteConnectedAccount(accountId);
+      const nextSettings = await deleteConnectedAccount(account.account_id);
       applySettings(nextSettings);
       setStatus(await getCurrentQuota());
     } catch (error) {
@@ -809,10 +825,24 @@ export default function App() {
           settings={settings}
           status={status}
           message={settingsMessage}
+          entryProxySubTab={settingsEntryProxy.subTab}
+          entryReverseManagerOpen={settingsEntryProxy.manager}
+          entryProxyNonce={settingsEntryProxy.nonce}
           onChange={(nextForm) => void updateSettings(nextForm)}
           onBack={() => navigateToView("overview")}
           onAddAccount={() => openAddAccount("settings")}
+          onAddReverseOpenAIOAuth={() => openOAuthAuth("openai", null)}
+          onManagedCopilotChanged={() => handleRefresh()}
           onReauthorize={(account) => {
+            if (isManagedCopilotAccountId(account.account_id)) {
+              setSettingsEntryProxy((current) => ({
+                subTab: "reverse",
+                manager: "copilot",
+                nonce: current.nonce + 1,
+              }));
+              navigateToView("settings");
+              return;
+            }
             if (account.provider === "kimi") {
               openKimiImport(account.account_id, connectedAccountSubtitle(account));
               return;
@@ -831,7 +861,7 @@ export default function App() {
             }
             openOAuthAuth(account.provider as OAuthProviderKey, account.account_id);
           }}
-          onDeleteAccount={(accountId) => void handleDeleteConnectedAccount(accountId)}
+          onDeleteAccount={(account) => void handleDeleteConnectedAccount(account)}
         />
       ) : null}
 
@@ -858,7 +888,12 @@ export default function App() {
               return;
             }
             if (provider === "copilot") {
-              openCopilotImport(null, nextCopilotAccountName(settings));
+              setSettingsEntryProxy((current) => ({
+                subTab: "reverse",
+                manager: "copilot",
+                nonce: current.nonce + 1,
+              }));
+              navigateToView("settings");
               return;
             }
             setSettingsMessage("该平台的接入流程尚未实现");
@@ -1078,9 +1113,14 @@ function SettingsPanel({
   settings,
   status,
   message,
+  entryProxySubTab,
+  entryReverseManagerOpen,
+  entryProxyNonce,
   onChange,
   onBack,
   onAddAccount,
+  onAddReverseOpenAIOAuth,
+  onManagedCopilotChanged,
   onReauthorize,
   onDeleteAccount,
 }: {
@@ -1088,11 +1128,16 @@ function SettingsPanel({
   settings: AppSettings;
   status: AppStatus;
   message: string | null;
+  entryProxySubTab: ProxySubTab;
+  entryReverseManagerOpen: ReverseManagerKind | null;
+  entryProxyNonce: number;
   onChange: (nextForm: SaveSettingsInput) => void;
   onBack: () => void;
   onAddAccount: () => void;
+  onAddReverseOpenAIOAuth: () => void;
+  onManagedCopilotChanged: () => Promise<void>;
   onReauthorize: (account: ConnectedAccount) => void;
-  onDeleteAccount: (accountId: string) => void;
+  onDeleteAccount: (account: ConnectedAccount) => void;
 }) {
   const [thresholdDraft, setThresholdDraft] = useState(String(form.low_quota_threshold_percent));
   const [activeTab, setActiveTab] = useState<SettingsTab>("quota");
@@ -1123,6 +1168,14 @@ function SettingsPanel({
   const [proxyActionPending, setProxyActionPending] = useState(false);
   const [proxyProfileSaving, setProxyProfileSaving] = useState(false);
   const [proxyError, setProxyError] = useState<string | null>(null);
+  const [reverseSettingsState, setReverseSettingsState] = useState<ReverseProxySettingsState | null>(null);
+  const [reverseStatus, setReverseStatus] = useState<ReverseProxyStatus | null>(null);
+  const [reverseLoading, setReverseLoading] = useState(false);
+  const [reverseSaving, setReverseSaving] = useState(false);
+  const [reverseManagerOpen, setReverseManagerOpen] = useState<"copilot" | "openai" | null>(null);
+  const [copilotAuthStatus, setCopilotAuthStatus] = useState<CopilotAuthStatus | null>(null);
+  const [copilotDeviceCode, setCopilotDeviceCode] = useState<GitHubDeviceCodeResponse | null>(null);
+  const [copilotPolling, setCopilotPolling] = useState(false);
   const [proxyEditorAccountId, setProxyEditorAccountId] = useState<string | null>(null);
   const [proxyEditorBaseUrl, setProxyEditorBaseUrl] = useState("");
   const [proxyEditorApiFormat, setProxyEditorApiFormat] = useState<ClaudeApiFormat>("anthropic");
@@ -1170,21 +1223,39 @@ function SettingsPanel({
   }, [form.git_usage_root]);
 
   useEffect(() => {
+    setProxySubTab(entryProxySubTab);
+    setReverseManagerOpen(entryReverseManagerOpen);
+    if (entryProxySubTab === "reverse") {
+      setActiveTab("proxy");
+    }
+  }, [entryProxySubTab, entryReverseManagerOpen, entryProxyNonce]);
+
+  useEffect(() => {
     if (activeTab !== "proxy") {
       return undefined;
     }
 
     let cancelled = false;
     setProxyLoading(true);
+    setReverseLoading(true);
     setProxyError(null);
 
-    Promise.all([getLocalProxySettings(), getLocalProxyStatus()])
-      .then(([nextSettingsState, nextStatus]) => {
+    Promise.all([
+      getLocalProxySettings(),
+      getLocalProxyStatus(),
+      getReverseProxySettings(),
+      getReverseProxyStatus(),
+      copilotGetAuthStatus(),
+    ])
+      .then(([nextSettingsState, nextStatus, nextReverseSettings, nextReverseStatus, nextCopilotAuthStatus]) => {
         if (cancelled) {
           return;
         }
         setProxySettingsState(nextSettingsState);
         setProxyStatus(nextStatus);
+        setReverseSettingsState(nextReverseSettings);
+        setReverseStatus(nextReverseStatus);
+        setCopilotAuthStatus(nextCopilotAuthStatus);
       })
       .catch((error) => {
         if (!cancelled) {
@@ -1194,6 +1265,7 @@ function SettingsPanel({
       .finally(() => {
         if (!cancelled) {
           setProxyLoading(false);
+          setReverseLoading(false);
         }
       });
 
@@ -1227,6 +1299,16 @@ function SettingsPanel({
       window.clearInterval(intervalId);
     };
   }, [activeTab, proxySubTab, proxyStatus?.running]);
+
+  useEffect(() => {
+    if (!copilotPolling || !copilotDeviceCode) {
+      return undefined;
+    }
+
+    return startCopilotDevicePolling(copilotDeviceCode.interval, () => {
+      void handleCopilotPollOnce(copilotDeviceCode.device_code);
+    });
+  }, [copilotPolling, copilotDeviceCode]);
 
   useEffect(() => {
     if (activeTab !== "tokens" || activeUsageTab !== "token") {
@@ -1501,9 +1583,19 @@ function SettingsPanel({
   }
 
   async function reloadProxyState() {
-    const [nextSettingsState, nextStatus] = await Promise.all([getLocalProxySettings(), getLocalProxyStatus()]);
+    const [nextSettingsState, nextStatus, nextReverseSettings, nextReverseStatus, nextCopilotAuthStatus] =
+      await Promise.all([
+        getLocalProxySettings(),
+        getLocalProxyStatus(),
+        getReverseProxySettings(),
+        getReverseProxyStatus(),
+        copilotGetAuthStatus(),
+      ]);
     setProxySettingsState(nextSettingsState);
     setProxyStatus(nextStatus);
+    setReverseSettingsState(nextReverseSettings);
+    setReverseStatus(nextReverseStatus);
+    setCopilotAuthStatus(nextCopilotAuthStatus);
   }
 
   async function persistProxyConfig(nextConfig: LocalProxySettingsState["config"]) {
@@ -1649,6 +1741,111 @@ function SettingsPanel({
     }
   }
 
+  async function persistReverseProxySettings(nextInput: SaveReverseProxySettingsInput) {
+    setReverseSaving(true);
+    setProxyError(null);
+    try {
+      const nextSettings = await saveReverseProxySettings(nextInput);
+      setReverseSettingsState(nextSettings);
+      setReverseStatus(await getReverseProxyStatus());
+      setProxySettingsState(await getLocalProxySettings());
+    } catch (error) {
+      setProxyError(errorMessage(error, "反向代理设置保存失败"));
+    } finally {
+      setReverseSaving(false);
+    }
+  }
+
+  async function handleReverseProxyToggle(checked: boolean) {
+    if (!reverseSettingsState) {
+      return;
+    }
+    await persistReverseProxySettings({
+      enabled: checked,
+      default_copilot_account_id: reverseSettingsState.default_copilot_account_id,
+      default_openai_account_id: reverseSettingsState.default_openai_account_id,
+    });
+  }
+
+  async function handleReverseSetDefault(kind: "copilot" | "openai", accountId: string) {
+    if (kind === "copilot") {
+      await copilotSetDefaultAccount(accountId);
+    }
+    await persistReverseProxySettings({
+      enabled: reverseSettingsState?.enabled ?? false,
+      default_copilot_account_id:
+        kind === "copilot" ? accountId : reverseSettingsState?.default_copilot_account_id ?? null,
+      default_openai_account_id:
+        kind === "openai" ? accountId : reverseSettingsState?.default_openai_account_id ?? null,
+    });
+    if (kind === "copilot") {
+      await onManagedCopilotChanged();
+    }
+  }
+
+  async function handleCopilotAddAccount() {
+    setProxyError(null);
+    setCopilotPolling(false);
+    try {
+      const deviceCode = await startCopilotOAuthDeviceFlow();
+      setCopilotDeviceCode(deviceCode);
+      setCopilotPolling(true);
+    } catch (error) {
+      setProxyError(errorMessage(error, "启动 Copilot OAuth 失败"));
+    }
+  }
+
+  async function handleCopilotPollOnce(deviceCode = copilotDeviceCode?.device_code ?? null) {
+    if (!deviceCode) {
+      return;
+    }
+    try {
+      const account = await pollCopilotOAuthAccount(deviceCode);
+      if (account) {
+        setCopilotPolling(false);
+        setCopilotDeviceCode(null);
+        await reloadProxyState();
+        await onManagedCopilotChanged();
+      }
+    } catch (error) {
+      setCopilotPolling(false);
+      setProxyError(errorMessage(error, "Copilot OAuth 认证失败"));
+    }
+  }
+
+  async function handleCopilotRemoveAccount(accountId: string) {
+    setProxyError(null);
+    try {
+      const removingDefault = reverseSettingsState?.default_copilot_account_id === accountId;
+      await copilotRemoveAccount(accountId);
+      if (removingDefault) {
+        const remainingAccounts = await copilotListAccounts();
+        await persistReverseProxySettings({
+          enabled: reverseSettingsState?.enabled ?? false,
+          default_copilot_account_id: remainingAccounts[0]?.id ?? null,
+          default_openai_account_id: reverseSettingsState?.default_openai_account_id ?? null,
+        });
+      } else {
+        await reloadProxyState();
+      }
+      await onManagedCopilotChanged();
+    } catch (error) {
+      setProxyError(errorMessage(error, "移除 Copilot 账号失败"));
+    }
+  }
+
+  async function handleCopyCopilotDeviceValue(target: "user_code" | "verification_uri") {
+    if (!copilotDeviceCode) {
+      return;
+    }
+    try {
+      setProxyError(null);
+      await copyCopilotDeviceValue(navigator.clipboard, copilotDeviceCode, target);
+    } catch (error) {
+      setProxyError(errorMessage(error, "复制失败"));
+    }
+  }
+
   function handleUsageRangeChange(option: UsageRangeOption) {
     setUsageRangeUiState((current) => selectUsageRangeOption(current, option));
   }
@@ -1766,7 +1963,9 @@ function SettingsPanel({
                     className="account-action-button"
                     onClick={() => onReauthorize(account)}
                   >
-                    {account.provider === "kimi"
+                    {isManagedCopilotAccountId(account.account_id)
+                      ? "管理授权"
+                      : account.provider === "kimi"
                       ? "重新导入"
                       : account.provider === "copilot"
                         ? "更新 Token"
@@ -1775,9 +1974,11 @@ function SettingsPanel({
                         : "重新授权"}
                   </Button>
                 ) : null}
-                <Button className="account-delete-button" onClick={() => onDeleteAccount(account.account_id)}>
-                  删除
-                </Button>
+                {!isManagedCopilotAccountId(account.account_id) ? (
+                  <Button className="account-delete-button" onClick={() => onDeleteAccount(account)}>
+                    删除
+                  </Button>
+                ) : null}
               </div>
             </Card>
           ))
@@ -1897,11 +2098,19 @@ function SettingsPanel({
           proxySubTab={proxySubTab}
           settingsState={proxySettingsState}
           status={proxyStatus}
+          reverseSettingsState={reverseSettingsState}
+          reverseStatus={reverseStatus}
           loading={proxyLoading}
+          reverseLoading={reverseLoading}
           saving={proxySaving}
+          reverseSaving={reverseSaving}
           actionPending={proxyActionPending}
           profileSaving={proxyProfileSaving}
           error={proxyError}
+          reverseManagerOpen={reverseManagerOpen}
+          copilotAuthStatus={copilotAuthStatus}
+          copilotDeviceCode={copilotDeviceCode}
+          copilotPolling={copilotPolling}
           editingAccountId={proxyEditorAccountId}
           editingBaseUrl={proxyEditorBaseUrl}
           editingApiFormat={proxyEditorApiFormat}
@@ -1915,10 +2124,18 @@ function SettingsPanel({
           onConfigChange={updateProxyConfig}
           onConfigCommit={persistProxyConfig}
           onToggle={handleProxyToggle}
+          onReverseToggle={handleReverseProxyToggle}
           onAddRoute={() => openProxyRouteEditor(null)}
           onDeleteRoute={handleProxyDeleteRoute}
           onOpenProfileEditor={openProxyProfileEditor}
           onOpenRouteEditor={openProxyRouteEditor}
+          onOpenReverseManager={setReverseManagerOpen}
+          onCloseReverseManager={() => setReverseManagerOpen(null)}
+          onReverseSetDefault={handleReverseSetDefault}
+          onCopilotAddAccount={handleCopilotAddAccount}
+          onCopilotRemoveAccount={handleCopilotRemoveAccount}
+          onCopyCopilotDeviceValue={handleCopyCopilotDeviceValue}
+          onOpenAIOAuthAccount={onAddReverseOpenAIOAuth}
           onCloseProfileEditor={() => setProxyEditorAccountId(null)}
           onEditingBaseUrlChange={setProxyEditorBaseUrl}
           onEditingApiFormatChange={setProxyEditorApiFormat}
@@ -2616,11 +2833,19 @@ function LocalProxyPanel({
   proxySubTab,
   settingsState,
   status,
+  reverseSettingsState,
+  reverseStatus,
   loading,
+  reverseLoading,
   saving,
+  reverseSaving,
   actionPending,
   profileSaving,
   error,
+  reverseManagerOpen,
+  copilotAuthStatus,
+  copilotDeviceCode,
+  copilotPolling,
   editingAccountId,
   editingBaseUrl,
   editingApiFormat,
@@ -2634,10 +2859,18 @@ function LocalProxyPanel({
   onConfigChange,
   onConfigCommit,
   onToggle,
+  onReverseToggle,
   onAddRoute,
   onDeleteRoute,
   onOpenProfileEditor,
   onOpenRouteEditor,
+  onOpenReverseManager,
+  onCloseReverseManager,
+  onReverseSetDefault,
+  onCopilotAddAccount,
+  onCopilotRemoveAccount,
+  onCopyCopilotDeviceValue,
+  onOpenAIOAuthAccount,
   onCloseProfileEditor,
   onEditingBaseUrlChange,
   onEditingApiFormatChange,
@@ -2653,11 +2886,19 @@ function LocalProxyPanel({
   proxySubTab: ProxySubTab;
   settingsState: LocalProxySettingsState | null;
   status: LocalProxyStatus | null;
+  reverseSettingsState: ReverseProxySettingsState | null;
+  reverseStatus: ReverseProxyStatus | null;
   loading: boolean;
+  reverseLoading: boolean;
   saving: boolean;
+  reverseSaving: boolean;
   actionPending: boolean;
   profileSaving: boolean;
   error: string | null;
+  reverseManagerOpen: "copilot" | "openai" | null;
+  copilotAuthStatus: CopilotAuthStatus | null;
+  copilotDeviceCode: GitHubDeviceCodeResponse | null;
+  copilotPolling: boolean;
   editingAccountId: string | null;
   editingBaseUrl: string;
   editingApiFormat: ClaudeApiFormat;
@@ -2671,10 +2912,18 @@ function LocalProxyPanel({
   onConfigChange: (config: LocalProxySettingsState["config"]) => void;
   onConfigCommit: (config: LocalProxySettingsState["config"]) => Promise<void>;
   onToggle: (checked: boolean) => Promise<void>;
+  onReverseToggle: (checked: boolean) => Promise<void>;
   onAddRoute: () => void;
   onDeleteRoute: (routeId: string) => Promise<void>;
   onOpenProfileEditor: (capability: ClaudeProxyCapability) => void;
   onOpenRouteEditor: (routeId: string | null) => void;
+  onOpenReverseManager: (kind: "copilot" | "openai") => void;
+  onCloseReverseManager: () => void;
+  onReverseSetDefault: (kind: "copilot" | "openai", accountId: string) => Promise<void>;
+  onCopilotAddAccount: () => Promise<void>;
+  onCopilotRemoveAccount: (accountId: string) => Promise<void>;
+  onCopyCopilotDeviceValue: (target: "user_code" | "verification_uri") => Promise<void>;
+  onOpenAIOAuthAccount: () => void;
   onCloseProfileEditor: () => void;
   onEditingBaseUrlChange: (value: string) => void;
   onEditingApiFormatChange: (value: ClaudeApiFormat) => void;
@@ -2691,6 +2940,14 @@ function LocalProxyPanel({
     editingAccountId && settingsState
       ? settingsState.capabilities.find((capability) => capability.account_id === editingAccountId) ?? null
       : null;
+  const reverseManagerAccounts =
+    reverseManagerOpen === "copilot"
+      ? reverseSettingsState?.copilot_accounts ?? []
+      : reverseSettingsState?.openai_accounts ?? [];
+  const reverseDefaultAccountId =
+    reverseManagerOpen === "copilot"
+      ? reverseSettingsState?.default_copilot_account_id ?? null
+      : reverseSettingsState?.default_openai_account_id ?? null;
 
   return (
     <section className="local-proxy-panel">
@@ -2715,10 +2972,109 @@ function LocalProxyPanel({
       {loading && !settingsState ? <div className="token-loading">读取代理配置...</div> : null}
 
       {proxySubTab === "reverse" ? (
-        <section className="token-card proxy-placeholder-card">
-          <h2>反向代理</h2>
-          <p>一期仅保留入口，当前版本暂不实现反向代理能力。</p>
-        </section>
+        <>
+          <section className="token-card proxy-master-card">
+            <div className="proxy-master-row">
+              <div>
+                <h2>反向代理</h2>
+                <div className={`proxy-status-text ${reverseStatus?.enabled ? "proxy-status-ready" : "proxy-status-pending"}`}>
+                  {reverseStatus?.enabled ? "已启用" : "已停用"}
+                </div>
+              </div>
+              <Switch
+                aria-label="反向代理开关"
+                className="settings-switch"
+                size="panel"
+                checked={Boolean(reverseStatus?.enabled)}
+                disabled={reverseSaving}
+                onCheckedChange={(checked) => void onReverseToggle(checked)}
+              />
+            </div>
+          </section>
+
+          {reverseStatus?.enabled && !status?.running ? (
+            <section className="token-card proxy-placeholder-card">
+              <h2>本地代理未启动</h2>
+              <p>Claude Code 当前访问的是 `127.0.0.1:16555`。仅启用反向代理还不够，还需要在“本地代理”子页把本地代理服务启动起来。</p>
+            </section>
+          ) : null}
+
+          {reverseLoading && !reverseSettingsState ? <div className="token-loading">读取反向代理状态...</div> : null}
+
+          {reverseSettingsState ? (
+            <>
+              <section className="token-card proxy-model-config-card">
+                <h2>GitHub Copilot</h2>
+                <div className="proxy-capability-list">
+                  {(reverseSettingsState.copilot_accounts.length > 0
+                    ? reverseSettingsState.copilot_accounts
+                    : [
+                        {
+                          id: "empty",
+                          login: "暂无已授权账号",
+                          avatar_url: null,
+                          authenticated_at: 0,
+                          domain: "github.com",
+                        },
+                      ]
+                  ).map((account) => (
+                    <button
+                      key={account.id}
+                      type="button"
+                      className="proxy-capability-row proxy-capability-row-actionable"
+                      onClick={() => onOpenReverseManager("copilot")}
+                    >
+                      <div className="proxy-capability-copy proxy-capability-copy-compact">
+                        <span className="proxy-capability-logo">
+                          <ProviderIcon icon={githubCopilotIcon} />
+                        </span>
+                        <span>{account.login}</span>
+                      </div>
+                      <span className="proxy-capability-badge proxy-capability-badge-ready">
+                        {account.id === "empty" ? "待接入" : "已授权"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="token-card proxy-model-config-card">
+                <h2>ChatGPT (Codex OAuth)</h2>
+                <div className="proxy-capability-list">
+                  {(reverseSettingsState.openai_accounts.length > 0
+                    ? reverseSettingsState.openai_accounts
+                    : [
+                        {
+                          id: "empty",
+                          login: "暂无已授权账号",
+                          avatar_url: null,
+                          authenticated_at: 0,
+                          domain: null,
+                        },
+                      ]
+                  ).map((account) => (
+                    <button
+                      key={account.id}
+                      type="button"
+                      className="proxy-capability-row proxy-capability-row-actionable"
+                      onClick={() => onOpenReverseManager("openai")}
+                    >
+                      <div className="proxy-capability-copy proxy-capability-copy-compact">
+                        <span className="proxy-capability-logo">
+                          <ProviderIcon {...providerIconConfig("openai")} />
+                        </span>
+                        <span>{account.login}</span>
+                      </div>
+                      <span className="proxy-capability-badge proxy-capability-badge-ready">
+                        {account.id === "empty" ? "待接入" : "已授权"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </>
+          ) : null}
+        </>
       ) : null}
 
       {proxySubTab === "local" && settingsState ? (
@@ -2764,13 +3120,8 @@ function LocalProxyPanel({
                   <span>地址</span>
                   <input
                     value={settingsState.config.listen_address}
-                    onChange={(event) =>
-                      onConfigChange({
-                        ...settingsState.config,
-                        listen_address: event.target.value,
-                      })
-                    }
-                    onBlur={() => void onConfigCommit(settingsState.config)}
+                    readOnly
+                    aria-readonly="true"
                   />
                 </label>
                 <label>
@@ -2789,7 +3140,7 @@ function LocalProxyPanel({
                 </label>
               </div>
             )}
-            <p className="auth-muted">修改地址或端口后需要重启代理服务才能生效</p>
+            <p className="auth-muted">地址当前不可修改，修改端口后需要重启代理服务才能生效</p>
             {saving ? <div className="proxy-saving-note">保存中...</div> : null}
           </section>
 
@@ -2802,8 +3153,14 @@ function LocalProxyPanel({
                   <button
                     key={capability.account_id}
                     type="button"
-                    className={`proxy-capability-row ${capability.is_claude_compatible_provider ? "proxy-capability-row-actionable" : ""}`}
+                    className={`proxy-capability-row ${capability.status !== "unsupported" ? "proxy-capability-row-actionable" : ""}`}
                     onClick={() => {
+                      if (capability.kind === "reverse_copilot" || capability.kind === "reverse_openai") {
+                        if (capability.status === "reverse_pending") {
+                          onSubTabChange("reverse");
+                        }
+                        return;
+                      }
                       if (capability.is_claude_compatible_provider) {
                         onOpenProfileEditor(capability);
                       }
@@ -3004,7 +3361,11 @@ function LocalProxyPanel({
                 </SelectTrigger>
                 <SelectContent>
                   {settingsState.capabilities
-                    .filter((capability) => capability.is_claude_compatible_provider)
+                    .filter(
+                      (capability) =>
+                        capability.status === "direct_ready" ||
+                        (capability.status === "reverse_ready" && capability.account_id.startsWith("reverse:")),
+                    )
                     .map((capability) => {
                       const state = proxyCapabilityStatus(capability);
                       return (
@@ -3030,6 +3391,108 @@ function LocalProxyPanel({
                 保存
               </Button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {reverseManagerOpen ? (
+        <div className="proxy-profile-modal-backdrop" role="presentation" onClick={onCloseReverseManager}>
+          <div className="proxy-profile-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="proxy-card-header">
+              <div>
+                <h2>{reverseManagerOpen === "copilot" ? "GitHub Copilot" : "ChatGPT (Codex OAuth)"}</h2>
+                <p className="auth-muted">管理默认账号与已授权来源</p>
+              </div>
+              <Button type="button" variant="ghost" size="sm" onClick={onCloseReverseManager}>
+                关闭
+              </Button>
+            </div>
+
+            <div className="proxy-capability-list">
+              {reverseManagerAccounts.map((account) => (
+                <div key={account.id} className="proxy-capability-row">
+                    <div className="proxy-capability-copy proxy-capability-copy-compact">
+                      <span className="proxy-capability-logo">
+                        {reverseManagerOpen === "copilot" ? (
+                          <ProviderIcon icon={githubCopilotIcon} />
+                        ) : (
+                          <ProviderIcon {...providerIconConfig("openai")} />
+                        )}
+                      </span>
+                      <span>{account.login}</span>
+                    </div>
+                  <div className="proxy-manager-actions">
+                    {reverseDefaultAccountId === account.id ? (
+                      <span className="proxy-capability-badge proxy-capability-badge-ready">默认</span>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void onReverseSetDefault(reverseManagerOpen, account.id)}
+                      >
+                        设为默认
+                      </Button>
+                    )}
+                    {reverseManagerOpen === "copilot" ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => void onCopilotRemoveAccount(account.id)}
+                      >
+                        <Trash2 />
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {reverseManagerOpen === "copilot" ? (
+              <>
+                <Button type="button" variant="secondary" onClick={() => void onCopilotAddAccount()}>
+                  <Plus data-icon="inline-start" />
+                  添加其他账号
+                </Button>
+                {copilotDeviceCode ? (
+                  <div className="proxy-device-flow-card">
+                    <div className="proxy-device-flow-row">
+                      <div className="proxy-device-code">{copilotDeviceCode.user_code}</div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon-sm"
+                        className="proxy-device-copy-button"
+                        aria-label="复制设备码"
+                        onClick={() => void onCopyCopilotDeviceValue("user_code")}
+                      >
+                        <Copy />
+                      </Button>
+                    </div>
+                    <div className="proxy-device-flow-row">
+                      <div className="auth-muted proxy-device-flow-text">{copilotDeviceCode.verification_uri}</div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon-sm"
+                        className="proxy-device-copy-button"
+                        aria-label="复制授权链接"
+                        onClick={() => void onCopyCopilotDeviceValue("verification_uri")}
+                      >
+                        <Copy />
+                      </Button>
+                    </div>
+                    <div className="auth-muted">{copilotPolling ? "等待授权中..." : "等待下一次轮询"}</div>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <Button type="button" variant="secondary" onClick={onOpenAIOAuthAccount}>
+                <Plus data-icon="inline-start" />
+                添加其他账号
+              </Button>
+            )}
           </div>
         </div>
       ) : null}
@@ -3560,7 +4023,7 @@ const providers: Array<{
 }> = [
   { key: "openai", name: "OpenAI", method: "OAuth", icon: openaiIcon },
   { key: "anthropic", name: "Anthropic", method: "OAuth", icon: anthropicIcon },
-  { key: "copilot", name: "Copilot", method: "GitHub Token", icon: copilotIcon },
+  { key: "copilot", name: "Copilot", method: "OAuth", icon: githubCopilotIcon },
   { key: "kimi", name: "Kimi", method: "Kimi CLI", icon: kimiIcon },
   { key: "glm", name: "GLM", method: "API Key", icon: zhipuIcon, iconMode: "mask" },
   { key: "minimax", name: "MiniMax", method: "API Key", icon: minimaxIcon },

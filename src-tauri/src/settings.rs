@@ -2,8 +2,9 @@ use crate::{
     models::{
         default_account_id, default_git_usage_root, AppSettings, AuthMode, ClaudeProxyProfileInput,
         ClaudeProxyProfileSettings, ClaudeProxyProfileSummary, ClaudeProxyConfig, ConnectedAccount,
-        SaveLocalProxySettingsInput, SaveSettingsInput, PROVIDER_COPILOT, PROVIDER_GLM,
-        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        ReverseProxyConfig, SaveLocalProxySettingsInput, SaveReverseProxySettingsInput,
+        SaveSettingsInput, PROVIDER_COPILOT, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX,
+        PROVIDER_OPENAI,
     },
     secrets, storage,
 };
@@ -60,6 +61,15 @@ pub fn save_local_proxy_settings(
 ) -> Result<AppSettings, String> {
     let mut settings = load_settings(app)?;
     settings.claude_proxy = sanitize_claude_proxy_config(input.config);
+    write_settings(app, &settings)
+}
+
+pub fn save_reverse_proxy_settings(
+    app: &AppHandle,
+    input: SaveReverseProxySettingsInput,
+) -> Result<AppSettings, String> {
+    let mut settings = load_settings(app)?;
+    settings.reverse_proxy = sanitize_reverse_proxy_config(input);
     write_settings(app, &settings)
 }
 
@@ -131,6 +141,7 @@ fn settings_from_save_input(existing: AppSettings, input: SaveSettingsInput) -> 
         git_usage_root: sanitize_git_usage_root(input.git_usage_root),
         claude_proxy: existing.claude_proxy,
         claude_proxy_profiles: existing.claude_proxy_profiles,
+        reverse_proxy: existing.reverse_proxy,
         secret_configured: false,
     }
 }
@@ -559,6 +570,14 @@ fn sanitize_claude_proxy_config(input: ClaudeProxyConfig) -> ClaudeProxyConfig {
         listen_address,
         listen_port,
         routes,
+    }
+}
+
+fn sanitize_reverse_proxy_config(input: SaveReverseProxySettingsInput) -> ReverseProxyConfig {
+    ReverseProxyConfig {
+        enabled: input.enabled,
+        default_openai_account_id: sanitize_optional(input.default_openai_account_id),
+        default_copilot_account_id: sanitize_optional(input.default_copilot_account_id),
     }
 }
 

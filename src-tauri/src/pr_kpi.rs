@@ -1,11 +1,12 @@
 use crate::{
+    app_time,
     git_usage,
     models::{
         GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport, PrKpiMetric, PrKpiMetricKey,
         PrKpiOverview, PrKpiReport, CUSTOM_USAGE_WINDOW_DAYS,
     },
 };
-use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use reqwest::{
     blocking::Client,
     header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT},
@@ -28,6 +29,7 @@ const GITHUB_USER_AGENT: &str = "ai-usage-pr-kpi/0.1";
 pub struct PrKpiCache {
     #[serde(default)]
     pub root_path: String,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub generated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_login: Option<String>,
@@ -49,7 +51,9 @@ pub struct PrKpiPullRequestRecord {
     pub repository_name: String,
     pub repository_path: String,
     pub number: u64,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
     pub merged_at: DateTime<Utc>,
     pub review_comments: u64,
     pub additions: u64,
@@ -156,8 +160,9 @@ impl PrKpiCache {
         end_date: NaiveDate,
         overview: PrKpiOverview,
     ) -> PrKpiReport {
-        let start = Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap());
-        let end = Utc.from_utc_datetime(&end_date.and_hms_opt(23, 59, 59).unwrap());
+        let offset = app_time::local_offset();
+        let start = app_time::local_start_of_day_utc(start_date, offset);
+        let end = app_time::local_end_of_day_utc(end_date, offset);
         build_report(
             &self.pull_requests,
             LocalTokenUsageRange::Custom,
@@ -176,7 +181,8 @@ impl PrKpiCache {
 
 pub fn build_cache(root: PathBuf, github_token: Option<String>) -> Result<PrKpiCache, String> {
     let now = Utc::now();
-    let window_end = now.date_naive();
+    let offset = app_time::local_offset();
+    let window_end = app_time::local_date(now, offset);
     let window_start = window_end - Duration::days(CUSTOM_USAGE_WINDOW_DAYS - 1);
     let root_path = root.to_string_lossy().to_string();
     let repositories = git_usage::discover_git_repositories(&root)
@@ -323,11 +329,12 @@ pub fn pending_custom_report(
     warning: Option<String>,
 ) -> PrKpiReport {
     let now = Utc::now();
+    let offset = app_time::local_offset();
     let mut report = build_report(
         &[],
         LocalTokenUsageRange::Custom,
-        Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap()),
-        Utc.from_utc_datetime(&end_date.and_hms_opt(23, 59, 59).unwrap()),
+        app_time::local_start_of_day_utc(start_date, offset),
+        app_time::local_end_of_day_utc(end_date, offset),
         (end_date - start_date).num_days() + 1,
         Some(start_date.format("%Y-%m-%d").to_string()),
         Some(end_date.format("%Y-%m-%d").to_string()),
@@ -758,10 +765,12 @@ fn search_repository_pull_request_numbers(
     window_start: NaiveDate,
     window_end: NaiveDate,
 ) -> Result<Vec<u64>, String> {
+    let search_start = window_start - Duration::days(1);
+    let search_end = window_end + Duration::days(1);
     let query = format!(
         "repo:{owner}/{repository} is:pr is:merged author:{login} merged:{}..{}",
-        window_start.format("%Y-%m-%d"),
-        window_end.format("%Y-%m-%d")
+        search_start.format("%Y-%m-%d"),
+        search_end.format("%Y-%m-%d")
     );
     let mut page = 1;
     let mut numbers = Vec::new();
@@ -1190,7 +1199,8 @@ fn git_output(repository: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn range_window(range: LocalTokenUsageRange, now: DateTime<Utc>) -> DateRangeWindow {
-    let today = now.date_naive();
+    let offset = app_time::local_offset();
+    let today = app_time::local_date(now, offset);
     let start_date = match range {
         LocalTokenUsageRange::Today => today,
         LocalTokenUsageRange::Last3Days => today - Duration::days(2),
@@ -1203,7 +1213,7 @@ fn range_window(range: LocalTokenUsageRange, now: DateTime<Utc>) -> DateRangeWin
         LocalTokenUsageRange::Custom => today,
     };
     DateRangeWindow {
-        start: Utc.from_utc_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap()),
+        start: app_time::local_start_of_day_utc(start_date, offset),
         end: now,
         inclusive_days: (today - start_date).num_days() + 1,
     }
@@ -1227,6 +1237,7 @@ fn unique_sorted_strings(values: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Local, Offset, TimeZone};
     use std::{fs, path::PathBuf};
 
     fn sample_record(
@@ -1296,6 +1307,35 @@ mod tests {
         );
     }
 
+    fn local_offset() -> chrono::FixedOffset {
+        Local::now().offset().fix()
+    }
+
+    fn local_time_utc(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> chrono::DateTime<Utc> {
+        local_offset()
+            .with_ymd_and_hms(year, month, day, hour, minute, second)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn local_timestamp_rfc3339(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> String {
+        local_time_utc(year, month, day, hour, minute, second).to_rfc3339()
+    }
+
     #[test]
     fn build_report_scores_metrics_and_warns_on_partial_local_stability() {
         let cache = PrKpiCache {
@@ -1358,6 +1398,56 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("1/2 个可本地分析的 PR")));
+    }
+
+    #[test]
+    fn custom_report_filters_pull_requests_by_local_day_boundaries() {
+        let cache = PrKpiCache {
+            root_path: "/tmp/workspace".into(),
+            generated_at: local_time_utc(2026, 4, 28, 15, 30, 0),
+            github_login: Some("octocat".into()),
+            custom_window_start: Some(NaiveDate::from_ymd_opt(2026, 1, 30).unwrap()),
+            custom_window_end: Some(NaiveDate::from_ymd_opt(2026, 4, 28).unwrap()),
+            pull_requests: vec![
+                sample_record(
+                    &local_timestamp_rfc3339(2026, 4, 19, 22, 0, 0),
+                    &local_timestamp_rfc3339(2026, 4, 20, 0, 30, 0),
+                    1,
+                    100,
+                    20,
+                    None,
+                ),
+                sample_record(
+                    &local_timestamp_rfc3339(2026, 4, 20, 12, 0, 0),
+                    &local_timestamp_rfc3339(2026, 4, 19, 23, 30, 0),
+                    2,
+                    40,
+                    5,
+                    None,
+                ),
+            ],
+            missing_sources: vec![],
+            warnings: vec![],
+        };
+
+        let report = cache.custom_report(
+            NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+            PrKpiOverview::default(),
+        );
+
+        let cycle_time = report
+            .metrics
+            .iter()
+            .find(|metric| metric.key == PrKpiMetricKey::CycleTimeAi)
+            .unwrap();
+        assert_eq!(cycle_time.raw_value, Some(2.5));
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("暂无已合入 PR"))
+        );
     }
 
     #[test]
