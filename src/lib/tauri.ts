@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AccountQuotaStatus,
+  AppUpdateDownloadEvent,
+  AppUpdateInfo,
   AppSettings,
   AppStatus,
   ClaudeApiFormat,
@@ -555,6 +557,70 @@ export async function ensureNotificationPermission(): Promise<boolean> {
   }
 
   return (await requestPermission()) === "granted";
+}
+
+export async function notificationPermissionGranted(): Promise<boolean> {
+  if (!isTauriRuntime) {
+    return false;
+  }
+
+  const { isPermissionGranted } = await import("@tauri-apps/plugin-notification");
+  return isPermissionGranted();
+}
+
+export async function sendDesktopNotification(title: string, body: string): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+
+  const { sendNotification } = await import("@tauri-apps/plugin-notification");
+  sendNotification({ title, body });
+}
+
+export async function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
+  if (!isTauriRuntime) {
+    return null;
+  }
+
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const update = await check();
+  if (!update) {
+    return null;
+  }
+
+  return {
+    version: update.version,
+    currentVersion: update.currentVersion,
+    body: typeof update.body === "string" && update.body.trim() ? update.body.trim() : null,
+    date: typeof update.date === "string" && update.date.trim() ? update.date : null,
+  };
+}
+
+export async function installAppUpdate(
+  onEvent?: (event: AppUpdateDownloadEvent) => void,
+): Promise<void> {
+  if (!isTauriRuntime) {
+    throw new Error("更新只在桌面应用中可用");
+  }
+
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const update = await check();
+  if (!update) {
+    throw new Error("当前已是最新版本");
+  }
+
+  await update.downloadAndInstall((event) => {
+    onEvent?.(event as AppUpdateDownloadEvent);
+  });
+}
+
+export async function relaunchApp(): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+
+  const { relaunch } = await import("@tauri-apps/plugin-process");
+  await relaunch();
 }
 
 export async function importKimiAccount(accountName?: string | null, accountId?: string | null): Promise<AppSettings> {

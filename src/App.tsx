@@ -23,6 +23,7 @@ import qwenIcon from "../icons/extracted/qwen.svg";
 import zhipuIcon from "../icons/extracted/zhipu.svg";
 import aiUsageLogo from "../icons/ai-usage-logo.svg";
 import {
+  checkForAppUpdate,
   copilotGetAuthStatus,
   copilotListAccounts,
   copilotRemoveAccount,
@@ -31,6 +32,7 @@ import {
   ensureNotificationPermission,
   chooseGitUsageRoot,
   getCurrentQuota,
+  installAppUpdate,
   getLocalProxySettings,
   getLocalProxyStatus,
   getLocalTokenUsage,
@@ -50,14 +52,17 @@ import {
   refreshQuota,
   refreshGitUsage,
   refreshLocalTokenUsage,
+  relaunchApp,
   saveClaudeProxyProfile,
   saveLocalProxySettings,
   saveReverseProxySettings,
   saveSettings,
+  sendDesktopNotification,
   startCopilotOAuthDeviceFlow,
   startLocalProxy,
   startAnthropicOAuth,
   stopLocalProxy,
+  notificationPermissionGranted,
   pollCopilotOAuthAccount,
   startOpenAIOAuth,
 } from "./lib/tauri";
@@ -112,6 +117,7 @@ import {
 import type { UsageRangeOption } from "./lib/usage-range";
 import type {
   AccountQuotaStatus,
+  AppUpdateInfo,
   AppSettings,
   AppStatus,
   ClaudeApiFormat,
@@ -155,6 +161,7 @@ const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 const PANEL_WIDTH = 420;
 const PANEL_HEIGHT_MARGIN = 72;
 const PANEL_MIN_HEIGHT = 240;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const emptyStatus: AppStatus = {
   snapshot: null,
@@ -189,6 +196,22 @@ function errorMessage(error: unknown, fallback: string): string {
     return error;
   }
   return fallback;
+}
+
+function formatUpdatePublishedAt(date: string | null): string | null {
+  if (!date) {
+    return null;
+  }
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parsed);
 }
 
 function quotaAccounts(settings: AppSettings, status: AppStatus): AccountQuotaStatus[] {
@@ -285,7 +308,7 @@ function proxyCapabilityStatus(capability: ClaudeProxyCapability): {
 } {
   switch (capability.status) {
     case "direct_ready":
-      return { label: "可直接接入", tone: "ready" };
+      return { label: "已接入", tone: "ready" };
     case "needs_profile":
       return { label: "待补充", tone: "pending" };
     case "reverse_ready":
@@ -360,6 +383,7 @@ export default function App() {
   const lastPanelSizeRef = useRef<{ width: number; height: number } | null>(null);
   const currentViewRef = useRef<PanelView>("overview");
   const oauthRequestIdRef = useRef(0);
+  const updateNoticeVersionRef = useRef<string | null>(null);
   const [view, setView] = useState<PanelView>("overview");
   const [addAccountBackView, setAddAccountBackView] = useState<AddAccountBackView>("settings");
   const [settingsEntryProxy, setSettingsEntryProxy] = useState<{
@@ -395,6 +419,12 @@ export default function App() {
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [authCode, setAuthCode] = useState("");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateDownloadPercent, setUpdateDownloadPercent] = useState<number | null>(null);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const [form, setForm] = useState<SaveSettingsInput>({
     account_id: "default",
     account_name: "OpenAI Account",
@@ -423,6 +453,54 @@ export default function App() {
     }
   }
 
+  async function syncAvailableUpdate({ quiet = false }: { quiet?: boolean } = {}) {
+    if (!isTauriRuntime) {
+      return;
+    }
+
+    if (!quiet) {
+      setUpdateChecking(true);
+      setUpdateMessage(null);
+      setUpdateError(null);
+    }
+
+    try {
+      const nextUpdate = await checkForAppUpdate();
+      setAvailableUpdate(nextUpdate);
+      if (!nextUpdate) {
+        if (!quiet) {
+          setUpdateMessage("当前已是最新版本");
+        }
+        return;
+      }
+
+      if (!quiet) {
+        setUpdateMessage(`发现新版本 ${nextUpdate.version}`);
+      }
+
+      if (
+        updateNoticeVersionRef.current !== nextUpdate.version &&
+        (await notificationPermissionGranted())
+      ) {
+        updateNoticeVersionRef.current = nextUpdate.version;
+        await sendDesktopNotification(
+          "AI Usage 有新版本可用",
+          `发现 ${nextUpdate.version}，可在应用内立即更新。`,
+        );
+      } else if (updateNoticeVersionRef.current !== nextUpdate.version) {
+        updateNoticeVersionRef.current = nextUpdate.version;
+      }
+    } catch (error) {
+      if (!quiet) {
+        setUpdateError(errorMessage(error, "检查更新失败"));
+      }
+    } finally {
+      if (!quiet) {
+        setUpdateChecking(false);
+      }
+    }
+  }
+
   useEffect(() => {
     let disposed = false;
 
@@ -434,6 +512,9 @@ export default function App() {
         }
         setStatus(nextStatus);
         applySettings(nextSettings);
+        if (isTauriRuntime) {
+          void syncAvailableUpdate({ quiet: true });
+        }
       } finally {
         if (!disposed) {
           setLoading(false);
@@ -449,6 +530,7 @@ export default function App() {
     }
     const unlistenPanel = listen("show-main-panel", () => {
       void syncQuotaStatus();
+      void syncAvailableUpdate({ quiet: true });
       navigateToView("overview");
     });
     return () => {
@@ -470,6 +552,20 @@ export default function App() {
       window.clearTimeout(timer);
     };
   }, [loading, status]);
+
+  useEffect(() => {
+    if (!isTauriRuntime) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      void syncAvailableUpdate({ quiet: true });
+    }, UPDATE_CHECK_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isTauriRuntime || !panelRootRef.current) {
@@ -553,6 +649,46 @@ export default function App() {
         refresh_status: "error",
         last_error: errorMessage(error, "刷新失败"),
       }));
+    }
+  }
+
+  async function handleCheckForUpdate() {
+    await syncAvailableUpdate();
+  }
+
+  async function handleInstallUpdate() {
+    setUpdateInstalling(true);
+    setUpdateDownloadPercent(null);
+    setUpdateMessage("正在准备更新…");
+    setUpdateError(null);
+
+    let downloaded = 0;
+    let contentLength = 0;
+
+    try {
+      await installAppUpdate((event) => {
+        if (event.event === "Started") {
+          contentLength = event.data.contentLength ?? 0;
+          setUpdateMessage("正在下载更新…");
+          return;
+        }
+        if (event.event === "Progress") {
+          downloaded += event.data.chunkLength ?? 0;
+          if (contentLength > 0) {
+            const percent = Math.min(100, Math.round((downloaded / contentLength) * 100));
+            setUpdateDownloadPercent(percent);
+            setUpdateMessage(`正在下载更新 ${percent}%`);
+          }
+          return;
+        }
+        setUpdateDownloadPercent(100);
+        setUpdateMessage("更新已安装，正在重启…");
+      });
+      await relaunchApp();
+    } catch (error) {
+      setUpdateError(errorMessage(error, "安装更新失败"));
+    } finally {
+      setUpdateInstalling(false);
     }
   }
 
@@ -857,6 +993,7 @@ export default function App() {
         <OverviewPanel
           status={status}
           settings={settings}
+          hasUpdateAvailable={Boolean(availableUpdate)}
           onRefresh={() => void handleRefresh()}
           onSettings={() => navigateToView("settings")}
           onAddAccount={() => openAddAccount("overview")}
@@ -869,12 +1006,20 @@ export default function App() {
           settings={settings}
           status={status}
           message={settingsMessage}
+          availableUpdate={availableUpdate}
+          updateChecking={updateChecking}
+          updateInstalling={updateInstalling}
+          updateDownloadPercent={updateDownloadPercent}
+          updateMessage={updateMessage}
+          updateError={updateError}
           entryProxySubTab={settingsEntryProxy.subTab}
           entryReverseManagerOpen={settingsEntryProxy.manager}
           entryProxyNonce={settingsEntryProxy.nonce}
           onChange={(nextForm) => void updateSettings(nextForm)}
           onBack={() => navigateToView("overview")}
           onAddAccount={() => openAddAccount("settings")}
+          onCheckForUpdate={() => void handleCheckForUpdate()}
+          onInstallUpdate={() => void handleInstallUpdate()}
           onAddReverseOpenAIOAuth={() => openOAuthAuth("openai", null)}
           onManagedCopilotChanged={() => handleRefresh()}
           onReauthorize={(account) => {
@@ -1015,12 +1160,14 @@ export default function App() {
 function OverviewPanel({
   status,
   settings,
+  hasUpdateAvailable,
   onRefresh,
   onSettings,
   onAddAccount,
 }: {
   status: AppStatus;
   settings: AppSettings;
+  hasUpdateAvailable: boolean;
   onRefresh: () => void;
   onSettings: () => void;
   onAddAccount: () => void;
@@ -1035,6 +1182,7 @@ function OverviewPanel({
       <Card className="overview-panel">
         <PanelHeader
           isRefreshing={status.refresh_status === "refreshing"}
+          hasUpdateAvailable={hasUpdateAvailable}
           onRefresh={onRefresh}
           onSettings={onSettings}
         />
@@ -1055,6 +1203,7 @@ function OverviewPanel({
     <Card className="overview-panel">
       <PanelHeader
         isRefreshing={status.refresh_status === "refreshing"}
+        hasUpdateAvailable={hasUpdateAvailable}
         onRefresh={onRefresh}
         onSettings={onSettings}
       />
@@ -1099,10 +1248,12 @@ function QuotaAccountCard({
 
 function PanelHeader({
   isRefreshing,
+  hasUpdateAvailable,
   onRefresh,
   onSettings,
 }: {
   isRefreshing: boolean;
+  hasUpdateAvailable: boolean;
   onRefresh: () => void;
   onSettings: () => void;
 }) {
@@ -1123,6 +1274,7 @@ function PanelHeader({
           <RefreshCw className={isRefreshing ? "refresh-icon-spinning" : undefined} data-icon="inline-start" />
         </Button>
         <Button variant="ghost" size="icon-sm" className="icon-button" aria-label="设置" onClick={onSettings}>
+          {hasUpdateAvailable ? <span className="icon-badge" aria-hidden="true" /> : null}
           <Settings data-icon="inline-start" />
         </Button>
       </div>
@@ -1157,12 +1309,20 @@ function SettingsPanel({
   settings,
   status,
   message,
+  availableUpdate,
+  updateChecking,
+  updateInstalling,
+  updateDownloadPercent,
+  updateMessage,
+  updateError,
   entryProxySubTab,
   entryReverseManagerOpen,
   entryProxyNonce,
   onChange,
   onBack,
   onAddAccount,
+  onCheckForUpdate,
+  onInstallUpdate,
   onAddReverseOpenAIOAuth,
   onManagedCopilotChanged,
   onReauthorize,
@@ -1172,12 +1332,20 @@ function SettingsPanel({
   settings: AppSettings;
   status: AppStatus;
   message: string | null;
+  availableUpdate: AppUpdateInfo | null;
+  updateChecking: boolean;
+  updateInstalling: boolean;
+  updateDownloadPercent: number | null;
+  updateMessage: string | null;
+  updateError: string | null;
   entryProxySubTab: ProxySubTab;
   entryReverseManagerOpen: ReverseManagerKind | null;
   entryProxyNonce: number;
   onChange: (nextForm: SaveSettingsInput) => void;
   onBack: () => void;
   onAddAccount: () => void;
+  onCheckForUpdate: () => void;
+  onInstallUpdate: () => void;
   onAddReverseOpenAIOAuth: () => void;
   onManagedCopilotChanged: () => Promise<void>;
   onReauthorize: (account: ConnectedAccount) => void;
@@ -2070,6 +2238,19 @@ function SettingsPanel({
 
       <div className="separator" />
 
+      <UpdateSection
+        availableUpdate={availableUpdate}
+        checking={updateChecking}
+        installing={updateInstalling}
+        downloadPercent={updateDownloadPercent}
+        message={updateMessage}
+        error={updateError}
+        onCheck={onCheckForUpdate}
+        onInstall={onInstallUpdate}
+      />
+
+      <div className="separator" />
+
       <section className="settings-section compact-section">
         <h2>通知设置</h2>
         <div className="split-row">
@@ -2217,6 +2398,69 @@ function SettingsPanel({
 
       {activeTab === "quota" && message ? <div className="settings-message">{message}</div> : null}
     </Card>
+  );
+}
+
+function UpdateSection({
+  availableUpdate,
+  checking,
+  installing,
+  downloadPercent,
+  message,
+  error,
+  onCheck,
+  onInstall,
+}: {
+  availableUpdate: AppUpdateInfo | null;
+  checking: boolean;
+  installing: boolean;
+  downloadPercent: number | null;
+  message: string | null;
+  error: string | null;
+  onCheck: () => void;
+  onInstall: () => void;
+}) {
+  const installLabel = installing
+    ? downloadPercent != null
+      ? `下载中 ${downloadPercent}%`
+      : "正在安装…"
+    : "立即更新";
+  const publishedAt = formatUpdatePublishedAt(availableUpdate?.date ?? null);
+
+  return (
+    <section className={`settings-section compact-section ${availableUpdate ? "update-section-available" : ""}`}>
+      <div className="section-header">
+        <h2>应用更新</h2>
+        <Button
+          variant="secondary"
+          className="settings-add-button"
+          onClick={onCheck}
+          disabled={checking || installing}
+        >
+          {checking ? "检查中..." : "检查更新"}
+        </Button>
+      </div>
+
+      {availableUpdate ? (
+        <>
+          <div className="update-summary">
+            <span className="update-version-badge">新版本 {availableUpdate.version}</span>
+            {publishedAt ? <span className="muted-copy">发布于 {publishedAt}</span> : null}
+          </div>
+          <p className="update-notes">
+            {availableUpdate.body || "检测到可安装的新版本，安装完成后应用会自动重启。"}
+          </p>
+          <Button onClick={onInstall} disabled={checking || installing}>
+            {installLabel}
+          </Button>
+        </>
+      ) : (
+        <p className="muted-copy">已启用自动检查更新，启动后和运行中每 6 小时会自动检查一次。</p>
+      )}
+
+      {message ? <div className="update-status">{message}</div> : null}
+      {error ? <div className="inline-error">{error}</div> : null}
+    </section>
   );
 }
 

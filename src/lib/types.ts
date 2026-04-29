@@ -219,6 +219,21 @@ export interface OAuthStatus {
   auth_url: string | null;
 }
 
+export interface AppUpdateInfo {
+  version: string;
+  currentVersion: string;
+  body: string | null;
+  date: string | null;
+}
+
+export interface AppUpdateDownloadEvent {
+  event: "Started" | "Progress" | "Finished";
+  data: {
+    contentLength?: number;
+    chunkLength?: number;
+  };
+}
+
 export type PresetUsageRange = "today" | "last3Days" | "thisWeek" | "thisMonth";
 export type LocalTokenUsageRange = PresetUsageRange | "last3Days" | "custom";
 export type UsageRangeSelection =

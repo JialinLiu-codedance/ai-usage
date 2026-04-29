@@ -6,7 +6,10 @@
   "permissions": [
     "core:default",
     "dialog:allow-open",
+    "notification:allow-notify",
     "notification:allow-is-permission-granted",
-    "notification:allow-request-permission"
+    "notification:allow-request-permission",
+    "process:default",
+    "updater:default"
   ]
 }

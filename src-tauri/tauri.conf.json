@@ -31,6 +31,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -41,6 +42,14 @@
     ],
     "macOS": {
       "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdGRjNEQjhEMEYyRkY5RjEKUldUeCtTOFBqZHZ6ZitRTXkyanFwTHNpNlMreVRIZDhGYkFKZEorTFdLMHI4NnZTSy9WNzRxV1gK",
+      "endpoints": [
+        "https://github.com/JialinLiu-codedance/ai-usage/releases/latest/download/latest.json"
+      ]
     }
   }
 }

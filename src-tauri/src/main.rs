@@ -41,12 +41,15 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
         .manage(oauth::OAuthStore::default())
         .manage(panel::PanelAnchor::default())
         .manage(local_proxy::LocalProxyManager::default())
         .manage(state::StateStore::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            #[cfg(desktop)]
+            handle.plugin(tauri_plugin_updater::Builder::new().build())?;
             handle.plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
                 None::<Vec<&str>>,

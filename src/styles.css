@@ -145,12 +145,23 @@ textarea {
 }
 
 .icon-button {
+  position: relative;
   width: 16px;
   height: 16px;
   min-width: 16px;
   padding: 0;
   color: #71717a;
   background: transparent;
+}
+
+.icon-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #ef4444;
 }
 
 .icon-button svg {
@@ -216,6 +227,44 @@ textarea {
 .muted-copy,
 .settings-message {
   color: #71717a;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.update-section-available {
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.update-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-version-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: #e0f2fe;
+  padding: 2px 8px;
+  color: #0369a1;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.update-notes {
+  margin: 0;
+  color: #334155;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+}
+
+.update-status {
+  color: #64748b;
   font-size: 11px;
   line-height: 16px;
 }

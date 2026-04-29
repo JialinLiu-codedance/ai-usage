@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "package:mac": "sh scripts/package-app.sh",
+    "test:node": "node --test tests/*.test.ts",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "version:check": "node scripts/ci/check-version-sync.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -16,6 +19,8 @@
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-notification": "^2.3.3",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.9.0",
