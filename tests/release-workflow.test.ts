@@ -7,7 +7,7 @@ test("release workflow publishes Tauri bundles from main and uploads updater met
 
   assert.match(workflow, /push:\s*[\s\S]*branches:\s*[\s\S]*-\s*main/);
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /tauri-apps\/tauri-action@v1/);
+  assert.match(workflow, /tauri-apps\/tauri-action@v0\.6\.2/);
   assert.match(workflow, /uploadUpdaterJson:\s*true/);
   assert.match(workflow, /TAURI_SIGNING_PRIVATE_KEY:\s*\$\{\{\s*secrets\.TAURI_SIGNING_PRIVATE_KEY\s*\}\}/);
   assert.match(workflow, /tagName:\s*v__VERSION__/);
