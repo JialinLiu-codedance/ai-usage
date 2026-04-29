@@ -62,6 +62,18 @@ test("mock getPrKpi follows the shared custom date range contract", async () => 
   assert.equal(typeof mock.overview.code_lines, "number");
 });
 
+test("mock getPrKpi scales output ratio to per-million tokens", async () => {
+  resetMockTauriStateForTests();
+
+  const mock = await getPrKpi({
+    kind: "custom",
+    startDate: "2026-04-20",
+    endDate: "2026-04-27",
+  });
+
+  assert.ok((mock.overview.output_ratio ?? 0) > 1_000);
+});
+
 test("metric descriptions cover both 7d stability keys", () => {
   assert.equal(prKpiMetricDescriptions["7d_rework_rate"], "合入后 7 天内被删除或重写的代码比例");
   assert.equal(prKpiMetricDescriptions["7d_retention_rate"], "合入后 7 天仍然保留的代码比例");

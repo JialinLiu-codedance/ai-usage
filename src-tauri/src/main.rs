@@ -32,6 +32,8 @@ use tauri::{
 const TRAY_ID: &str = "ai-usage-tray";
 const MENU_MAIN: &str = "main";
 const MENU_REFRESH: &str = "refresh";
+const MENU_REVERSE_PROXY: &str = "reverse_proxy";
+const MENU_LOCAL_PROXY: &str = "local_proxy";
 const MENU_QUIT: &str = "quit";
 const TRAY_USAGE_LINE_WIDTH: usize = 52;
 
@@ -75,6 +77,38 @@ fn main() {
                                 return;
                             }
                             let _ = commands::refresh_inner(&app, &state).await;
+                            refresh_tray_menu_from_state(&app).await;
+                        });
+                    }
+                    MENU_REVERSE_PROXY => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Ok(current) = settings::load_settings(&app) {
+                                let _ = settings::save_reverse_proxy_settings(
+                                    &app,
+                                    models::SaveReverseProxySettingsInput {
+                                        enabled: !current.reverse_proxy.enabled,
+                                        default_copilot_account_id: current
+                                            .reverse_proxy
+                                            .default_copilot_account_id,
+                                        default_openai_account_id: current
+                                            .reverse_proxy
+                                            .default_openai_account_id,
+                                    },
+                                );
+                            }
+                            refresh_tray_menu_from_state(&app).await;
+                        });
+                    }
+                    MENU_LOCAL_PROXY => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let manager = app.state::<local_proxy::LocalProxyManager>();
+                            let _ = if manager.is_running() {
+                                manager.stop(app.clone()).await
+                            } else {
+                                manager.start(app.clone()).await
+                            };
                             refresh_tray_menu_from_state(&app).await;
                         });
                     }
@@ -278,6 +312,7 @@ fn build_tray_menu(
 ) -> tauri::Result<Menu<tauri::Wry>> {
     let title = disabled_menu_item(app, "AI Usage")?;
     let settings = settings::load_settings(app).unwrap_or_default();
+    let local_proxy_running = app.state::<local_proxy::LocalProxyManager>().is_running();
     let account_lines = tray_account_summary_lines(status);
     let has_account =
         settings.secret_configured || status.snapshot.is_some() || !account_lines.is_empty();
@@ -302,17 +337,35 @@ fn build_tray_menu(
     let refresh = MenuItemBuilder::with_id(MENU_REFRESH, "刷新用量")
         .enabled(should_enable_refresh_menu(&settings, status))
         .build(app)?;
+    let reverse_proxy = MenuItemBuilder::with_id(
+        MENU_REVERSE_PROXY,
+        reverse_proxy_menu_label(settings.reverse_proxy.enabled),
+    )
+    .build(app)?;
+    let local_proxy = MenuItemBuilder::with_id(
+        MENU_LOCAL_PROXY,
+        local_proxy_menu_label(local_proxy_running),
+    )
+    .build(app)?;
 
     menu.text(MENU_MAIN, "打开主界面")
         .item(&refresh)
+        .item(&reverse_proxy)
+        .item(&local_proxy)
         .separator()
         .text(MENU_QUIT, "退出 AI Usage")
         .build()
 }
 
 #[cfg(test)]
-fn tray_menu_action_ids() -> [&'static str; 3] {
-    [MENU_MAIN, MENU_REFRESH, MENU_QUIT]
+fn tray_menu_action_ids() -> [&'static str; 5] {
+    [
+        MENU_MAIN,
+        MENU_REFRESH,
+        MENU_REVERSE_PROXY,
+        MENU_LOCAL_PROXY,
+        MENU_QUIT,
+    ]
 }
 
 fn disabled_menu_item(app: &tauri::AppHandle, text: &str) -> tauri::Result<MenuItem<tauri::Wry>> {
@@ -328,6 +381,22 @@ fn account_usage_menu_item<R: Runtime, M: Manager<R>>(
 
 fn should_enable_refresh_menu(settings: &models::AppSettings, _status: &models::AppStatus) -> bool {
     has_refreshable_quota_account(settings)
+}
+
+fn reverse_proxy_menu_label(enabled: bool) -> &'static str {
+    if enabled {
+        "关闭反向代理"
+    } else {
+        "启动反向代理"
+    }
+}
+
+fn local_proxy_menu_label(running: bool) -> &'static str {
+    if running {
+        "关闭本地代理"
+    } else {
+        "启动本地代理"
+    }
 }
 
 fn has_refreshable_quota_account(settings: &models::AppSettings) -> bool {
@@ -551,7 +620,28 @@ mod tests {
 
     #[test]
     fn tray_menu_has_no_settings_entry() {
-        assert_eq!(tray_menu_action_ids(), [MENU_MAIN, MENU_REFRESH, MENU_QUIT]);
+        assert_eq!(
+            tray_menu_action_ids(),
+            [
+                MENU_MAIN,
+                MENU_REFRESH,
+                MENU_REVERSE_PROXY,
+                MENU_LOCAL_PROXY,
+                MENU_QUIT,
+            ]
+        );
+    }
+
+    #[test]
+    fn reverse_proxy_menu_label_matches_enabled_state() {
+        assert_eq!(reverse_proxy_menu_label(false), "启动反向代理");
+        assert_eq!(reverse_proxy_menu_label(true), "关闭反向代理");
+    }
+
+    #[test]
+    fn local_proxy_menu_label_matches_running_state() {
+        assert_eq!(local_proxy_menu_label(false), "启动本地代理");
+        assert_eq!(local_proxy_menu_label(true), "关闭本地代理");
     }
 
     #[test]

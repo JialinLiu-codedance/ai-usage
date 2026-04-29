@@ -23,6 +23,7 @@ const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_USER_AGENT: &str = "ai-usage-pr-kpi/0.1";
+const PR_KPI_OUTPUT_RATIO_TOKEN_UNIT: f64 = 1_000_000.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrKpiCache {
@@ -276,7 +277,7 @@ pub fn build_overview(
     let output_ratio = if token_total == 0 {
         None
     } else {
-        Some(net_lines / (token_total as f64 / 1_000.0))
+        Some(net_lines / (token_total as f64 / PR_KPI_OUTPUT_RATIO_TOKEN_UNIT))
     };
 
     PrKpiOverview {
@@ -1472,6 +1473,49 @@ mod tests {
         assert!(is_test_file_path("__tests__/foo.js"));
         assert!(is_test_file_path("spec/helpers.rb"));
         assert!(!is_test_file_path("src/foo.ts"));
+    }
+
+    #[test]
+    fn build_overview_uses_per_million_tokens_for_output_ratio() {
+        let token_report = LocalTokenUsageReport {
+            range: LocalTokenUsageRange::ThisMonth,
+            start_date: None,
+            end_date: None,
+            pending: false,
+            totals: crate::models::LocalTokenUsageTotals {
+                total_tokens: 2_000_000,
+                ..Default::default()
+            },
+            days: vec![],
+            models: vec![],
+            tools: vec![],
+            missing_sources: vec![],
+            warnings: vec![],
+            generated_at: local_time_utc(2026, 4, 28, 0, 0, 0),
+        };
+        let git_report = GitUsageReport {
+            range: LocalTokenUsageRange::ThisMonth,
+            start_date: None,
+            end_date: None,
+            pending: false,
+            totals: crate::models::GitUsageTotals {
+                added_lines: 900,
+                deleted_lines: 100,
+                changed_files: 4,
+            },
+            buckets: vec![],
+            repositories: vec![],
+            repository_count: 0,
+            missing_sources: vec![],
+            warnings: vec![],
+            generated_at: local_time_utc(2026, 4, 28, 0, 0, 0),
+        };
+
+        let overview = build_overview(&token_report, &git_report);
+
+        assert_eq!(overview.token_total, 2_000_000);
+        assert_eq!(overview.code_lines, 1_000);
+        assert_eq!(overview.output_ratio, Some(400.0));
     }
 
     #[test]

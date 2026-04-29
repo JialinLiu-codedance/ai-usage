@@ -51,6 +51,7 @@ const defaultMockReverseProxyConfig = {
   default_openai_account_id: null,
   default_copilot_account_id: null,
 } as const;
+const PR_KPI_OUTPUT_RATIO_TOKEN_UNIT = 1_000_000;
 let mockOAuthSequence = 0;
 let mockOAuthCompleteSequence = 0;
 let mockPendingOAuthAccountId: string | null = null;
@@ -374,7 +375,9 @@ export async function startLocalProxy(): Promise<LocalProxyStatus> {
     };
     return mockLocalProxyStatus;
   }
-  return invoke("start_local_proxy");
+  const status = await invoke<LocalProxyStatus>("start_local_proxy");
+  await syncTrayMenu();
+  return status;
 }
 
 export async function stopLocalProxy(): Promise<LocalProxyStatus> {
@@ -386,7 +389,9 @@ export async function stopLocalProxy(): Promise<LocalProxyStatus> {
     };
     return mockLocalProxyStatus;
   }
-  return invoke("stop_local_proxy");
+  const status = await invoke<LocalProxyStatus>("stop_local_proxy");
+  await syncTrayMenu();
+  return status;
 }
 
 export async function getReverseProxySettings(): Promise<ReverseProxySettingsState> {
@@ -414,7 +419,9 @@ export async function saveReverseProxySettings(
     syncMockLocalProxyState();
     return mockReverseProxySettingsState;
   }
-  return invoke("save_reverse_proxy_settings", { input });
+  const settings = await invoke<ReverseProxySettingsState>("save_reverse_proxy_settings", { input });
+  await syncTrayMenu();
+  return settings;
 }
 
 export async function getReverseProxyStatus(): Promise<ReverseProxyStatus> {
@@ -1221,7 +1228,9 @@ function mockPrKpiReport(selection: UsageRangeSelection): PrKpiReport {
   const gitReport = mockGitUsageReport(selection);
   const netLines = gitReport.totals.added_lines - gitReport.totals.deleted_lines;
   const outputRatio =
-    tokenReport.totals.total_tokens > 0 ? netLines / (tokenReport.totals.total_tokens / 1_000) : null;
+    tokenReport.totals.total_tokens > 0
+      ? netLines / (tokenReport.totals.total_tokens / PR_KPI_OUTPUT_RATIO_TOKEN_UNIT)
+      : null;
   const rangeDays =
     selection.kind === "custom"
       ? Math.max(1, daysBetweenInclusive(selection.startDate, selection.endDate))

@@ -25,6 +25,7 @@ use axum::{
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::{
+    sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -155,9 +156,18 @@ pub fn test_model_match(
     })
 }
 
-#[derive(Default)]
 pub struct LocalProxyManager {
     inner: Mutex<LocalProxyRuntime>,
+    running: Arc<AtomicBool>,
+}
+
+impl Default for LocalProxyManager {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(LocalProxyRuntime::default()),
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -191,7 +201,15 @@ struct RuntimeMetrics {
 }
 
 impl LocalProxyManager {
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
+
     pub async fn start(&self, app: AppHandle) -> Result<LocalProxyStatus, String> {
+        if self.is_running() {
+            return self.status(&app).await;
+        }
+
         let settings = settings::load_settings(&app)?;
         let config = settings.claude_proxy.clone();
         let bind_address = format!("{}:{}", config.listen_address, config.listen_port);
@@ -216,8 +234,10 @@ impl LocalProxyManager {
             metrics.last_error = None;
             metrics.started_at = Some(Instant::now());
         }
+        self.running.store(true, Ordering::Release);
 
         let metrics = runtime.metrics.clone();
+        let running = self.running.clone();
         let state = ProxyServerState {
             app: app.clone(),
             metrics: metrics.clone(),
@@ -240,6 +260,7 @@ impl LocalProxyManager {
             guard.running = false;
             guard.active_connections = 0;
             guard.started_at = None;
+            running.store(false, Ordering::Release);
         });
 
         runtime.handle = Some(LocalProxyHandle { shutdown_tx, task });
@@ -258,6 +279,7 @@ impl LocalProxyManager {
             metrics.active_connections = 0;
             metrics.started_at = None;
         }
+        self.running.store(false, Ordering::Release);
         build_status(&app, &runtime.metrics).await
     }
 
