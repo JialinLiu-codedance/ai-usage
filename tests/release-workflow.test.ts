@@ -5,10 +5,18 @@ import { readFile } from "node:fs/promises";
 test("release workflow publishes Tauri bundles from main and uploads updater metadata", async () => {
   const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
 
-  assert.match(workflow, /push:\s*[\s\S]*branches:\s*[\s\S]*-\s*main/);
   assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /inputs:\s*[\s\S]*bump:/);
+  assert.match(workflow, /default:\s*patch/);
+  assert.match(workflow, /options:\s*[\s\S]*-\s*patch[\s\S]*-\s*minor[\s\S]*-\s*major/);
   assert.match(workflow, /tauri-apps\/tauri-action@v0\.6\.2/);
   assert.match(workflow, /uploadUpdaterJson:\s*true/);
+  assert.match(workflow, /node scripts\/release\/bump-version\.mjs "\$\{BUMP_KIND\}"/);
+  assert.match(workflow, /Ensure release version is new[\s\S]*APP_VERSION: \$\{\{\s*steps\.bump_version\.outputs\.version\s*\}\}/);
+  assert.match(workflow, /git commit -m "core:bump version to \$\{VERSION\}"/);
+  assert.match(workflow, /git push origin HEAD:main/);
+  assert.match(workflow, /release_sha=\$\(git rev-parse HEAD\)/);
+  assert.match(workflow, /ref:\s*\$\{\{\s*needs\.preflight\.outputs\.release_sha\s*\}\}/);
   assert.match(workflow, /TAURI_SIGNING_PRIVATE_KEY:\s*\$\{\{\s*secrets\.TAURI_SIGNING_PRIVATE_KEY\s*\}\}/);
   assert.match(workflow, /tagName:\s*v__VERSION__/);
 });

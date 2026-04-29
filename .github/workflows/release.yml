@@ -2,9 +2,16 @@ name: release
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+    inputs:
+      bump:
+        description: Select the semantic version bump for this release
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 concurrency:
   group: release-${{ github.ref }}
@@ -13,11 +20,16 @@ concurrency:
 jobs:
   preflight:
     runs-on: macos-latest
+    permissions:
+      contents: write
     outputs:
-      version: ${{ steps.app_version.outputs.version }}
+      version: ${{ steps.bump_version.outputs.version }}
+      release_sha: ${{ steps.push_release_commit.outputs.release_sha }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -36,22 +48,43 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Check version sync
-        run: node scripts/ci/check-version-sync.mjs
+      - name: Ensure release runs from main
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "::error title=Unsupported branch::请从 main 分支手动触发 release workflow。"
+            exit 1
+          fi
 
-      - id: app_version
-        name: Read app version
-        run: echo "version=$(node scripts/ci/read-app-version.mjs)" >> "$GITHUB_OUTPUT"
+      - id: bump_version
+        name: Bump app version
+        env:
+          BUMP_KIND: ${{ inputs.bump }}
+        run: |
+          node scripts/release/bump-version.mjs "${BUMP_KIND}"
+          VERSION=$(node scripts/ci/read-app-version.mjs)
+          node scripts/ci/check-version-sync.mjs
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Ensure release version is new
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APP_VERSION: ${{ steps.app_version.outputs.version }}
+          APP_VERSION: ${{ steps.bump_version.outputs.version }}
         run: |
           if gh release view "v${APP_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "::error title=Version already released::v${APP_VERSION} 已存在。请先递增 package.json、src-tauri/Cargo.toml 和 src-tauri/tauri.conf.json 的版本号。"
+            echo "::error title=Version already released::v${APP_VERSION} 已存在。请重新触发 release，并选择下一个版本号。"
             exit 1
           fi
+
+      - id: push_release_commit
+        name: Commit and push release version
+        run: |
+          VERSION="${{ steps.bump_version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          git commit -m "core:bump version to ${VERSION}"
+          git push origin HEAD:main
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Run frontend tests
         run: node --test tests/*.test.ts
@@ -76,6 +109,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
