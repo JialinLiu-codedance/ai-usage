@@ -94,6 +94,20 @@ test("settings account messages are scoped to the quota tab", async () => {
   );
 });
 
+test("settings quota tab includes the launch-at-login toggle", async () => {
+  const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const settingsPanelStart = appSource.indexOf("function SettingsPanel");
+  const tokenUsagePanelStart = appSource.indexOf("function TokenUsagePanel");
+  const settingsPanelSource = appSource.slice(settingsPanelStart, tokenUsagePanelStart);
+
+  assert.match(settingsPanelSource, />\s*登录时自动启动\s*</);
+  assert.match(settingsPanelSource, /checked=\{form\.launch_at_login\}/);
+  assert.match(
+    settingsPanelSource,
+    /onCheckedChange=\{\(checked\) => onChange\(\{ \.\.\.form, launch_at_login: checked \}\)\}/,
+  );
+});
+
 test("Git usage path control is rendered above the refresh footer instead of above the summary card", async () => {
   const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   const gitSectionStart = appSource.indexOf("function GitUsageSection");

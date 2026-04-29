@@ -144,7 +144,10 @@ fn convert_message_to_openai(
             msg["content"] = if content_parts.is_empty() {
                 Value::Null
             } else if content_parts.len() == 1 {
-                content_parts[0].get("text").cloned().unwrap_or_else(|| json!(content_parts))
+                content_parts[0]
+                    .get("text")
+                    .cloned()
+                    .unwrap_or_else(|| json!(content_parts))
             } else {
                 json!(content_parts)
             };
@@ -165,15 +168,17 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, LocalProxyTransformErro
     let choices = body
         .get("choices")
         .and_then(|c| c.as_array())
-        .ok_or_else(|| LocalProxyTransformError::TransformError("No choices in response".to_string()))?;
+        .ok_or_else(|| {
+            LocalProxyTransformError::TransformError("No choices in response".to_string())
+        })?;
 
-    let choice = choices
-        .first()
-        .ok_or_else(|| LocalProxyTransformError::TransformError("Empty choices array".to_string()))?;
+    let choice = choices.first().ok_or_else(|| {
+        LocalProxyTransformError::TransformError("Empty choices array".to_string())
+    })?;
 
-    let message = choice
-        .get("message")
-        .ok_or_else(|| LocalProxyTransformError::TransformError("No message in choice".to_string()))?;
+    let message = choice.get("message").ok_or_else(|| {
+        LocalProxyTransformError::TransformError("No message in choice".to_string())
+    })?;
 
     let mut content = Vec::new();
     let mut has_tool_use = false;

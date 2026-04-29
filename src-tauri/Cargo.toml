@@ -32,3 +32,6 @@ urlencoding = "2.1.3"
 
 [dev-dependencies]
 tauri = { version = "2.9.1", features = ["test", "tray-icon"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-autostart = "2.5.1"

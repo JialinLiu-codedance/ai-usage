@@ -1,6 +1,5 @@
 use crate::{
-    app_time,
-    git_usage,
+    app_time, git_usage,
     models::{
         GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport, PrKpiMetric, PrKpiMetricKey,
         PrKpiOverview, PrKpiReport, CUSTOM_USAGE_WINDOW_DAYS,
@@ -192,7 +191,8 @@ pub fn build_cache(root: PathBuf, github_token: Option<String>) -> Result<PrKpiC
     let missing_sources = BTreeSet::new();
 
     let Some(token) = github_token.filter(|value| !value.trim().is_empty()) else {
-        warnings.insert("未配置 GitHub Token，KPI 分析仅能展示本地概览，PR 质量雷达会显示 N/A".into());
+        warnings
+            .insert("未配置 GitHub Token，KPI 分析仅能展示本地概览，PR 质量雷达会显示 N/A".into());
         return Ok(PrKpiCache {
             root_path,
             generated_at: now,
@@ -239,10 +239,7 @@ pub fn build_cache(root: PathBuf, github_token: Option<String>) -> Result<PrKpiC
                 }
             }
             Err(error) => {
-                warnings.insert(format!(
-                    "{}/{}: {error}",
-                    repository.owner, repository.name
-                ));
+                warnings.insert(format!("{}/{}: {error}", repository.owner, repository.name));
             }
         }
     }
@@ -450,10 +447,7 @@ fn build_report(
     let metrics = vec![
         build_metric(PrKpiMetricKey::CycleTimeAi, cycle_hours),
         build_metric(PrKpiMetricKey::MergedAiPrsPerWeek, merged_per_week),
-        build_metric(
-            PrKpiMetricKey::ReviewCommentsPerPr,
-            review_comments_per_pr,
-        ),
+        build_metric(PrKpiMetricKey::ReviewCommentsPerPr, review_comments_per_pr),
         build_metric(PrKpiMetricKey::TestAddedRatio, test_added_ratio),
         build_metric(PrKpiMetricKey::SevenDayReworkRate, rework_rate),
         build_metric(PrKpiMetricKey::SevenDayRetentionRate, retention_rate),
@@ -554,10 +548,9 @@ fn format_metric_value(key: PrKpiMetricKey, value: f64) -> String {
         PrKpiMetricKey::ReviewCommentsPerPr => format!("{:.1} / PR", round_one_decimal(value)),
         PrKpiMetricKey::TestAddedRatio
         | PrKpiMetricKey::SevenDayReworkRate
-        | PrKpiMetricKey::SevenDayRetentionRate => format!(
-            "{:.0}%",
-            round_one_decimal(value * 100.0)
-        ),
+        | PrKpiMetricKey::SevenDayRetentionRate => {
+            format!("{:.0}%", round_one_decimal(value * 100.0))
+        }
     }
 }
 
@@ -609,8 +602,14 @@ fn aggregate_local_stability(
     }
 
     let added_lines = available.iter().map(|item| item.added_lines).sum::<u64>();
-    let reworked_lines = available.iter().map(|item| item.reworked_lines).sum::<u64>();
-    let retained_lines = available.iter().map(|item| item.retained_lines).sum::<u64>();
+    let reworked_lines = available
+        .iter()
+        .map(|item| item.reworked_lines)
+        .sum::<u64>();
+    let retained_lines = available
+        .iter()
+        .map(|item| item.retained_lines)
+        .sum::<u64>();
     Some((available.len(), added_lines, reworked_lines, retained_lines))
 }
 
@@ -643,7 +642,11 @@ fn github_repository_for_path(repository: &Path) -> Option<(String, String)> {
     }
 
     let remotes = git_output(repository, &["remote"]).ok()?;
-    for remote in remotes.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for remote in remotes
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let remote_url = git_output(repository, &["remote", "get-url", remote]).ok()?;
         if let Some(parsed) = parse_github_remote_owner_repo(&remote_url) {
             return Some(parsed);
@@ -678,8 +681,7 @@ fn fetch_viewer_login(client: &Client) -> Result<String, String> {
         .get(format!("{GITHUB_API_BASE}/user"))
         .send()
         .map_err(|error| format!("读取 GitHub 当前用户失败: {error}"))?;
-    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN
-    {
+    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
         return Err("GitHub 认证失败，请重新运行 gh auth login 或提供可用 Token".into());
     }
     if !response.status().is_success() {
@@ -710,7 +712,8 @@ fn fetch_repository_pull_request_records(
     let mut records = Vec::new();
 
     for number in pull_numbers {
-        let detail = fetch_pull_request_detail(client, &repository.owner, &repository.name, number)?;
+        let detail =
+            fetch_pull_request_detail(client, &repository.owner, &repository.name, number)?;
         let Some(merged_at) = detail.merged_at else {
             continue;
         };
@@ -724,18 +727,13 @@ fn fetch_repository_pull_request_records(
         let local_stability = detail
             .merge_commit_sha
             .as_deref()
-            .and_then(|merge_commit_sha| match analyze_local_stability(
-                &repository.path,
-                merge_commit_sha,
-                merged_at,
-            ) {
-                Ok(result) => Some(result),
-                Err(error) => {
-                    warnings.push(format!(
-                        "{}/#{}: {error}",
-                        repository.name, detail.number
-                    ));
-                    None
+            .and_then(|merge_commit_sha| {
+                match analyze_local_stability(&repository.path, merge_commit_sha, merged_at) {
+                    Ok(result) => Some(result),
+                    Err(error) => {
+                        warnings.push(format!("{}/#{}: {error}", repository.name, detail.number));
+                        None
+                    }
                 }
             });
 
@@ -914,7 +912,12 @@ fn analyze_local_stability(
         return Ok(PrKpiLocalStability::default());
     }
 
-    let changed_ranges = diff_line_ranges(repository, merge_commit_sha, &cutoff_sha, DiffRangeSide::Old)?;
+    let changed_ranges = diff_line_ranges(
+        repository,
+        merge_commit_sha,
+        &cutoff_sha,
+        DiffRangeSide::Old,
+    )?;
     let reworked_lines = intersect_range_maps(&added_ranges, &changed_ranges);
     let retained_lines = total_added.saturating_sub(reworked_lines);
     Ok(PrKpiLocalStability {
@@ -1134,13 +1137,11 @@ fn resolve_default_branch_ref(repository: &Path) -> Option<String> {
         .filter_map(|candidate| {
             git_commit_timestamp(repository, &candidate)
                 .ok()
-                .and_then(|timestamp| branch_priority(&candidate).map(|priority| (candidate, priority, timestamp)))
+                .and_then(|timestamp| {
+                    branch_priority(&candidate).map(|priority| (candidate, priority, timestamp))
+                })
         })
-        .min_by(|left, right| {
-            left.1
-                .cmp(&right.1)
-                .then_with(|| right.2.cmp(&left.2))
-        })
+        .min_by(|left, right| left.1.cmp(&right.1).then_with(|| right.2.cmp(&left.2)))
         .map(|(candidate, _, _)| candidate);
 
     if best.is_some() {
@@ -1442,12 +1443,10 @@ mod tests {
             .find(|metric| metric.key == PrKpiMetricKey::CycleTimeAi)
             .unwrap();
         assert_eq!(cycle_time.raw_value, Some(2.5));
-        assert!(
-            !report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("暂无已合入 PR"))
-        );
+        assert!(!report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("暂无已合入 PR")));
     }
 
     #[test]
@@ -1492,7 +1491,11 @@ mod tests {
             "2026-04-01T00:00:00Z",
         );
 
-        fs::write(repository.join("src").join("app.ts"), "base\none\ntwo\nthree\n").unwrap();
+        fs::write(
+            repository.join("src").join("app.ts"),
+            "base\none\ntwo\nthree\n",
+        )
+        .unwrap();
         run_git(&repository, &["add", "."]);
         run_git_env(
             &repository,
@@ -1552,7 +1555,11 @@ mod tests {
             "2026-04-01T00:00:00Z",
         );
 
-        fs::write(repository.join("src").join("app.ts"), "base\none\ntwo\nthree\n").unwrap();
+        fs::write(
+            repository.join("src").join("app.ts"),
+            "base\none\ntwo\nthree\n",
+        )
+        .unwrap();
         run_git(&repository, &["add", "."]);
         run_git_env(
             &repository,

@@ -216,7 +216,10 @@ pub fn responses_to_anthropic(body: Value) -> Result<Value, LocalProxyTransformE
             "function_call" => {
                 let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let args_str = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+                let args_str = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}");
                 let input: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
                 content.push(json!({
                     "type": "tool_use",

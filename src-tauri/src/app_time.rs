@@ -1,6 +1,4 @@
-use chrono::{
-    DateTime, Datelike, FixedOffset, Local, NaiveDate, Offset, TimeZone, Timelike, Utc,
-};
+use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, Offset, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serializer};
 
 pub fn local_offset() -> FixedOffset {
@@ -52,7 +50,11 @@ pub fn local_bucket_key(
 ) -> String {
     let date = local_date(timestamp, offset);
     match step_hours {
-        Some(step_hours) => local_hour_bucket_key(date, local_bucket_hour(timestamp, step_hours, offset), offset),
+        Some(step_hours) => local_hour_bucket_key(
+            date,
+            local_bucket_hour(timestamp, step_hours, offset),
+            offset,
+        ),
         None => local_day_key(date),
     }
 }
@@ -90,22 +92,19 @@ pub mod local_datetime_serde {
     pub mod option {
         use super::*;
 
-        pub fn serialize<S>(
-            value: &Option<DateTime<Utc>>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error>
+        pub fn serialize<S>(value: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
         {
             match value {
-                Some(timestamp) => serializer.serialize_some(&timestamp.with_timezone(&Local).to_rfc3339()),
+                Some(timestamp) => {
+                    serializer.serialize_some(&timestamp.with_timezone(&Local).to_rfc3339())
+                }
                 None => serializer.serialize_none(),
             }
         }
 
-        pub fn deserialize<'de, D>(
-            deserializer: D,
-        ) -> Result<Option<DateTime<Utc>>, D::Error>
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
         where
             D: Deserializer<'de>,
         {

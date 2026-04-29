@@ -1,17 +1,18 @@
 use crate::{
     copilot_oauth::CopilotAuthState,
     errors::{ProviderError, ProviderErrorKind},
-    git_usage, local_proxy, local_usage, pr_kpi,
+    git_usage, local_proxy, local_usage,
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ClaudeProxyProfileInput,
         ConnectedAccount, ConnectionTestResult, GitHubDeviceCodeResponse, GitUsageReport,
         LocalProxySettingsState, LocalProxyStatus, LocalTokenUsageRange, LocalTokenUsageReport,
-        ManagedAuthAccount, PrKpiOverview, PrKpiReport, ProbeCredentials, QuotaSnapshot, ReverseProxySettingsState,
-        ReverseProxyStatus, SaveLocalProxySettingsInput, SaveReverseProxySettingsInput,
-        SaveSettingsInput, UsageRangeRequest, CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC,
-        PROVIDER_COPILOT, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
+        ManagedAuthAccount, PrKpiOverview, PrKpiReport, ProbeCredentials, QuotaSnapshot,
+        ReverseProxySettingsState, ReverseProxyStatus, SaveLocalProxySettingsInput,
+        SaveReverseProxySettingsInput, SaveSettingsInput, UsageRangeRequest,
+        CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC, PROVIDER_COPILOT, PROVIDER_GLM,
+        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
-    notifications, oauth, panel, provider, secrets, settings,
+    notifications, oauth, panel, pr_kpi, provider, secrets, settings,
     state::StateStore,
     storage,
 };
@@ -23,6 +24,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_autostart::ManagerExt;
 
 const SNAPSHOTS_FILE: &str = "snapshots.json";
 const TOKEN_USAGE_CACHE_FILE: &str = "local-token-usage-cache.json";
@@ -59,6 +61,36 @@ pub async fn refresh_quota(
         return Err(error);
     }
     Ok(store.inner.read().await.clone())
+}
+
+async fn run_refresh_operation<T, Operation>(
+    store: &StateStore,
+    operation: Operation,
+) -> Result<T, String>
+where
+    Operation: Future<Output = Result<T, String>>,
+{
+    {
+        let mut guard = store.inner.write().await;
+        guard.refresh_status = crate::models::RefreshStatus::Refreshing;
+        guard.last_error = None;
+    }
+
+    let result = operation.await;
+    if let Err(error) = &result {
+        let mut guard = store.inner.write().await;
+        if matches!(
+            guard.refresh_status,
+            crate::models::RefreshStatus::Refreshing
+        ) {
+            guard.refresh_status = crate::models::RefreshStatus::Error;
+        }
+        if guard.last_error.is_none() {
+            guard.last_error = Some(error.clone());
+        }
+    }
+
+    result
 }
 
 #[tauri::command]
@@ -100,14 +132,49 @@ pub async fn test_connection(app: AppHandle) -> Result<ConnectionTestResult, Str
     })
 }
 
+fn autostart_enabled_or_stored(app: &AppHandle, stored_value: bool) -> bool {
+    read_autostart_enabled(app).unwrap_or(stored_value)
+}
+
+pub(crate) fn read_autostart_enabled(app: &AppHandle) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| format!("读取自动启动状态失败: {error}"))
+}
+
+pub(crate) fn sync_launch_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let autostart_manager = app.autolaunch();
+    let current = autostart_manager
+        .is_enabled()
+        .map_err(|error| format!("读取自动启动状态失败: {error}"))?;
+
+    if current == enabled {
+        return Ok(());
+    }
+
+    if enabled {
+        autostart_manager
+            .enable()
+            .map_err(|error| format!("开启自动启动失败: {error}"))
+    } else {
+        autostart_manager
+            .disable()
+            .map_err(|error| format!("关闭自动启动失败: {error}"))
+    }
+}
+
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
-    settings::load_settings(&app)
+    let mut settings = settings::load_settings(&app)?;
+    settings.launch_at_login = autostart_enabled_or_stored(&app, settings.launch_at_login);
+    Ok(settings)
 }
 
 #[tauri::command]
 pub fn save_settings(app: AppHandle, input: SaveSettingsInput) -> Result<AppSettings, String> {
-    settings::save_settings(&app, input)
+    let settings = settings::save_settings(&app, input)?;
+    sync_launch_at_login(&app, settings.launch_at_login)?;
+    get_settings(app)
 }
 
 #[tauri::command]
@@ -176,7 +243,10 @@ pub async fn copilot_start_device_flow(
     copilot_state: State<'_, CopilotAuthState>,
 ) -> Result<GitHubDeviceCodeResponse, String> {
     let manager = copilot_state.0.read().await;
-    manager.start_device_flow().await.map_err(|error| error.to_string())
+    manager
+        .start_device_flow()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -262,12 +332,22 @@ pub(crate) async fn build_reverse_proxy_status(
         && settings_state
             .default_copilot_account_id
             .as_ref()
-            .is_some_and(|id| settings_state.copilot_accounts.iter().any(|account| &account.id == id));
+            .is_some_and(|id| {
+                settings_state
+                    .copilot_accounts
+                    .iter()
+                    .any(|account| &account.id == id)
+            });
     let openai_ready = settings.reverse_proxy.enabled
         && settings_state
             .default_openai_account_id
             .as_ref()
-            .is_some_and(|id| settings_state.openai_accounts.iter().any(|account| &account.id == id));
+            .is_some_and(|id| {
+                settings_state
+                    .openai_accounts
+                    .iter()
+                    .any(|account| &account.id == id)
+            });
 
     Ok(ReverseProxyStatus {
         enabled: settings.reverse_proxy.enabled,
@@ -282,7 +362,9 @@ fn openai_oauth_managed_accounts(settings: &AppSettings) -> Vec<ManagedAuthAccou
     settings
         .accounts
         .iter()
-        .filter(|account| account.provider == PROVIDER_OPENAI && matches!(account.auth_mode, AuthMode::OAuth))
+        .filter(|account| {
+            account.provider == PROVIDER_OPENAI && matches!(account.auth_mode, AuthMode::OAuth)
+        })
         .map(|account| ManagedAuthAccount {
             id: account.account_id.clone(),
             login: account.account_name.clone(),
@@ -949,9 +1031,10 @@ async fn refresh_pr_kpi_cache(
         .map(|settings| PathBuf::from(settings.git_usage_root))
         .unwrap_or_else(|_| PathBuf::from(crate::models::default_git_usage_root()));
     let github_token = secrets::load_github_cli_token().ok().flatten();
-    let cache = tauri::async_runtime::spawn_blocking(move || pr_kpi::build_cache(root, github_token))
-        .await
-        .map_err(|error| format!("KPI 分析缓存任务失败: {error}"))??;
+    let cache =
+        tauri::async_runtime::spawn_blocking(move || pr_kpi::build_cache(root, github_token))
+            .await
+            .map_err(|error| format!("KPI 分析缓存任务失败: {error}"))??;
     storage::write_json(&app, PR_KPI_CACHE_FILE, &cache)?;
     if emit_update {
         let _ = app.emit(PR_KPI_CACHE_UPDATED_EVENT, ());
@@ -1008,96 +1091,98 @@ fn claim_pr_kpi_refresh() -> Result<PrKpiRefreshGuard, String> {
 }
 
 pub async fn refresh_inner(app: &AppHandle, store: &StateStore) -> Result<(), String> {
-    let settings = settings::load_settings(app)?;
-    let copilot_state = app.state::<CopilotAuthState>();
+    run_refresh_operation(store, async {
+        let settings = settings::load_settings(app)?;
+        let copilot_state = app.state::<CopilotAuthState>();
 
-    {
-        let mut guard = store.inner.write().await;
-        guard.refresh_status = crate::models::RefreshStatus::Refreshing;
-        guard.last_error = None;
-    }
+        let accounts = refreshable_quota_accounts(&settings);
+        let has_managed_copilot = settings
+            .reverse_proxy
+            .default_copilot_account_id
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if accounts.is_empty() && !has_managed_copilot {
+            let snapshots = read_account_snapshots(app)?;
+            let mut guard = store.inner.write().await;
+            guard.snapshot = snapshots.get(&settings.account_id).cloned();
+            guard.accounts = account_statuses_from_settings_and_snapshots(&settings, &snapshots);
+            guard.refresh_status = crate::models::RefreshStatus::Error;
+            guard.last_error = Some("当前没有支持额度刷新的账号".into());
+            return Err(guard
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "刷新失败".to_string()));
+        }
 
-    let accounts = refreshable_quota_accounts(&settings);
-    let has_managed_copilot = settings
-        .reverse_proxy
-        .default_copilot_account_id
-        .as_ref()
-        .is_some_and(|value| !value.trim().is_empty());
-    if accounts.is_empty() && !has_managed_copilot {
-        let snapshots = read_account_snapshots(app)?;
-        let mut guard = store.inner.write().await;
-        guard.snapshot = snapshots.get(&settings.account_id).cloned();
-        guard.accounts = account_statuses_from_settings_and_snapshots(&settings, &snapshots);
-        guard.refresh_status = crate::models::RefreshStatus::Error;
-        guard.last_error = Some("当前没有支持额度刷新的账号".into());
-        return Err(guard
-            .last_error
-            .clone()
-            .unwrap_or_else(|| "刷新失败".to_string()));
-    }
-
-    let mut errors = Vec::new();
-    let mut account_errors = HashMap::new();
-    let mut updated_account_ids = HashSet::new();
-    let mut latest_active_snapshot = None;
-    for account in accounts {
-        let account_settings = settings_for_refresh_account(&settings, &account);
-        match fetch_quota_with_oauth_retry(&account_settings).await {
-            Ok(snapshot) => {
-                if account.account_id == settings.account_id {
-                    latest_active_snapshot = Some(snapshot.clone());
+        let mut errors = Vec::new();
+        let mut account_errors = HashMap::new();
+        let mut updated_account_ids = HashSet::new();
+        let mut latest_active_snapshot = None;
+        for account in accounts {
+            let account_settings = settings_for_refresh_account(&settings, &account);
+            match fetch_quota_with_oauth_retry(&account_settings).await {
+                Ok(snapshot) => {
+                    if account.account_id == settings.account_id {
+                        latest_active_snapshot = Some(snapshot.clone());
+                    }
+                    write_account_snapshot(app, &account.account_id, &snapshot)?;
+                    updated_account_ids.insert(account.account_id.clone());
                 }
-                write_account_snapshot(app, &account.account_id, &snapshot)?;
-                updated_account_ids.insert(account.account_id.clone());
-            }
-            Err(error) => {
-                account_errors.insert(account.account_id.clone(), error.message.clone());
-                errors.push(format!("{}: {}", account.account_name, error.message));
+                Err(error) => {
+                    account_errors.insert(account.account_id.clone(), error.message.clone());
+                    errors.push(format!("{}: {}", account.account_name, error.message));
+                }
             }
         }
-    }
 
-    if let Some(snapshot) = refresh_managed_copilot_quota(app, &settings, &copilot_state).await? {
-        write_account_snapshot(app, &snapshot.account_id, &snapshot)?;
-        updated_account_ids.insert(snapshot.account_id.clone());
-        if settings.account_id == snapshot.account_id {
-            latest_active_snapshot = Some(snapshot);
+        if let Some(snapshot) =
+            refresh_managed_copilot_quota(app, &settings, &copilot_state).await?
+        {
+            write_account_snapshot(app, &snapshot.account_id, &snapshot)?;
+            updated_account_ids.insert(snapshot.account_id.clone());
+            if settings.account_id == snapshot.account_id {
+                latest_active_snapshot = Some(snapshot);
+            }
         }
-    }
 
-    let snapshots = read_account_snapshots(app)?;
-    let cached_active_snapshot = snapshots.get(&settings.account_id).cloned();
-    let account_statuses =
-        account_statuses_from_settings_snapshots_and_errors(&settings, &snapshots, &account_errors);
-    {
-        let mut guard = store.inner.write().await;
-        guard.snapshot = latest_active_snapshot.or(cached_active_snapshot);
-        guard.accounts = account_statuses.clone();
-        guard.last_refreshed_at = Some(Utc::now());
+        let snapshots = read_account_snapshots(app)?;
+        let cached_active_snapshot = snapshots.get(&settings.account_id).cloned();
+        let account_statuses = account_statuses_from_settings_snapshots_and_errors(
+            &settings,
+            &snapshots,
+            &account_errors,
+        );
+        {
+            let mut guard = store.inner.write().await;
+            guard.snapshot = latest_active_snapshot.or(cached_active_snapshot);
+            guard.accounts = account_statuses.clone();
+            guard.last_refreshed_at = Some(Utc::now());
+
+            if errors.is_empty() {
+                guard.refresh_status = crate::models::RefreshStatus::Ok;
+                guard.last_error = None;
+            } else {
+                guard.refresh_status = crate::models::RefreshStatus::Error;
+                guard.last_error = Some(errors.join("；"));
+            }
+        }
+
+        if !updated_account_ids.is_empty() {
+            let _ = notifications::notify_low_quota_after_refresh(
+                app,
+                &settings,
+                &account_statuses,
+                &updated_account_ids,
+            );
+        }
 
         if errors.is_empty() {
-            guard.refresh_status = crate::models::RefreshStatus::Ok;
-            guard.last_error = None;
+            Ok(())
         } else {
-            guard.refresh_status = crate::models::RefreshStatus::Error;
-            guard.last_error = Some(errors.join("；"));
+            Err(errors.join("；"))
         }
-    }
-
-    if !updated_account_ids.is_empty() {
-        let _ = notifications::notify_low_quota_after_refresh(
-            app,
-            &settings,
-            &account_statuses,
-            &updated_account_ids,
-        );
-    }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("；"))
-    }
+    })
+    .await
 }
 
 pub async fn hydrate_cached_snapshot(app: &AppHandle, store: &StateStore) -> Result<(), String> {
@@ -1105,7 +1190,8 @@ pub async fn hydrate_cached_snapshot(app: &AppHandle, store: &StateStore) -> Res
     if !settings.secret_configured {
         let mut guard = store.inner.write().await;
         guard.snapshot = None;
-        guard.accounts = account_statuses_from_settings_and_snapshots(&settings, &read_account_snapshots(app)?);
+        guard.accounts =
+            account_statuses_from_settings_and_snapshots(&settings, &read_account_snapshots(app)?);
         guard.refresh_status = crate::models::RefreshStatus::Idle;
         guard.last_error = None;
         guard.last_refreshed_at = None;
@@ -1185,11 +1271,7 @@ fn settings_for_refresh_account(settings: &AppSettings, account: &ConnectedAccou
 fn account_supports_quota_refresh(provider: &str) -> bool {
     matches!(
         provider,
-        PROVIDER_OPENAI
-            | PROVIDER_ANTHROPIC
-            | PROVIDER_KIMI
-            | PROVIDER_GLM
-            | PROVIDER_MINIMAX
+        PROVIDER_OPENAI | PROVIDER_ANTHROPIC | PROVIDER_KIMI | PROVIDER_GLM | PROVIDER_MINIMAX
     )
 }
 
@@ -1398,19 +1480,15 @@ fn delete_account_snapshot(app: &AppHandle, account_id: &str) -> Result<(), Stri
 fn account_statuses_from_settings_and_snapshots(
     settings: &AppSettings,
     snapshots: &HashMap<String, QuotaSnapshot>,
- ) -> Vec<AccountQuotaStatus> {
-    account_statuses_from_settings_snapshots_and_errors(
-        settings,
-        snapshots,
-        &HashMap::new(),
-    )
+) -> Vec<AccountQuotaStatus> {
+    account_statuses_from_settings_snapshots_and_errors(settings, snapshots, &HashMap::new())
 }
 
 fn account_statuses_from_settings_snapshots_and_errors(
     settings: &AppSettings,
     snapshots: &HashMap<String, QuotaSnapshot>,
     errors: &HashMap<String, String>,
- ) -> Vec<AccountQuotaStatus> {
+) -> Vec<AccountQuotaStatus> {
     let mut statuses = accounts_for_status(settings)
         .into_iter()
         .map(|account| {
@@ -1422,7 +1500,9 @@ fn account_statuses_from_settings_snapshots_and_errors(
         })
         .collect::<Vec<_>>();
 
-    if let Some(default_copilot_account_id) = settings.reverse_proxy.default_copilot_account_id.as_deref() {
+    if let Some(default_copilot_account_id) =
+        settings.reverse_proxy.default_copilot_account_id.as_deref()
+    {
         let managed_account_id = managed_copilot_snapshot_id(default_copilot_account_id);
         if let Some(snapshot) = snapshots.get(&managed_account_id) {
             statuses.push(AccountQuotaStatus {
@@ -1625,6 +1705,26 @@ mod tests {
         assert!(matches!(error.kind, ProviderErrorKind::Unauthorized));
         assert_eq!(probes, 2);
         assert_eq!(refreshes, vec![false, true]);
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_operations_do_not_leave_refreshing_state_stuck() {
+        let store = StateStore::default();
+
+        let error = run_refresh_operation(&store, async {
+            Err::<(), _>("后台刷新失败".to_string())
+        })
+        .await
+        .unwrap_err();
+
+        let status = store.inner.read().await.clone();
+
+        assert_eq!(error, "后台刷新失败");
+        assert!(matches!(
+            status.refresh_status,
+            crate::models::RefreshStatus::Error
+        ));
+        assert_eq!(status.last_error.as_deref(), Some("后台刷新失败"));
     }
 
     #[test]

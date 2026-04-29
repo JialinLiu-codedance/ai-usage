@@ -1,14 +1,14 @@
 mod app_time;
-mod copilot_oauth;
 mod commands;
+mod copilot_oauth;
 mod errors;
 mod git_usage;
+mod local_proxy;
 mod local_proxy_error;
 mod local_proxy_sse;
 mod local_proxy_streaming_responses;
 mod local_proxy_transform_chat;
 mod local_proxy_transform_responses;
-mod local_proxy;
 mod local_usage;
 mod models;
 mod notifications;
@@ -45,10 +45,14 @@ fn main() {
         .manage(state::StateStore::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            handle.plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None::<Vec<&str>>,
+            ))?;
             let data_dir = storage::app_dir(&handle)?;
-            app.manage(copilot_oauth::CopilotAuthState(std::sync::Arc::new(tokio::sync::RwLock::new(
-                copilot_oauth::CopilotOAuthManager::new(data_dir),
-            ))));
+            app.manage(copilot_oauth::CopilotAuthState(std::sync::Arc::new(
+                tokio::sync::RwLock::new(copilot_oauth::CopilotOAuthManager::new(data_dir)),
+            )));
             set_main_window_dock_visible(&handle, false);
             let tray_menu = build_tray_menu(&handle, &models::AppStatus::default())?;
 
@@ -84,6 +88,8 @@ fn main() {
                     let state = handle.state::<state::StateStore>();
                     let _ = commands::hydrate_cached_snapshot(&handle, &state).await;
                     let initial_settings = settings::load_settings(&handle).unwrap_or_default();
+                    let _ =
+                        commands::sync_launch_at_login(&handle, initial_settings.launch_at_login);
                     let token_cache_max_age = i64::from(initial_settings.refresh_interval_minutes);
                     commands::ensure_local_token_usage_cache(&handle, token_cache_max_age);
                     commands::ensure_git_usage_cache(

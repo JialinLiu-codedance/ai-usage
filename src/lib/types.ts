@@ -32,6 +32,7 @@ export interface AppSettings {
   notify_on_reset: boolean;
   reset_notify_lead_minutes: number;
   git_usage_root: string;
+  launch_at_login: boolean;
   claude_proxy: ClaudeProxyConfig;
   claude_proxy_profiles: Record<string, ClaudeProxyProfileSummary>;
   reverse_proxy: ReverseProxyConfig;
@@ -50,6 +51,7 @@ export interface SaveSettingsInput {
   notify_on_reset: boolean;
   reset_notify_lead_minutes: number;
   git_usage_root: string;
+  launch_at_login: boolean;
   auth_secret?: string | null;
 }
 

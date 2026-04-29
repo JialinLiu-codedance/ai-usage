@@ -407,26 +407,69 @@ export default function App() {
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     git_usage_root: "",
+    launch_at_login: false,
     auth_secret: "",
   });
 
+  async function syncQuotaStatus() {
+    try {
+      setStatus(await getCurrentQuota());
+    } catch (error) {
+      setStatus((current) => ({
+        ...current,
+        refresh_status: "error",
+        last_error: errorMessage(error, "读取额度状态失败"),
+      }));
+    }
+  }
+
   useEffect(() => {
+    let disposed = false;
+
     async function bootstrap() {
-      const [nextStatus, nextSettings] = await Promise.all([getCurrentQuota(), getSettings()]);
-      setStatus(nextStatus);
-      applySettings(nextSettings);
-      setLoading(false);
+      try {
+        const [nextStatus, nextSettings] = await Promise.all([getCurrentQuota(), getSettings()]);
+        if (disposed) {
+          return;
+        }
+        setStatus(nextStatus);
+        applySettings(nextSettings);
+      } finally {
+        if (!disposed) {
+          setLoading(false);
+        }
+      }
     }
 
     void bootstrap();
     if (!isTauriRuntime) {
-      return undefined;
+      return () => {
+        disposed = true;
+      };
     }
-    const unlistenPanel = listen("show-main-panel", () => navigateToView("overview"));
+    const unlistenPanel = listen("show-main-panel", () => {
+      void syncQuotaStatus();
+      navigateToView("overview");
+    });
     return () => {
+      disposed = true;
       void unlistenPanel.then((dispose) => dispose());
     };
   }, []);
+
+  useEffect(() => {
+    if (loading || status.refresh_status !== "refreshing") {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      void syncQuotaStatus();
+    }, 1000);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [loading, status]);
 
   useEffect(() => {
     if (!isTauriRuntime || !panelRootRef.current) {
@@ -490,6 +533,7 @@ export default function App() {
       notify_on_reset: nextSettings.notify_on_reset,
       reset_notify_lead_minutes: nextSettings.reset_notify_lead_minutes,
       git_usage_root: nextSettings.git_usage_root,
+      launch_at_login: nextSettings.launch_at_login,
       auth_secret: "",
     }));
   }
@@ -2005,6 +2049,22 @@ function SettingsPanel({
               </option>
             ))}
           </select>
+        </div>
+      </section>
+
+      <div className="separator" />
+
+      <section className="settings-section compact-section">
+        <h2>启动设置</h2>
+        <div className="split-row">
+          <span>登录时自动启动</span>
+          <Switch
+            aria-label="登录时自动启动"
+            className="settings-switch"
+            size="panel"
+            checked={form.launch_at_login}
+            onCheckedChange={(checked) => onChange({ ...form, launch_at_login: checked })}
+          />
         </div>
       </section>
 

@@ -855,7 +855,11 @@ fn earliest_cached_start(now: DateTime<Utc>) -> DateTime<Utc> {
     .unwrap_or_else(|| range_start(LocalTokenUsageRange::ThisMonth, now, offset))
 }
 
-fn range_start(range: LocalTokenUsageRange, now: DateTime<Utc>, offset: FixedOffset) -> DateTime<Utc> {
+fn range_start(
+    range: LocalTokenUsageRange,
+    now: DateTime<Utc>,
+    offset: FixedOffset,
+) -> DateTime<Utc> {
     let today = app_time::local_date(now, offset);
     let start_date = match range {
         LocalTokenUsageRange::Today => today,
@@ -881,7 +885,11 @@ fn bucket_granularity(range: LocalTokenUsageRange) -> BucketGranularity {
     }
 }
 
-fn range_bucket_keys(range: LocalTokenUsageRange, now: DateTime<Utc>, offset: FixedOffset) -> Vec<String> {
+fn range_bucket_keys(
+    range: LocalTokenUsageRange,
+    now: DateTime<Utc>,
+    offset: FixedOffset,
+) -> Vec<String> {
     let today = app_time::local_date(now, offset);
     match bucket_granularity(range) {
         BucketGranularity::Day => {
@@ -935,7 +943,11 @@ fn day_bucket_keys(start_date: NaiveDate, end_date: NaiveDate) -> Vec<String> {
     starts
 }
 
-fn bucket_key(granularity: BucketGranularity, timestamp: DateTime<Utc>, offset: FixedOffset) -> String {
+fn bucket_key(
+    granularity: BucketGranularity,
+    timestamp: DateTime<Utc>,
+    offset: FixedOffset,
+) -> String {
     match granularity {
         BucketGranularity::Day => app_time::local_bucket_key(timestamp, None, offset),
         BucketGranularity::Hour => app_time::local_bucket_key(timestamp, Some(1), offset),
@@ -1288,7 +1300,12 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
             git_stat(&local_timestamp_rfc3339(2026, 4, 27, 9, 10, 0), 10, 2, 1),
             git_stat(&local_timestamp_rfc3339(2026, 4, 27, 14, 10, 0), 20, 5, 2),
             git_stat(&local_timestamp_rfc3339(2026, 4, 25, 3, 30, 0), 7, 1, 1),
-            git_stat(&local_timestamp_rfc3339(2026, 3, 31, 23, 30, 0), 999, 999, 999),
+            git_stat(
+                &local_timestamp_rfc3339(2026, 3, 31, 23, 30, 0),
+                999,
+                999,
+                999,
+            ),
         ];
 
         let today = aggregate_git_stats(LocalTokenUsageRange::Today, now, stats.clone(), 3, vec![]);
@@ -1377,10 +1394,20 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         let start = NaiveDate::from_ymd_opt(2026, 4, 20).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 4, 20).unwrap();
         let stats = vec![
-            git_stat(&local_timestamp_rfc3339(2026, 4, 19, 23, 30, 0), 999, 999, 999),
+            git_stat(
+                &local_timestamp_rfc3339(2026, 4, 19, 23, 30, 0),
+                999,
+                999,
+                999,
+            ),
             git_stat(&local_timestamp_rfc3339(2026, 4, 20, 0, 30, 0), 10, 2, 1),
             git_stat(&local_timestamp_rfc3339(2026, 4, 21, 0, 30, 0), 20, 5, 2),
-            git_stat(&local_timestamp_rfc3339(2026, 4, 21, 1, 30, 0), 999, 999, 999),
+            git_stat(
+                &local_timestamp_rfc3339(2026, 4, 21, 1, 30, 0),
+                999,
+                999,
+                999,
+            ),
         ];
 
         let report = aggregate_custom_git_stats(now, start, end, stats, 3, vec![]);

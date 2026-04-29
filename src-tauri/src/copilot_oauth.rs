@@ -136,7 +136,10 @@ impl CopilotOAuthManager {
             .post(DEVICE_CODE_URL)
             .header("Accept", "application/json")
             .header("User-Agent", USER_AGENT)
-            .form(&[("client_id", GITHUB_CLIENT_ID), ("scope", "read:user copilot")])
+            .form(&[
+                ("client_id", GITHUB_CLIENT_ID),
+                ("scope", "read:user copilot"),
+            ])
             .send()
             .await?;
 
@@ -304,23 +307,16 @@ impl CopilotOAuthManager {
         self.copilot_tokens.write().await.remove(account_id);
         self.refresh_locks.write().await.remove(account_id);
         if self.default_account_id.read().await.as_deref() == Some(account_id) {
-            let next_default = self
-                .accounts
-                .read()
-                .await
-                .keys()
-                .next()
-                .cloned();
+            let next_default = self.accounts.read().await.keys().next().cloned();
             *self.default_account_id.write().await = next_default;
         }
         self.save_to_disk().await
     }
 
     pub async fn get_valid_token(&self) -> Result<String, CopilotOAuthError> {
-        let default_id = self
-            .default_account_id()
-            .await
-            .ok_or_else(|| CopilotOAuthError::AccountNotFound("无可用的 Copilot OAuth 账号".into()))?;
+        let default_id = self.default_account_id().await.ok_or_else(|| {
+            CopilotOAuthError::AccountNotFound("无可用的 Copilot OAuth 账号".into())
+        })?;
         self.get_valid_token_for_account(&default_id).await
     }
 
@@ -426,8 +422,8 @@ impl CopilotOAuthManager {
             return Ok(());
         }
         let content = fs::read_to_string(&self.storage_path)?;
-        let store: CopilotAuthStore =
-            serde_json::from_str(&content).map_err(|err| CopilotOAuthError::ParseError(err.to_string()))?;
+        let store: CopilotAuthStore = serde_json::from_str(&content)
+            .map_err(|err| CopilotOAuthError::ParseError(err.to_string()))?;
         if let Ok(mut accounts) = self.accounts.try_write() {
             *accounts = store.accounts;
         }
@@ -443,8 +439,8 @@ impl CopilotOAuthManager {
             accounts: self.accounts.read().await.clone(),
             default_account_id: self.default_account_id().await,
         };
-        let content =
-            serde_json::to_string_pretty(&store).map_err(|err| CopilotOAuthError::ParseError(err.to_string()))?;
+        let content = serde_json::to_string_pretty(&store)
+            .map_err(|err| CopilotOAuthError::ParseError(err.to_string()))?;
         self.write_store_atomic(&content)
     }
 

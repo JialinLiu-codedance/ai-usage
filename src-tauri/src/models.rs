@@ -111,6 +111,8 @@ pub struct AppSettings {
     #[serde(default = "default_git_usage_root")]
     pub git_usage_root: String,
     #[serde(default)]
+    pub launch_at_login: bool,
+    #[serde(default)]
     pub claude_proxy: ClaudeProxyConfig,
     #[serde(default)]
     pub claude_proxy_profiles: HashMap<String, ClaudeProxyProfileSettings>,
@@ -134,6 +136,7 @@ impl Default for AppSettings {
             notify_on_reset: false,
             reset_notify_lead_minutes: 15,
             git_usage_root: default_git_usage_root(),
+            launch_at_login: false,
             claude_proxy: ClaudeProxyConfig::default(),
             claude_proxy_profiles: HashMap::new(),
             reverse_proxy: ReverseProxyConfig::default(),
@@ -167,6 +170,8 @@ pub struct SaveSettingsInput {
     pub reset_notify_lead_minutes: u32,
     #[serde(default = "default_git_usage_root")]
     pub git_usage_root: String,
+    #[serde(default)]
+    pub launch_at_login: bool,
     pub auth_secret: Option<String>,
 }
 

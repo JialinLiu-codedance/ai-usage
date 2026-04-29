@@ -12,8 +12,7 @@ use crate::{
         ReverseProxyStatus, PROVIDER_ANTHROPIC, PROVIDER_COPILOT, PROVIDER_CUSTOM, PROVIDER_GLM,
         PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI, PROVIDER_QWEN, PROVIDER_XIAOMI,
     },
-    oauth,
-    secrets, settings,
+    oauth, secrets, settings,
 };
 use axum::{
     body::{self, Bytes},
@@ -29,12 +28,12 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Manager};
 use tokio::{
     net::TcpListener,
     sync::{oneshot, Mutex},
 };
-use tauri::async_runtime::JoinHandle;
 
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 const REQUEST_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
@@ -70,7 +69,12 @@ pub fn build_local_proxy_settings_state(
     let mut capabilities = settings
         .accounts
         .iter()
-        .filter(|account| !matches!(account.provider.as_str(), PROVIDER_OPENAI | PROVIDER_COPILOT))
+        .filter(|account| {
+            !matches!(
+                account.provider.as_str(),
+                PROVIDER_OPENAI | PROVIDER_COPILOT
+            )
+        })
         .map(|account| build_capability_for_account(settings, account, reverse_status))
         .collect::<Vec<_>>();
     capabilities.push(build_reverse_capability(
@@ -92,7 +96,10 @@ pub fn build_local_proxy_settings_state(
     })
 }
 
-pub fn test_model_match(settings: &AppSettings, model: &str) -> Result<LocalProxyMatchResult, String> {
+pub fn test_model_match(
+    settings: &AppSettings,
+    model: &str,
+) -> Result<LocalProxyMatchResult, String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return Ok(LocalProxyMatchResult {
@@ -193,12 +200,7 @@ impl LocalProxyManager {
             .map_err(|error| format!("启动本地代理失败: {error}"))?;
 
         let mut runtime = self.inner.lock().await;
-        if runtime
-            .metrics
-            .lock()
-            .await
-            .running
-        {
+        if runtime.metrics.lock().await.running {
             return build_status(&app, &runtime.metrics).await;
         }
 
@@ -278,7 +280,9 @@ fn build_capability_for_account(
         base_url: stored
             .and_then(|profile| profile.base_url.clone())
             .or(defaults.base_url),
-        api_format: stored.map(|profile| profile.api_format).unwrap_or(defaults.api_format),
+        api_format: stored
+            .map(|profile| profile.api_format)
+            .unwrap_or(defaults.api_format),
         auth_field: stored
             .map(|profile| profile.auth_field)
             .unwrap_or(defaults.auth_field),
@@ -466,7 +470,12 @@ async fn handle_messages(
     let body_bytes = match body::to_bytes(body, REQUEST_BODY_LIMIT_BYTES).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            finish_request(&state.metrics, false, Some(format!("读取请求体失败: {error}"))).await;
+            finish_request(
+                &state.metrics,
+                false,
+                Some(format!("读取请求体失败: {error}")),
+            )
+            .await;
             return error_response(StatusCode::BAD_REQUEST, "请求体无效");
         }
     };
@@ -474,7 +483,12 @@ async fn handle_messages(
     let request_body: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
         Err(error) => {
-            finish_request(&state.metrics, false, Some(format!("解析请求体失败: {error}"))).await;
+            finish_request(
+                &state.metrics,
+                false,
+                Some(format!("解析请求体失败: {error}")),
+            )
+            .await;
             return error_response(StatusCode::BAD_REQUEST, "请求 JSON 无效");
         }
     };
@@ -504,9 +518,7 @@ async fn handle_messages(
         }
     };
     if !matched.matched {
-        let message = matched
-            .error
-            .unwrap_or_else(|| "未匹配到模型路由".into());
+        let message = matched.error.unwrap_or_else(|| "未匹配到模型路由".into());
         finish_request(&state.metrics, false, Some(message.clone())).await;
         return error_response(StatusCode::BAD_REQUEST, &message);
     }
@@ -515,18 +527,14 @@ async fn handle_messages(
         finish_request(&state.metrics, false, Some("路由目标账号无效".into())).await;
         return error_response(StatusCode::BAD_REQUEST, "路由目标账号无效");
     };
-    let reverse_status = match build_reverse_proxy_status(
-        &settings,
-        &state.app.state::<CopilotAuthState>(),
-    )
-    .await
-    {
-        Ok(status) => status,
-        Err(error) => {
-            finish_request(&state.metrics, false, Some(error.clone())).await;
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
-        }
-    };
+    let reverse_status =
+        match build_reverse_proxy_status(&settings, &state.app.state::<CopilotAuthState>()).await {
+            Ok(status) => status,
+            Err(error) => {
+                finish_request(&state.metrics, false, Some(error.clone())).await;
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+            }
+        };
     let target = if account_id == REVERSE_TARGET_COPILOT {
         match resolve_reverse_copilot_target(&settings, &state.app).await {
             Ok(target) => target,
@@ -567,7 +575,12 @@ async fn handle_messages(
     let client = match Client::builder().timeout(Duration::from_secs(180)).build() {
         Ok(client) => client,
         Err(error) => {
-            finish_request(&state.metrics, false, Some(format!("创建 HTTP 客户端失败: {error}"))).await;
+            finish_request(
+                &state.metrics,
+                false,
+                Some(format!("创建 HTTP 客户端失败: {error}")),
+            )
+            .await;
             return error_response(StatusCode::INTERNAL_SERVER_ERROR, "创建代理客户端失败");
         }
     };
@@ -610,7 +623,9 @@ fn resolve_runtime_profile(
         .and_then(|profile| profile.base_url.clone())
         .or(defaults.base_url)
         .ok_or_else(|| "请补充 Claude 代理 BASE_URL".to_string())?;
-    let api_format = stored.map(|profile| profile.api_format).unwrap_or(defaults.api_format);
+    let api_format = stored
+        .map(|profile| profile.api_format)
+        .unwrap_or(defaults.api_format);
     let auth_field = stored
         .map(|profile| profile.auth_field)
         .unwrap_or(defaults.auth_field);
@@ -764,17 +779,18 @@ async fn resolve_reverse_copilot_target(
     }
     let copilot_state = app.state::<CopilotAuthState>();
     let manager = copilot_state.0.read().await;
-    let account_id = if let Some(account_id) = settings.reverse_proxy.default_copilot_account_id.clone() {
-        account_id
-    } else {
-        manager
-            .list_accounts()
-            .await
-            .into_iter()
-            .next()
-            .map(|account| account.id)
-            .ok_or_else(|| "请先在反向代理中设置默认 Copilot 账号".to_string())?
-    };
+    let account_id =
+        if let Some(account_id) = settings.reverse_proxy.default_copilot_account_id.clone() {
+            account_id
+        } else {
+            manager
+                .list_accounts()
+                .await
+                .into_iter()
+                .next()
+                .map(|account| account.id)
+                .ok_or_else(|| "请先在反向代理中设置默认 Copilot 账号".to_string())?
+        };
     let token = manager
         .get_valid_token_for_account(&account_id)
         .await
@@ -797,7 +813,10 @@ async fn resolve_reverse_openai_target(
             settings
                 .accounts
                 .iter()
-                .find(|account| account.provider == PROVIDER_OPENAI && matches!(account.auth_mode, AuthMode::OAuth))
+                .find(|account| {
+                    account.provider == PROVIDER_OPENAI
+                        && matches!(account.auth_mode, AuthMode::OAuth)
+                })
                 .map(|account| account.account_id.clone())
         })
         .ok_or_else(|| "请先在反向代理中设置默认 OpenAI 账号".to_string())?;
@@ -829,7 +848,16 @@ async fn forward_request(
         ResolvedProxyTarget::ReverseOpenai {
             token,
             chatgpt_account_id,
-        } => forward_reverse_openai_request(client, original_body, token, chatgpt_account_id, wants_stream).await,
+        } => {
+            forward_reverse_openai_request(
+                client,
+                original_body,
+                token,
+                chatgpt_account_id,
+                wants_stream,
+            )
+            .await
+        }
     }
 }
 
@@ -874,7 +902,8 @@ async fn forward_reverse_copilot_request(
     token: String,
     wants_stream: bool,
 ) -> Result<Response, String> {
-    let mut upstream_body = anthropic_to_openai(original_body).map_err(|error| error.to_string())?;
+    let mut upstream_body =
+        anthropic_to_openai(original_body).map_err(|error| error.to_string())?;
     upstream_body["stream"] = json!(false);
 
     let upstream_response = client
@@ -914,7 +943,8 @@ async fn forward_reverse_openai_request(
     chatgpt_account_id: Option<String>,
     wants_stream: bool,
 ) -> Result<Response, String> {
-    let mut upstream_body = anthropic_to_responses(original_body, true).map_err(|error| error.to_string())?;
+    let mut upstream_body =
+        anthropic_to_responses(original_body, true).map_err(|error| error.to_string())?;
 
     let mut request = client
         .post("https://chatgpt.com/backend-api/codex/responses")
@@ -965,11 +995,7 @@ async fn forward_reverse_openai_request(
 
 fn anthropic_response_to_client(body: Value, wants_stream: bool) -> Response {
     if !wants_stream {
-        return (
-            StatusCode::OK,
-            Json(body),
-        )
-            .into_response();
+        return (StatusCode::OK, Json(body)).into_response();
     }
 
     let sse = anthropic_json_to_sse(&body);
@@ -993,7 +1019,10 @@ fn anthropic_json_to_sse(body: &Value) -> String {
             "usage": body.get("usage").cloned().unwrap_or_else(|| json!({"input_tokens": 0, "output_tokens": 0}))
         }
     });
-    events.push(format!("event: message_start\ndata: {}\n\n", serde_json::to_string(&message_start).unwrap()));
+    events.push(format!(
+        "event: message_start\ndata: {}\n\n",
+        serde_json::to_string(&message_start).unwrap()
+    ));
 
     if let Some(content) = body.get("content").and_then(|v| v.as_array()) {
         for (index, block) in content.iter().enumerate() {
@@ -1005,7 +1034,10 @@ fn anthropic_json_to_sse(body: &Value) -> String {
                         "index": index,
                         "content_block": { "type": "text", "text": "" }
                     });
-                    events.push(format!("event: content_block_start\ndata: {}\n\n", serde_json::to_string(&start).unwrap()));
+                    events.push(format!(
+                        "event: content_block_start\ndata: {}\n\n",
+                        serde_json::to_string(&start).unwrap()
+                    ));
                     let delta = json!({
                         "type": "content_block_delta",
                         "index": index,
@@ -1014,9 +1046,15 @@ fn anthropic_json_to_sse(body: &Value) -> String {
                             "text": block.get("text").and_then(|v| v.as_str()).unwrap_or("")
                         }
                     });
-                    events.push(format!("event: content_block_delta\ndata: {}\n\n", serde_json::to_string(&delta).unwrap()));
+                    events.push(format!(
+                        "event: content_block_delta\ndata: {}\n\n",
+                        serde_json::to_string(&delta).unwrap()
+                    ));
                     let stop = json!({ "type": "content_block_stop", "index": index });
-                    events.push(format!("event: content_block_stop\ndata: {}\n\n", serde_json::to_string(&stop).unwrap()));
+                    events.push(format!(
+                        "event: content_block_stop\ndata: {}\n\n",
+                        serde_json::to_string(&stop).unwrap()
+                    ));
                 }
                 "tool_use" => {
                     let start = json!({
@@ -1029,7 +1067,10 @@ fn anthropic_json_to_sse(body: &Value) -> String {
                             "input": {}
                         }
                     });
-                    events.push(format!("event: content_block_start\ndata: {}\n\n", serde_json::to_string(&start).unwrap()));
+                    events.push(format!(
+                        "event: content_block_start\ndata: {}\n\n",
+                        serde_json::to_string(&start).unwrap()
+                    ));
                     let delta = json!({
                         "type": "content_block_delta",
                         "index": index,
@@ -1038,9 +1079,15 @@ fn anthropic_json_to_sse(body: &Value) -> String {
                             "partial_json": serde_json::to_string(&block.get("input").cloned().unwrap_or_else(|| json!({}))).unwrap_or_else(|_| "{}".to_string())
                         }
                     });
-                    events.push(format!("event: content_block_delta\ndata: {}\n\n", serde_json::to_string(&delta).unwrap()));
+                    events.push(format!(
+                        "event: content_block_delta\ndata: {}\n\n",
+                        serde_json::to_string(&delta).unwrap()
+                    ));
                     let stop = json!({ "type": "content_block_stop", "index": index });
-                    events.push(format!("event: content_block_stop\ndata: {}\n\n", serde_json::to_string(&stop).unwrap()));
+                    events.push(format!(
+                        "event: content_block_stop\ndata: {}\n\n",
+                        serde_json::to_string(&stop).unwrap()
+                    ));
                 }
                 _ => {}
             }
@@ -1055,9 +1102,15 @@ fn anthropic_json_to_sse(body: &Value) -> String {
         },
         "usage": body.get("usage").cloned().unwrap_or_else(|| json!({"input_tokens": 0, "output_tokens": 0}))
     });
-    events.push(format!("event: message_delta\ndata: {}\n\n", serde_json::to_string(&message_delta).unwrap()));
+    events.push(format!(
+        "event: message_delta\ndata: {}\n\n",
+        serde_json::to_string(&message_delta).unwrap()
+    ));
     let message_stop = json!({ "type": "message_stop" });
-    events.push(format!("event: message_stop\ndata: {}\n\n", serde_json::to_string(&message_stop).unwrap()));
+    events.push(format!(
+        "event: message_stop\ndata: {}\n\n",
+        serde_json::to_string(&message_stop).unwrap()
+    ));
     events.join("")
 }
 
@@ -1130,7 +1183,11 @@ mod tests {
     use crate::models::{AppSettings, AuthMode, ClaudeApiFormat, ClaudeProxyProfileSettings};
     use std::collections::HashMap;
 
-    fn reverse_status(enabled: bool, copilot_ready: bool, openai_ready: bool) -> ReverseProxyStatus {
+    fn reverse_status(
+        enabled: bool,
+        copilot_ready: bool,
+        openai_ready: bool,
+    ) -> ReverseProxyStatus {
         ReverseProxyStatus {
             enabled,
             copilot_ready,
@@ -1162,7 +1219,10 @@ mod tests {
             PROVIDER_XIAOMI,
             PROVIDER_CUSTOM,
         ] {
-            assert!(is_claude_compatible_provider(provider), "{provider} should be compatible");
+            assert!(
+                is_claude_compatible_provider(provider),
+                "{provider} should be compatible"
+            );
         }
 
         assert!(!is_claude_compatible_provider("openai"));
@@ -1203,8 +1263,9 @@ mod tests {
             ..AppSettings::default()
         };
 
-        let state = build_local_proxy_settings_state(&settings, &reverse_status(false, false, false))
-            .expect("settings state");
+        let state =
+            build_local_proxy_settings_state(&settings, &reverse_status(false, false, false))
+                .expect("settings state");
         let glm = state
             .capabilities
             .iter()
@@ -1212,7 +1273,9 @@ mod tests {
             .expect("glm capability");
         assert!(glm.can_direct_connect);
         assert_eq!(
-            glm.resolved_profile.as_ref().map(|profile| profile.base_url.clone()),
+            glm.resolved_profile
+                .as_ref()
+                .map(|profile| profile.base_url.clone()),
             Some(Some("https://open.bigmodel.cn/api/anthropic".into()))
         );
 
@@ -1223,7 +1286,10 @@ mod tests {
             .expect("minimax capability");
         assert!(minimax.can_direct_connect);
         assert_eq!(
-            minimax.resolved_profile.as_ref().map(|profile| profile.base_url.clone()),
+            minimax
+                .resolved_profile
+                .as_ref()
+                .map(|profile| profile.base_url.clone()),
             Some(Some("https://api.minimaxi.com/anthropic".into()))
         );
 
@@ -1234,7 +1300,10 @@ mod tests {
             .expect("anthropic capability");
         assert!(anthropic.is_claude_compatible_provider);
         assert!(!anthropic.can_direct_connect);
-        assert_eq!(anthropic.missing_fields, vec!["api_key_or_token".to_string()]);
+        assert_eq!(
+            anthropic.missing_fields,
+            vec!["api_key_or_token".to_string()]
+        );
 
         let kimi = state
             .capabilities
@@ -1264,20 +1333,25 @@ mod tests {
             ..AppSettings::default()
         };
 
-        let state = build_local_proxy_settings_state(&settings, &reverse_status(false, false, false))
-            .expect("settings state");
+        let state =
+            build_local_proxy_settings_state(&settings, &reverse_status(false, false, false))
+                .expect("settings state");
         let anthropic = &state.capabilities[0];
         assert!(anthropic.can_direct_connect);
         assert!(anthropic.missing_fields.is_empty());
-        assert_eq!(anthropic.profile.auth_field, ClaudeAuthField::AnthropicApiKey);
+        assert_eq!(
+            anthropic.profile.auth_field,
+            ClaudeAuthField::AnthropicApiKey
+        );
     }
 
     #[test]
     fn reverse_targets_switch_from_pending_to_ready_with_reverse_proxy_status() {
         let settings = AppSettings::default();
 
-        let pending = build_local_proxy_settings_state(&settings, &reverse_status(false, false, false))
-            .expect("pending state");
+        let pending =
+            build_local_proxy_settings_state(&settings, &reverse_status(false, false, false))
+                .expect("pending state");
         let copilot_pending = pending
             .capabilities
             .iter()
@@ -1320,7 +1394,10 @@ mod tests {
 
         assert_eq!(openai_capabilities.len(), 1);
         assert_eq!(openai_capabilities[0].account_id, REVERSE_TARGET_OPENAI);
-        assert_eq!(openai_capabilities[0].status, ProxyTargetStatus::ReverseReady);
+        assert_eq!(
+            openai_capabilities[0].status,
+            ProxyTargetStatus::ReverseReady
+        );
     }
 
     #[test]

@@ -1,10 +1,10 @@
 use crate::{
     models::{
-        default_account_id, default_git_usage_root, AppSettings, AuthMode, ClaudeProxyProfileInput,
-        ClaudeProxyProfileSettings, ClaudeProxyProfileSummary, ClaudeProxyConfig, ConnectedAccount,
-        ReverseProxyConfig, SaveLocalProxySettingsInput, SaveReverseProxySettingsInput,
-        SaveSettingsInput, PROVIDER_COPILOT, PROVIDER_GLM, PROVIDER_KIMI, PROVIDER_MINIMAX,
-        PROVIDER_OPENAI,
+        default_account_id, default_git_usage_root, AppSettings, AuthMode, ClaudeProxyConfig,
+        ClaudeProxyProfileInput, ClaudeProxyProfileSettings, ClaudeProxyProfileSummary,
+        ConnectedAccount, ReverseProxyConfig, SaveLocalProxySettingsInput,
+        SaveReverseProxySettingsInput, SaveSettingsInput, PROVIDER_COPILOT, PROVIDER_GLM,
+        PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
     secrets, storage,
 };
@@ -139,6 +139,7 @@ fn settings_from_save_input(existing: AppSettings, input: SaveSettingsInput) -> 
         notify_on_reset: false,
         reset_notify_lead_minutes: input.reset_notify_lead_minutes.max(1),
         git_usage_root: sanitize_git_usage_root(input.git_usage_root),
+        launch_at_login: input.launch_at_login,
         claude_proxy: existing.claude_proxy,
         claude_proxy_profiles: existing.claude_proxy_profiles,
         reverse_proxy: existing.reverse_proxy,
@@ -967,6 +968,7 @@ mod tests {
                 notify_on_reset: true,
                 reset_notify_lead_minutes: 30,
                 git_usage_root: " ~/project ".into(),
+                launch_at_login: false,
                 auth_secret: None,
             },
         );
@@ -990,6 +992,7 @@ mod tests {
                 notify_on_reset: false,
                 reset_notify_lead_minutes: 30,
                 git_usage_root: " ~/project ".into(),
+                launch_at_login: false,
                 auth_secret: None,
             },
         );
@@ -1002,5 +1005,29 @@ mod tests {
                 .to_string_lossy()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn save_settings_preserves_launch_at_login() {
+        let settings = settings_from_save_input(
+            AppSettings::default(),
+            SaveSettingsInput {
+                account_id: default_account_id(),
+                account_name: "OpenAI Account".into(),
+                auth_mode: AuthMode::ApiKey,
+                base_url_override: None,
+                chatgpt_account_id: None,
+                refresh_interval_minutes: 30,
+                low_quota_threshold_percent: 15.0,
+                notify_on_low_quota: false,
+                notify_on_reset: false,
+                reset_notify_lead_minutes: 30,
+                git_usage_root: default_git_usage_root(),
+                launch_at_login: true,
+                auth_secret: None,
+            },
+        );
+
+        assert!(settings.launch_at_login);
     }
 }

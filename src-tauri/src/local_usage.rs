@@ -1,8 +1,8 @@
 use crate::{
     app_time,
     models::{
-    LocalTokenUsageDay, LocalTokenUsageModel, LocalTokenUsageRange, LocalTokenUsageReport,
-    LocalTokenUsageTool, LocalTokenUsageTotals, CUSTOM_USAGE_WINDOW_DAYS,
+        LocalTokenUsageDay, LocalTokenUsageModel, LocalTokenUsageRange, LocalTokenUsageReport,
+        LocalTokenUsageTool, LocalTokenUsageTotals, CUSTOM_USAGE_WINDOW_DAYS,
     },
 };
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
@@ -1073,7 +1073,11 @@ fn model_usage(model: String, stats: TokenStats) -> LocalTokenUsageModel {
     }
 }
 
-fn range_start(range: LocalTokenUsageRange, now: DateTime<Utc>, offset: FixedOffset) -> DateTime<Utc> {
+fn range_start(
+    range: LocalTokenUsageRange,
+    now: DateTime<Utc>,
+    offset: FixedOffset,
+) -> DateTime<Utc> {
     let today = app_time::local_date(now, offset);
     let start_date = match range {
         LocalTokenUsageRange::Today => today,
@@ -1099,7 +1103,11 @@ fn bucket_granularity(range: LocalTokenUsageRange) -> BucketGranularity {
     }
 }
 
-fn range_bucket_keys(range: LocalTokenUsageRange, now: DateTime<Utc>, offset: FixedOffset) -> Vec<String> {
+fn range_bucket_keys(
+    range: LocalTokenUsageRange,
+    now: DateTime<Utc>,
+    offset: FixedOffset,
+) -> Vec<String> {
     let today = app_time::local_date(now, offset);
     match bucket_granularity(range) {
         BucketGranularity::Day => {
@@ -1153,7 +1161,11 @@ fn day_bucket_keys(start_date: NaiveDate, end_date: NaiveDate) -> Vec<String> {
     keys
 }
 
-fn bucket_key(granularity: BucketGranularity, timestamp: DateTime<Utc>, offset: FixedOffset) -> String {
+fn bucket_key(
+    granularity: BucketGranularity,
+    timestamp: DateTime<Utc>,
+    offset: FixedOffset,
+) -> String {
     match granularity {
         BucketGranularity::Day => app_time::local_bucket_key(timestamp, None, offset),
         BucketGranularity::Hour => app_time::local_bucket_key(timestamp, Some(1), offset),
