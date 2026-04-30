@@ -53,7 +53,7 @@ const defaultMockReverseProxyConfig = {
   default_openai_account_id: null,
   default_copilot_account_id: null,
 } as const;
-const PR_KPI_OUTPUT_RATIO_TOKEN_UNIT = 1_000_000;
+const PR_KPI_OUTPUT_RATIO_TOKEN_UNIT = 1_000;
 const PR_KPI_CACHE_READ_TOKEN_DIVISOR = 10;
 let mockOAuthSequence = 0;
 let mockOAuthCompleteSequence = 0;

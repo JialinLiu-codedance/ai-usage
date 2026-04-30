@@ -23,7 +23,7 @@ const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_USER_AGENT: &str = "ai-usage-pr-kpi/0.1";
-const PR_KPI_OUTPUT_RATIO_TOKEN_UNIT: f64 = 1_000_000.0;
+const PR_KPI_OUTPUT_RATIO_TOKEN_UNIT: f64 = 1_000.0;
 const PR_KPI_CACHE_READ_TOKEN_DIVISOR: u64 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1485,7 +1485,7 @@ mod tests {
     }
 
     #[test]
-    fn build_overview_uses_per_million_tokens_for_output_ratio() {
+    fn build_overview_uses_per_thousand_tokens_for_output_ratio() {
         let token_report = LocalTokenUsageReport {
             range: LocalTokenUsageRange::ThisMonth,
             start_date: None,
@@ -1529,7 +1529,7 @@ mod tests {
         assert_eq!(overview.token_total, 2_000_000);
         assert_ne!(overview.token_total, token_report.totals.total_tokens);
         assert_eq!(overview.code_lines, 1_000);
-        assert_eq!(overview.output_ratio, Some(400.0));
+        assert_eq!(overview.output_ratio, Some(0.4));
     }
 
     #[test]

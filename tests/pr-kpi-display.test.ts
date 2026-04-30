@@ -62,7 +62,7 @@ test("mock getPrKpi follows the shared custom date range contract", async () => 
   assert.equal(typeof mock.overview.code_lines, "number");
 });
 
-test("mock getPrKpi scales output ratio to per-million tokens", async () => {
+test("mock getPrKpi scales output ratio to per-thousand tokens", async () => {
   resetMockTauriStateForTests();
 
   const mock = await getPrKpi({
@@ -71,7 +71,8 @@ test("mock getPrKpi scales output ratio to per-million tokens", async () => {
     endDate: "2026-04-27",
   });
 
-  assert.ok((mock.overview.output_ratio ?? 0) > 1_000);
+  assert.ok((mock.overview.output_ratio ?? 0) > 1);
+  assert.ok((mock.overview.output_ratio ?? 0) < 10);
 });
 
 test("mock getPrKpi uses effective KPI tokens with cache reads discounted", async () => {
