@@ -1,6 +1,6 @@
 [package]
 name = "ai-usage"
-version = "0.1.0"
+version = "0.1.1"
 description = "Codex quota menubar app"
 authors = ["liujialin"]
 edition = "2021"
