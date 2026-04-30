@@ -54,6 +54,7 @@ const defaultMockReverseProxyConfig = {
   default_copilot_account_id: null,
 } as const;
 const PR_KPI_OUTPUT_RATIO_TOKEN_UNIT = 1_000_000;
+const PR_KPI_CACHE_READ_TOKEN_DIVISOR = 10;
 let mockOAuthSequence = 0;
 let mockOAuthCompleteSequence = 0;
 let mockPendingOAuthAccountId: string | null = null;
@@ -1293,9 +1294,10 @@ function mockPrKpiReport(selection: UsageRangeSelection): PrKpiReport {
   const tokenReport = mockLocalTokenUsageReport(selection);
   const gitReport = mockGitUsageReport(selection);
   const netLines = gitReport.totals.added_lines - gitReport.totals.deleted_lines;
+  const effectiveTokenTotal = effectivePrKpiTokenTotal(tokenReport.totals);
   const outputRatio =
-    tokenReport.totals.total_tokens > 0
-      ? netLines / (tokenReport.totals.total_tokens / PR_KPI_OUTPUT_RATIO_TOKEN_UNIT)
+    effectiveTokenTotal > 0
+      ? netLines / (effectiveTokenTotal / PR_KPI_OUTPUT_RATIO_TOKEN_UNIT)
       : null;
   const rangeDays =
     selection.kind === "custom"
@@ -1319,7 +1321,7 @@ function mockPrKpiReport(selection: UsageRangeSelection): PrKpiReport {
     range,
     ...reportDateFields(selection),
     overview: {
-      token_total: tokenReport.totals.total_tokens,
+      token_total: effectiveTokenTotal,
       code_lines: gitReport.totals.added_lines + gitReport.totals.deleted_lines,
       output_ratio: outputRatio,
     },
@@ -1477,6 +1479,15 @@ function sumTokenStats(items: Array<Omit<LocalTokenUsageTotals, "cache_hit_rate_
       cache_creation_tokens: 0,
       total_tokens: 0,
     },
+  );
+}
+
+function effectivePrKpiTokenTotal(totals: LocalTokenUsageTotals): number {
+  return (
+    totals.input_tokens +
+    totals.output_tokens +
+    totals.cache_creation_tokens +
+    Math.floor(totals.cache_read_tokens / PR_KPI_CACHE_READ_TOKEN_DIVISOR)
   );
 }
 

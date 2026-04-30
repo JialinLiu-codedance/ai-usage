@@ -1,8 +1,8 @@
 use crate::{
     app_time, git_usage,
     models::{
-        GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport, PrKpiMetric, PrKpiMetricKey,
-        PrKpiOverview, PrKpiReport, CUSTOM_USAGE_WINDOW_DAYS,
+        GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport, LocalTokenUsageTotals,
+        PrKpiMetric, PrKpiMetricKey, PrKpiOverview, PrKpiReport, CUSTOM_USAGE_WINDOW_DAYS,
     },
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
@@ -24,6 +24,7 @@ const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_USER_AGENT: &str = "ai-usage-pr-kpi/0.1";
 const PR_KPI_OUTPUT_RATIO_TOKEN_UNIT: f64 = 1_000_000.0;
+const PR_KPI_CACHE_READ_TOKEN_DIVISOR: u64 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrKpiCache {
@@ -268,7 +269,7 @@ pub fn build_overview(
     token_report: &LocalTokenUsageReport,
     git_report: &GitUsageReport,
 ) -> PrKpiOverview {
-    let token_total = token_report.totals.total_tokens;
+    let token_total = effective_kpi_token_total(&token_report.totals);
     let code_lines = git_report
         .totals
         .added_lines
@@ -285,6 +286,14 @@ pub fn build_overview(
         code_lines,
         output_ratio,
     }
+}
+
+fn effective_kpi_token_total(totals: &LocalTokenUsageTotals) -> u64 {
+    totals
+        .input_tokens
+        .saturating_add(totals.output_tokens)
+        .saturating_add(totals.cache_creation_tokens)
+        .saturating_add(totals.cache_read_tokens / PR_KPI_CACHE_READ_TOKEN_DIVISOR)
 }
 
 pub fn empty_report(
@@ -1483,7 +1492,11 @@ mod tests {
             end_date: None,
             pending: false,
             totals: crate::models::LocalTokenUsageTotals {
-                total_tokens: 2_000_000,
+                input_tokens: 1_000_000,
+                output_tokens: 500_000,
+                cache_creation_tokens: 400_000,
+                cache_read_tokens: 1_000_000,
+                total_tokens: 2_900_000,
                 ..Default::default()
             },
             days: vec![],
@@ -1514,6 +1527,7 @@ mod tests {
         let overview = build_overview(&token_report, &git_report);
 
         assert_eq!(overview.token_total, 2_000_000);
+        assert_ne!(overview.token_total, token_report.totals.total_tokens);
         assert_eq!(overview.code_lines, 1_000);
         assert_eq!(overview.output_ratio, Some(400.0));
     }

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getPrKpi, resetMockTauriStateForTests } from "../src/lib/tauri.ts";
+import { getLocalTokenUsage, getPrKpi, resetMockTauriStateForTests } from "../src/lib/tauri.ts";
 import {
   buildPrKpiRadarModel,
   formatPrKpiOverviewValue,
@@ -72,6 +72,26 @@ test("mock getPrKpi scales output ratio to per-million tokens", async () => {
   });
 
   assert.ok((mock.overview.output_ratio ?? 0) > 1_000);
+});
+
+test("mock getPrKpi uses effective KPI tokens with cache reads discounted", async () => {
+  resetMockTauriStateForTests();
+
+  const selection = {
+    kind: "custom" as const,
+    startDate: "2026-04-20",
+    endDate: "2026-04-27",
+  };
+  const tokenReport = await getLocalTokenUsage(selection);
+  const mock = await getPrKpi(selection);
+  const expectedEffectiveTokens =
+    tokenReport.totals.input_tokens +
+    tokenReport.totals.output_tokens +
+    tokenReport.totals.cache_creation_tokens +
+    Math.floor(tokenReport.totals.cache_read_tokens / 10);
+
+  assert.equal(mock.overview.token_total, expectedEffectiveTokens);
+  assert.notEqual(mock.overview.token_total, tokenReport.totals.total_tokens);
 });
 
 test("metric descriptions cover both 7d stability keys", () => {
