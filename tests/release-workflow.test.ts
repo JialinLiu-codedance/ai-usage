@@ -13,7 +13,10 @@ test("release workflow publishes Tauri bundles from main and uploads updater met
   assert.match(workflow, /uploadUpdaterJson:\s*true/);
   assert.match(workflow, /node scripts\/release\/bump-version\.mjs "\$\{BUMP_KIND\}"/);
   assert.match(workflow, /Ensure release version is new[\s\S]*APP_VERSION: \$\{\{\s*steps\.bump_version\.outputs\.version\s*\}\}/);
+  assert.match(workflow, /persist-credentials:\s*false/);
+  assert.match(workflow, /RELEASE_PUSH_TOKEN: \$\{\{\s*secrets\.RELEASE_PUSH_TOKEN\s*\}\}/);
   assert.match(workflow, /git commit -m "core:bump version to \$\{VERSION\}"/);
+  assert.match(workflow, /git remote set-url origin "https:\/\/x-access-token:\$\{RELEASE_PUSH_TOKEN\}@github\.com\/\$\{GITHUB_REPOSITORY\}\.git"/);
   assert.match(workflow, /git push origin HEAD:main/);
   assert.match(workflow, /release_sha=\$\(git rev-parse HEAD\)/);
   assert.match(workflow, /ref:\s*\$\{\{\s*needs\.preflight\.outputs\.release_sha\s*\}\}/);
