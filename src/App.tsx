@@ -3000,7 +3000,7 @@ function KpiUsageSection({
                 <div id="kpi-summary-tooltip" role="tooltip" className="kpi-summary-tooltip">
                   <div>代码行数 = 代码增行数 + 代码减行数</div>
                   <div>Token 总用量 = 输入 + 输出 + 写入缓存 + 缓存命中 / 10</div>
-                  <div>产出比 = 代码净增行数 / KPI Token 总用量(千)</div>
+                  <div>产出比 = 代码行数 / KPI Token 总用量(千)</div>
                 </div>
               </div>
             </div>
