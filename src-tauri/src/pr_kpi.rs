@@ -1518,6 +1518,7 @@ mod tests {
             },
             buckets: vec![],
             repositories: vec![],
+            commits: vec![],
             repository_count: 0,
             missing_sources: vec![],
             warnings: vec![],

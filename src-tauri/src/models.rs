@@ -669,6 +669,22 @@ pub struct GitUsageRepository {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitUsageCommit {
+    pub commit_hash: String,
+    pub short_hash: String,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
+    pub timestamp: DateTime<Utc>,
+    pub author_name: String,
+    pub author_email: String,
+    pub subject: String,
+    pub repository_name: String,
+    pub repository_path: String,
+    pub added_lines: u64,
+    pub deleted_lines: u64,
+    pub changed_files: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitUsageReport {
     pub range: LocalTokenUsageRange,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -681,6 +697,8 @@ pub struct GitUsageReport {
     pub buckets: Vec<GitUsageBucket>,
     #[serde(default)]
     pub repositories: Vec<GitUsageRepository>,
+    #[serde(default)]
+    pub commits: Vec<GitUsageCommit>,
     pub repository_count: usize,
     pub missing_sources: Vec<String>,
     pub warnings: Vec<String>,

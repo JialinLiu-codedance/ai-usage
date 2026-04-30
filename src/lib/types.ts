@@ -291,6 +291,17 @@ export interface GitUsageRepository extends GitUsageTotals {
   path: string;
 }
 
+export interface GitUsageCommit extends GitUsageTotals {
+  commit_hash: string;
+  short_hash: string;
+  timestamp: string;
+  author_name: string;
+  author_email: string;
+  subject: string;
+  repository_name: string;
+  repository_path: string;
+}
+
 export interface GitUsageReport {
   range: LocalTokenUsageRange;
   start_date?: string | null;
@@ -299,6 +310,7 @@ export interface GitUsageReport {
   totals: GitUsageTotals;
   buckets: GitUsageBucket[];
   repositories: GitUsageRepository[];
+  commits: GitUsageCommit[];
   repository_count: number;
   missing_sources: string[];
   warnings: string[];

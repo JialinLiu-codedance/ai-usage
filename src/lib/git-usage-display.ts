@@ -1,4 +1,4 @@
-import type { GitUsageReport, GitUsageRepository, LocalTokenUsageRange } from "./types";
+import type { GitUsageCommit, GitUsageReport, GitUsageRepository, LocalTokenUsageRange } from "./types";
 
 export interface GitUsageChartRow {
   date: string;
@@ -21,6 +21,22 @@ export interface RepositoryUsageDisplayRow extends GitUsageRepository {
   displayDeleted: string;
   addedPercent: number;
   deletedPercent: number;
+}
+
+export interface CommitDetailDisplayRow extends GitUsageCommit {
+  shortHash: string;
+  subject: string;
+  timeLabel: string;
+  displayAdded: string;
+  displayDeleted: string;
+}
+
+export interface CommitDetailGroup {
+  name: string;
+  path: string;
+  totalAdded: number;
+  totalDeleted: number;
+  commits: CommitDetailDisplayRow[];
 }
 
 export function formatCompactLines(value: number): string {
@@ -87,6 +103,54 @@ export function repositoryUsageRows(report: GitUsageReport, limit?: number): Rep
   });
 }
 
+export function commitDetailGroups(report: GitUsageReport): CommitDetailGroup[] {
+  const groupsByPath = new Map<string, CommitDetailGroup>();
+
+  for (const commit of report.commits) {
+    const path = commit.repository_path;
+    if (!path) {
+      continue;
+    }
+
+    const group = groupsByPath.get(path) ?? {
+      name: commit.repository_name || "repository",
+      path,
+      totalAdded: 0,
+      totalDeleted: 0,
+      commits: [],
+    };
+    group.totalAdded += commit.added_lines;
+    group.totalDeleted += commit.deleted_lines;
+    group.commits.push({
+      ...commit,
+      shortHash: commit.short_hash || commit.commit_hash.slice(0, 10),
+      subject: commit.subject.trim() || "未命名提交",
+      timeLabel: formatCommitTime(commit.timestamp),
+      displayAdded: `+${formatCompactLines(commit.added_lines)}`,
+      displayDeleted: `-${formatCompactLines(commit.deleted_lines)}`,
+    });
+    groupsByPath.set(path, group);
+  }
+
+  const groups = [...groupsByPath.values()]
+    .filter((group) => group.commits.length > 0)
+    .sort((a, b) => {
+      const aLineTotal = a.totalAdded + a.totalDeleted;
+      const bLineTotal = b.totalAdded + b.totalDeleted;
+      return bLineTotal - aLineTotal || a.name.localeCompare(b.name);
+    });
+
+  for (const group of groups) {
+    group.commits.sort((a, b) => {
+      const aTime = Date.parse(a.timestamp);
+      const bTime = Date.parse(b.timestamp);
+      return bTime - aTime || a.commit_hash.localeCompare(b.commit_hash);
+    });
+  }
+
+  return groups;
+}
+
 function scaledHeight(value: number, maxValue: number): number {
   if (maxValue <= 0 || value <= 0) {
     return 0;
@@ -107,6 +171,18 @@ function formatBucketLabel(date: string, range: LocalTokenUsageRange): string {
     return String(Number.parseInt(day, 10));
   }
   return `${month}/${day}`;
+}
+
+function formatCommitTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${month}/${day} ${hours}:${minutes}`;
 }
 
 function trimTrailingZero(value: number, integerAt = 10): string {

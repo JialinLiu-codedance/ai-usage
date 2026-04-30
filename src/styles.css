@@ -1467,6 +1467,44 @@ textarea {
   padding: 12px;
 }
 
+.git-repository-details {
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.git-repository-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  padding: 12px;
+}
+
+.git-repository-summary::-webkit-details-marker {
+  display: none;
+}
+
+.git-repository-title-wrap {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-repository-chevron {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: #71717a;
+  transition: transform 160ms ease;
+}
+
+.git-repository-details[open] .git-repository-chevron {
+  transform: rotate(90deg);
+}
+
 .git-repository-row-header {
   display: flex;
   align-items: center;
@@ -1521,6 +1559,73 @@ textarea {
 
 .git-repository-progress-deleted {
   background: #ef4444;
+}
+
+.git-commit-row-header strong {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.git-commit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.git-commit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid #f4f4f5;
+  padding-top: 8px;
+}
+
+.git-commit-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.git-commit-row-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  color: #09090b;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.git-commit-subject {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.git-commit-added {
+  color: #22c55e;
+}
+
+.git-commit-deleted {
+  color: #ef4444;
+}
+
+.git-commit-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #71717a;
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.git-commit-hash {
+  font-family: "SFMono-Regular", "SF Mono", Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .token-tool-strip {
