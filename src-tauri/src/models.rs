@@ -676,9 +676,25 @@ pub struct GitUsageCommit {
     pub timestamp: DateTime<Utc>,
     pub author_name: String,
     pub author_email: String,
+    #[serde(default)]
+    pub committer_name: String,
+    #[serde(default)]
+    pub committer_email: String,
     pub subject: String,
     pub repository_name: String,
     pub repository_path: String,
+    #[serde(default)]
+    pub parent_count: usize,
+    #[serde(default)]
+    pub patch_id: String,
+    #[serde(default)]
+    pub duplicate_group_id: String,
+    #[serde(default)]
+    pub duplicate_group_size: usize,
+    #[serde(default)]
+    pub is_group_representative: bool,
+    #[serde(default)]
+    pub commit_role: String,
     pub added_lines: u64,
     pub deleted_lines: u64,
     pub changed_files: u64,

@@ -1440,13 +1440,32 @@ fn git_usage_report_has_commit_details(report: &GitUsageReport) -> bool {
     let has_activity = report.totals.added_lines > 0
         || report.totals.deleted_lines > 0
         || report.totals.changed_files > 0;
-    !has_activity || !report.commits.is_empty()
+    !has_activity
+        || (!report.commits.is_empty()
+            && report
+                .commits
+                .iter()
+                .all(git_usage_commit_has_duplicate_metadata))
 }
 
 fn git_usage_cached_day_has_commit_details(day: &git_usage::GitUsageCachedDay) -> bool {
     let has_activity =
         day.totals.added_lines > 0 || day.totals.deleted_lines > 0 || day.totals.changed_files > 0;
-    !has_activity || !day.commits.is_empty()
+    !has_activity
+        || (!day.commits.is_empty()
+            && day
+                .commits
+                .iter()
+                .all(git_usage_commit_has_duplicate_metadata))
+}
+
+fn git_usage_commit_has_duplicate_metadata(commit: &crate::models::GitUsageCommit) -> bool {
+    !commit.commit_hash.trim().is_empty()
+        && !commit.committer_name.trim().is_empty()
+        && !commit.committer_email.trim().is_empty()
+        && !commit.patch_id.trim().is_empty()
+        && !commit.commit_role.trim().is_empty()
+        && (commit.duplicate_group_size == 0 || !commit.duplicate_group_id.trim().is_empty())
 }
 
 fn pr_kpi_cache_is_stale(
@@ -1928,15 +1947,64 @@ mod tests {
             timestamp: now,
             author_name: "Test User".into(),
             author_email: "test@example.com".into(),
+            committer_name: "Test User".into(),
+            committer_email: "test@example.com".into(),
             subject: "test commit".into(),
             repository_name: "repo".into(),
             repository_path: "/tmp/repo".into(),
+            parent_count: 1,
+            patch_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            duplicate_group_id: "group-a".into(),
+            duplicate_group_size: 1,
+            is_group_representative: true,
+            commit_role: "original".into(),
             added_lines: 12,
             deleted_lines: 3,
             changed_files: 1,
         });
 
         assert!(!git_usage_cache_is_stale(&cache, 15, "/tmp/old"));
+    }
+
+    #[test]
+    fn git_usage_cache_is_stale_when_duplicate_metadata_is_missing_from_cached_commits() {
+        let now = chrono::Utc::now();
+        let mut cache = git_usage::GitUsageCache {
+            root_path: "/tmp/old".into(),
+            generated_at: now,
+            today: git_usage::empty_report(LocalTokenUsageRange::Today, None),
+            last3_days: git_usage::empty_report(LocalTokenUsageRange::Last3Days, None),
+            this_week: git_usage::empty_report(LocalTokenUsageRange::ThisWeek, None),
+            this_month: git_usage::empty_report(LocalTokenUsageRange::ThisMonth, None),
+            custom_window_start: None,
+            custom_window_end: None,
+            custom_days: vec![],
+        };
+        cache.today.totals.added_lines = 12;
+        cache.today.totals.deleted_lines = 3;
+        cache.today.commits.push(crate::models::GitUsageCommit {
+            commit_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            short_hash: "aaaaaaaaaa".into(),
+            timestamp: now,
+            author_name: "Test User".into(),
+            author_email: "test@example.com".into(),
+            committer_name: String::new(),
+            committer_email: String::new(),
+            subject: "test commit".into(),
+            repository_name: "repo".into(),
+            repository_path: "/tmp/repo".into(),
+            parent_count: 0,
+            patch_id: String::new(),
+            duplicate_group_id: String::new(),
+            duplicate_group_size: 0,
+            is_group_representative: false,
+            commit_role: String::new(),
+            added_lines: 12,
+            deleted_lines: 3,
+            changed_files: 1,
+        });
+
+        assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/old"));
     }
 
     #[test]
