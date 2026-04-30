@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getLocalTokenUsage, getPrKpi, resetMockTauriStateForTests } from "../src/lib/tauri.ts";
+import { getGitUsage, getLocalTokenUsage, getPrKpi, resetMockTauriStateForTests } from "../src/lib/tauri.ts";
 import {
   buildPrKpiRadarModel,
   formatPrKpiOverviewValue,
@@ -62,17 +62,29 @@ test("mock getPrKpi follows the shared custom date range contract", async () => 
   assert.equal(typeof mock.overview.code_lines, "number");
 });
 
-test("mock getPrKpi scales output ratio to per-thousand tokens", async () => {
+test("mock getPrKpi uses total changed code lines for per-thousand output ratio", async () => {
   resetMockTauriStateForTests();
 
-  const mock = await getPrKpi({
-    kind: "custom",
+  const selection = {
+    kind: "custom" as const,
     startDate: "2026-04-20",
     endDate: "2026-04-27",
-  });
+  };
+  const tokenReport = await getLocalTokenUsage(selection);
+  const gitReport = await getGitUsage(selection);
+  const mock = await getPrKpi(selection);
+  const expectedEffectiveTokens =
+    tokenReport.totals.input_tokens +
+    tokenReport.totals.output_tokens +
+    tokenReport.totals.cache_creation_tokens +
+    Math.floor(tokenReport.totals.cache_read_tokens / 10);
+  const expectedOutputRatio =
+    (gitReport.totals.added_lines + gitReport.totals.deleted_lines) /
+    (expectedEffectiveTokens / 1_000);
 
-  assert.ok((mock.overview.output_ratio ?? 0) > 1);
-  assert.ok((mock.overview.output_ratio ?? 0) < 10);
+  assert.equal(mock.overview.code_lines, gitReport.totals.added_lines + gitReport.totals.deleted_lines);
+  assert.ok(Math.abs((mock.overview.output_ratio ?? 0) - expectedOutputRatio) < 0.000001);
+  assert.ok((mock.overview.output_ratio ?? 0) > 0);
 });
 
 test("mock getPrKpi uses effective KPI tokens with cache reads discounted", async () => {

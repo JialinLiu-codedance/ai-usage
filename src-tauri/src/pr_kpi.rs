@@ -274,11 +274,10 @@ pub fn build_overview(
         .totals
         .added_lines
         .saturating_add(git_report.totals.deleted_lines);
-    let net_lines = git_report.totals.added_lines as f64 - git_report.totals.deleted_lines as f64;
     let output_ratio = if token_total == 0 {
         None
     } else {
-        Some(net_lines / (token_total as f64 / PR_KPI_OUTPUT_RATIO_TOKEN_UNIT))
+        Some(code_lines as f64 / (token_total as f64 / PR_KPI_OUTPUT_RATIO_TOKEN_UNIT))
     };
 
     PrKpiOverview {
@@ -1485,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn build_overview_uses_per_thousand_tokens_for_output_ratio() {
+    fn build_overview_uses_total_changed_lines_for_per_thousand_output_ratio() {
         let token_report = LocalTokenUsageReport {
             range: LocalTokenUsageRange::ThisMonth,
             start_date: None,
@@ -1530,7 +1529,7 @@ mod tests {
         assert_eq!(overview.token_total, 2_000_000);
         assert_ne!(overview.token_total, token_report.totals.total_tokens);
         assert_eq!(overview.code_lines, 1_000);
-        assert_eq!(overview.output_ratio, Some(0.4));
+        assert_eq!(overview.output_ratio, Some(0.5));
     }
 
     #[test]

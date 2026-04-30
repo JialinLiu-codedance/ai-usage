@@ -1296,11 +1296,11 @@ function mockPrKpiReport(selection: UsageRangeSelection): PrKpiReport {
   const generatedAt = localIsoString(new Date());
   const tokenReport = mockLocalTokenUsageReport(selection);
   const gitReport = mockGitUsageReport(selection);
-  const netLines = gitReport.totals.added_lines - gitReport.totals.deleted_lines;
+  const codeLines = gitReport.totals.added_lines + gitReport.totals.deleted_lines;
   const effectiveTokenTotal = effectivePrKpiTokenTotal(tokenReport.totals);
   const outputRatio =
     effectiveTokenTotal > 0
-      ? netLines / (effectiveTokenTotal / PR_KPI_OUTPUT_RATIO_TOKEN_UNIT)
+      ? codeLines / (effectiveTokenTotal / PR_KPI_OUTPUT_RATIO_TOKEN_UNIT)
       : null;
   const rangeDays =
     selection.kind === "custom"
@@ -1325,7 +1325,7 @@ function mockPrKpiReport(selection: UsageRangeSelection): PrKpiReport {
     ...reportDateFields(selection),
     overview: {
       token_total: effectiveTokenTotal,
-      code_lines: gitReport.totals.added_lines + gitReport.totals.deleted_lines,
+      code_lines: codeLines,
       output_ratio: outputRatio,
     },
     metrics,
