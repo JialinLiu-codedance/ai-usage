@@ -2853,20 +2853,61 @@ function GitUsageSection({
                           </div>
                         </summary>
                         <div className="git-commit-list">
-                          {commitGroup.commits.map((commit) => (
-                            <div className="git-commit-row" key={commit.commit_hash}>
-                              <div className="git-commit-row-header">
-                                <span className="git-commit-subject">{commit.subject}</span>
-                                <strong>
-                                  <span className="git-commit-added">{commit.displayAdded}</span>
-                                  <span className="git-commit-deleted">/ {commit.displayDeleted}</span>
-                                </strong>
+                          {commitGroup.items.map((item) => (
+                            item.members.length > 1 ? (
+                              <details className="git-commit-group-details" key={item.duplicateGroupId}>
+                                <summary className="git-commit-group-summary">
+                                  <div className="git-commit-row-header">
+                                    <span className="git-commit-subject git-commit-group-title">
+                                      <ChevronRight className="git-commit-chevron" />
+                                      <span>{item.summary.subject}</span>
+                                    </span>
+                                    <strong>
+                                      <span className="git-commit-added">{item.summary.displayAdded}</span>
+                                      <span className="git-commit-deleted">/ {item.summary.displayDeleted}</span>
+                                    </strong>
+                                  </div>
+                                  <div className="git-commit-row-meta">
+                                    <span className="git-commit-hash">{item.summary.shortHash}</span>
+                                    <span>{item.summary.timeLabel}</span>
+                                    <span className="git-commit-group-count">{item.members.length} 条重复提交</span>
+                                  </div>
+                                </summary>
+                                <div className="git-commit-duplicate-list">
+                                  {item.members.map((commit) => (
+                                    <div className="git-commit-row" key={commit.commit_hash}>
+                                      <div className="git-commit-row-header">
+                                        <span className="git-commit-subject">{commit.subject}</span>
+                                        <strong>
+                                          <span className="git-commit-added">{commit.displayAdded}</span>
+                                          <span className="git-commit-deleted">/ {commit.displayDeleted}</span>
+                                        </strong>
+                                      </div>
+                                      <div className="git-commit-row-meta">
+                                        <span className="git-commit-hash">{commit.shortHash}</span>
+                                        <span>{commit.timeLabel}</span>
+                                        <span className="git-commit-role-badge">{commit.roleLabel}</span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            ) : (
+                              <div className="git-commit-row" key={item.summary.commit_hash}>
+                                <div className="git-commit-row-header">
+                                  <span className="git-commit-subject">{item.summary.subject}</span>
+                                  <strong>
+                                    <span className="git-commit-added">{item.summary.displayAdded}</span>
+                                    <span className="git-commit-deleted">/ {item.summary.displayDeleted}</span>
+                                  </strong>
+                                </div>
+                                <div className="git-commit-row-meta">
+                                  <span className="git-commit-hash">{item.summary.shortHash}</span>
+                                  <span>{item.summary.timeLabel}</span>
+                                  <span className="git-commit-role-badge">{item.summary.roleLabel}</span>
+                                </div>
                               </div>
-                              <div className="git-commit-row-meta">
-                                <span className="git-commit-hash">{commit.shortHash}</span>
-                                <span>{commit.timeLabel}</span>
-                              </div>
-                            </div>
+                            )
                           ))}
                         </div>
                       </details>

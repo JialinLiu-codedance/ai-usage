@@ -29,6 +29,13 @@ export interface CommitDetailDisplayRow extends GitUsageCommit {
   timeLabel: string;
   displayAdded: string;
   displayDeleted: string;
+  roleLabel: string;
+}
+
+export interface CommitDetailItem {
+  duplicateGroupId: string;
+  summary: CommitDetailDisplayRow;
+  members: CommitDetailDisplayRow[];
 }
 
 export interface CommitDetailGroup {
@@ -36,7 +43,7 @@ export interface CommitDetailGroup {
   path: string;
   totalAdded: number;
   totalDeleted: number;
-  commits: CommitDetailDisplayRow[];
+  items: CommitDetailItem[];
 }
 
 export function formatCompactLines(value: number): string {
@@ -104,6 +111,15 @@ export function repositoryUsageRows(report: GitUsageReport, limit?: number): Rep
 }
 
 export function commitDetailGroups(report: GitUsageReport): CommitDetailGroup[] {
+  const totalsByPath = new Map(
+    report.repositories.map((repository) => [
+      repository.path,
+      {
+        totalAdded: repository.added_lines,
+        totalDeleted: repository.deleted_lines,
+      },
+    ]),
+  );
   const groupsByPath = new Map<string, CommitDetailGroup>();
 
   for (const commit of report.commits) {
@@ -115,25 +131,15 @@ export function commitDetailGroups(report: GitUsageReport): CommitDetailGroup[] 
     const group = groupsByPath.get(path) ?? {
       name: commit.repository_name || "repository",
       path,
-      totalAdded: 0,
-      totalDeleted: 0,
-      commits: [],
+      totalAdded: totalsByPath.get(path)?.totalAdded ?? 0,
+      totalDeleted: totalsByPath.get(path)?.totalDeleted ?? 0,
+      items: [],
     };
-    group.totalAdded += commit.added_lines;
-    group.totalDeleted += commit.deleted_lines;
-    group.commits.push({
-      ...commit,
-      shortHash: commit.short_hash || commit.commit_hash.slice(0, 10),
-      subject: commit.subject.trim() || "未命名提交",
-      timeLabel: formatCommitTime(commit.timestamp),
-      displayAdded: `+${formatCompactLines(commit.added_lines)}`,
-      displayDeleted: `-${formatCompactLines(commit.deleted_lines)}`,
-    });
     groupsByPath.set(path, group);
   }
 
   const groups = [...groupsByPath.values()]
-    .filter((group) => group.commits.length > 0)
+    .filter((group) => report.commits.some((commit) => commit.repository_path === group.path))
     .sort((a, b) => {
       const aLineTotal = a.totalAdded + a.totalDeleted;
       const bLineTotal = b.totalAdded + b.totalDeleted;
@@ -141,14 +147,51 @@ export function commitDetailGroups(report: GitUsageReport): CommitDetailGroup[] 
     });
 
   for (const group of groups) {
-    group.commits.sort((a, b) => {
-      const aTime = Date.parse(a.timestamp);
-      const bTime = Date.parse(b.timestamp);
-      return bTime - aTime || a.commit_hash.localeCompare(b.commit_hash);
-    });
+    const membersByDuplicateGroup = new Map<string, CommitDetailDisplayRow[]>();
+    for (const commit of report.commits) {
+      if (commit.repository_path !== group.path) {
+        continue;
+      }
+      const duplicateGroupId = commit.duplicate_group_id.trim() || commit.commit_hash;
+      const members = membersByDuplicateGroup.get(duplicateGroupId) ?? [];
+      members.push(decorateCommitDetail(commit));
+      membersByDuplicateGroup.set(duplicateGroupId, members);
+    }
+
+    group.items = [...membersByDuplicateGroup.entries()]
+      .map(([duplicateGroupId, members]) => {
+        members.sort(compareCommitDisplayRows);
+        const summary =
+          members.find((member) => member.is_group_representative) ??
+          members[0];
+        return {
+          duplicateGroupId,
+          summary,
+          members,
+        };
+      })
+      .sort((left, right) => compareCommitDisplayRows(left.summary, right.summary));
   }
 
   return groups;
+}
+
+function decorateCommitDetail(commit: GitUsageCommit): CommitDetailDisplayRow {
+  return {
+    ...commit,
+    shortHash: commit.short_hash || commit.commit_hash.slice(0, 10),
+    subject: commit.subject.trim() || "未命名提交",
+    timeLabel: formatCommitTime(commit.timestamp),
+    displayAdded: `+${formatCompactLines(commit.added_lines)}`,
+    displayDeleted: `-${formatCompactLines(commit.deleted_lines)}`,
+    roleLabel: formatCommitRole(commit.commit_role),
+  };
+}
+
+function compareCommitDisplayRows(left: CommitDetailDisplayRow, right: CommitDetailDisplayRow): number {
+  const leftTime = Date.parse(left.timestamp);
+  const rightTime = Date.parse(right.timestamp);
+  return rightTime - leftTime || left.commit_hash.localeCompare(right.commit_hash);
 }
 
 function scaledHeight(value: number, maxValue: number): number {
@@ -183,6 +226,16 @@ function formatCommitTime(value: string): string {
   const hours = String(date.getHours()).padStart(2, "0");
   const minutes = String(date.getMinutes()).padStart(2, "0");
   return `${month}/${day} ${hours}:${minutes}`;
+}
+
+function formatCommitRole(role: string): string {
+  if (role === "pr_merge") {
+    return "PR 合并";
+  }
+  if (role === "duplicate") {
+    return "重复提交";
+  }
+  return "原始提交";
 }
 
 function trimTrailingZero(value: number, integerAt = 10): string {

@@ -297,9 +297,17 @@ export interface GitUsageCommit extends GitUsageTotals {
   timestamp: string;
   author_name: string;
   author_email: string;
+  committer_name: string;
+  committer_email: string;
   subject: string;
   repository_name: string;
   repository_path: string;
+  parent_count: number;
+  patch_id: string;
+  duplicate_group_id: string;
+  duplicate_group_size: number;
+  is_group_representative: boolean;
+  commit_role: string;
 }
 
 export interface GitUsageReport {

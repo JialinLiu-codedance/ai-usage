@@ -11,7 +11,8 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    io::Write,
+    process::{Command, Stdio},
 };
 
 #[derive(Debug, Clone)]
@@ -22,7 +23,11 @@ struct GitCommitStat {
     repository_path: String,
     author_name: String,
     author_email: String,
+    committer_name: String,
+    committer_email: String,
     subject: String,
+    parent_count: usize,
+    patch_id: String,
     added_lines: u64,
     deleted_lines: u64,
     changed_files: u64,
@@ -40,7 +45,16 @@ struct GitCommitHeader<'a> {
     timestamp: &'a str,
     author_name: Option<&'a str>,
     author_email: Option<&'a str>,
+    committer_name: Option<&'a str>,
+    committer_email: Option<&'a str>,
+    parents: Option<&'a str>,
     subject: String,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedGitUsage {
+    representatives: Vec<GitCommitStat>,
+    commits: Vec<GitUsageCommit>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,85 +135,27 @@ impl GitUsageCache {
             .map(|day| (day.date.as_str(), day))
             .collect::<HashMap<_, _>>();
         let mut current = start_date;
-        let mut totals = GitUsageTotals::default();
-        let mut repositories_by_path = HashMap::<String, GitUsageRepository>::new();
-        let mut buckets = Vec::new();
-        let mut commits = Vec::new();
+        let mut stats = Vec::new();
 
         while current <= end_date {
             let date = current.format("%Y-%m-%d").to_string();
             let cached_day = days_by_date.get(date.as_str());
-            let day_totals = cached_day.map(|day| day.totals.clone()).unwrap_or_default();
-            totals.added_lines = totals.added_lines.saturating_add(day_totals.added_lines);
-            totals.deleted_lines = totals
-                .deleted_lines
-                .saturating_add(day_totals.deleted_lines);
-            totals.changed_files = totals
-                .changed_files
-                .saturating_add(day_totals.changed_files);
-
-            for repository in cached_day
-                .map(|day| day.repositories.iter())
-                .into_iter()
-                .flatten()
-            {
-                let entry = repositories_by_path
-                    .entry(repository.path.clone())
-                    .or_insert_with(|| GitUsageRepository {
-                        name: repository.name.clone(),
-                        path: repository.path.clone(),
-                        added_lines: 0,
-                        deleted_lines: 0,
-                        changed_files: 0,
-                    });
-                entry.added_lines = entry.added_lines.saturating_add(repository.added_lines);
-                entry.deleted_lines = entry.deleted_lines.saturating_add(repository.deleted_lines);
-                entry.changed_files = entry.changed_files.saturating_add(repository.changed_files);
-            }
-
-            commits.extend(
+            stats.extend(
                 cached_day
-                    .map(|day| day.commits.iter().cloned())
+                    .map(|day| day.commits.iter().map(git_stat_from_usage_commit))
                     .into_iter()
                     .flatten(),
             );
-
-            buckets.push(GitUsageBucket {
-                date,
-                added_lines: day_totals.added_lines,
-                deleted_lines: day_totals.deleted_lines,
-                changed_files: day_totals.changed_files,
-            });
             current += Duration::days(1);
         }
-
-        let mut repositories = repositories_by_path
-            .into_values()
-            .filter(|repository| {
-                repository
-                    .added_lines
-                    .saturating_add(repository.deleted_lines)
-                    .saturating_add(repository.changed_files)
-                    > 0
-            })
-            .collect::<Vec<_>>();
-        sort_repositories(&mut repositories);
-        sort_commits(&mut commits);
-
-        GitUsageReport {
-            range: LocalTokenUsageRange::Custom,
-            start_date: Some(start_date.format("%Y-%m-%d").to_string()),
-            end_date: Some(end_date.format("%Y-%m-%d").to_string()),
-            pending: false,
-            totals,
-            buckets,
-            repositories,
-            commits,
-            repository_count: self.this_month.repository_count,
-            missing_sources: Vec::new(),
-            warnings: filter_stale_worktree_warnings(self.this_month.warnings.clone()),
-            generated_at: self.generated_at,
-        }
+        aggregate_custom_git_stats(
+            self.generated_at,
+            start_date,
+            end_date,
+            stats,
+            self.this_month.repository_count,
+            filter_stale_worktree_warnings(self.this_month.warnings.clone()),
+        )
     }
 }
 
@@ -343,7 +299,7 @@ fn build_custom_days(
         commits_by_day
             .entry(date.clone())
             .or_default()
-            .push(git_usage_commit_from_stat(stat));
+            .push(git_usage_commit_from_stat(stat, "", 0, false, ""));
         let repository_key = if stat.repository_path.is_empty() {
             "unknown".to_string()
         } else {
@@ -587,7 +543,7 @@ fn load_repository_stats(
         .args([
             "log",
             "--date=iso-strict",
-            "--pretty=format:commit%x09%H%x09%cI%x09%an%x09%ae%x09%s",
+            "--pretty=format:commit%x09%H%x09%cI%x09%an%x09%ae%x09%cn%x09%ce%x09%P%x09%s",
             "--numstat",
             "--branches",
             "--tags",
@@ -623,6 +579,8 @@ fn load_repository_stats(
             .map(|mut stat| {
                 stat.repository_name = repository_name.clone();
                 stat.repository_path = repository_path.clone();
+                stat.patch_id = load_patch_id(repository, &stat.commit_hash)
+                    .unwrap_or_else(|_| stat.commit_hash.clone());
                 stat
             })
             .collect(),
@@ -677,7 +635,14 @@ fn parse_git_log_numstat_output_with_identity(
                             repository_path: String::new(),
                             author_name: header.author_name.unwrap_or_default().to_string(),
                             author_email: header.author_email.unwrap_or_default().to_string(),
+                            committer_name: header.committer_name.unwrap_or_default().to_string(),
+                            committer_email: header.committer_email.unwrap_or_default().to_string(),
                             subject: header.subject.clone(),
+                            parent_count: header
+                                .parents
+                                .map(|parents| parents.split_whitespace().count())
+                                .unwrap_or(0),
+                            patch_id: String::new(),
                             added_lines: 0,
                             deleted_lines: 0,
                             changed_files: 0,
@@ -721,6 +686,18 @@ fn parse_commit_header(header: &str) -> Option<GitCommitHeader<'_>> {
         .next()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let committer_name = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let committer_email = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let parents = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let subject = parts.collect::<Vec<_>>().join("\t");
     if commit_hash.is_empty() || timestamp.is_empty() {
         return None;
@@ -730,6 +707,9 @@ fn parse_commit_header(header: &str) -> Option<GitCommitHeader<'_>> {
         timestamp,
         author_name,
         author_email,
+        committer_name,
+        committer_email,
+        parents,
         subject: subject.trim().to_string(),
     })
 }
@@ -787,12 +767,171 @@ fn git_config_value(repository: &Path, key: &str) -> Result<Option<String>, Stri
     Ok((!value.is_empty()).then_some(value))
 }
 
+fn load_patch_id(repository: &Path, commit_hash: &str) -> Result<String, String> {
+    let show_output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["show", "--format=", "--binary", commit_hash])
+        .output()
+        .map_err(|error| format!("执行 git show 失败: {error}"))?;
+
+    if !show_output.status.success() {
+        let stderr = String::from_utf8_lossy(&show_output.stderr)
+            .trim()
+            .to_string();
+        return Err(if stderr.is_empty() {
+            "git show 返回非零状态".into()
+        } else {
+            stderr
+        });
+    }
+
+    if show_output.stdout.is_empty() {
+        return Ok(commit_hash.to_string());
+    }
+
+    let mut child = Command::new("git")
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("执行 git patch-id 失败: {error}"))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(&show_output.stdout)
+            .map_err(|error| format!("写入 git patch-id stdin 失败: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("读取 git patch-id 输出失败: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_string();
+        return Err(if stderr.is_empty() {
+            "git patch-id 返回非零状态".into()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(commit_hash)
+        .to_string())
+}
+
 fn dedupe_git_stats_by_commit_hash(stats: Vec<GitCommitStat>) -> Vec<GitCommitStat> {
     let mut seen = HashSet::new();
     stats
         .into_iter()
         .filter(|stat| stat.commit_hash.is_empty() || seen.insert(stat.commit_hash.clone()))
         .collect()
+}
+
+fn prepare_git_usage(stats: Vec<GitCommitStat>) -> PreparedGitUsage {
+    let mut groups = HashMap::<String, Vec<GitCommitStat>>::new();
+    for stat in stats {
+        let duplicate_group_id = duplicate_group_id(&stat);
+        groups.entry(duplicate_group_id).or_default().push(stat);
+    }
+
+    let mut representatives = Vec::new();
+    let mut commits = Vec::new();
+    for (group_id, mut members) in groups {
+        members.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        let representative_index = select_representative_index(&members);
+        let original_index = select_original_index(&members);
+        let group_size = members.len();
+
+        for (index, member) in members.iter().enumerate() {
+            commits.push(git_usage_commit_from_stat(
+                member,
+                &group_id,
+                group_size,
+                index == representative_index,
+                commit_role_for_member(member, index, original_index),
+            ));
+        }
+        representatives.push(members[representative_index].clone());
+    }
+
+    PreparedGitUsage {
+        representatives,
+        commits,
+    }
+}
+
+fn duplicate_group_id(stat: &GitCommitStat) -> String {
+    let patch_key = if stat.patch_id.trim().is_empty() {
+        stat.commit_hash.as_str()
+    } else {
+        stat.patch_id.as_str()
+    };
+    format!("{}::{patch_key}", stat.repository_path)
+}
+
+fn select_representative_index(members: &[GitCommitStat]) -> usize {
+    members
+        .iter()
+        .enumerate()
+        .filter(|(_, member)| is_github_pr_merge(member))
+        .max_by(|(_, left), (_, right)| left.timestamp.cmp(&right.timestamp))
+        .map(|(index, _)| index)
+        .unwrap_or_else(|| members.len().saturating_sub(1))
+}
+
+fn select_original_index(members: &[GitCommitStat]) -> usize {
+    members
+        .iter()
+        .enumerate()
+        .find(|(_, member)| !is_github_pr_merge(member))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn commit_role_for_member(
+    member: &GitCommitStat,
+    index: usize,
+    original_index: usize,
+) -> &'static str {
+    if is_github_pr_merge(member) {
+        "pr_merge"
+    } else if index == original_index {
+        "original"
+    } else {
+        "duplicate"
+    }
+}
+
+fn is_github_pr_merge(stat: &GitCommitStat) -> bool {
+    stat.committer_email
+        .trim()
+        .eq_ignore_ascii_case("noreply@github.com")
+        || stat
+            .committer_email
+            .trim()
+            .ends_with("@users.noreply.github.com")
+        || subject_has_pr_suffix(&stat.subject)
+}
+
+fn subject_has_pr_suffix(subject: &str) -> bool {
+    let trimmed = subject.trim();
+    let Some(start) = trimmed.rfind("(#") else {
+        return false;
+    };
+    let suffix = &trimmed[start..];
+    suffix.ends_with(')')
+        && suffix
+            .trim_start_matches("(#")
+            .trim_end_matches(')')
+            .chars()
+            .all(|character| character.is_ascii_digit())
 }
 
 fn parse_numstat_line(line: &str) -> Option<(u64, u64)> {
@@ -884,12 +1023,14 @@ fn aggregate_git_stats_for_window(
         .collect::<HashMap<_, _>>();
     let mut totals = GitUsageTotals::default();
     let mut repositories_by_path = HashMap::<String, GitUsageRepository>::new();
-    let mut commits = Vec::new();
+    let prepared = prepare_git_usage(
+        stats.into_iter()
+            .filter(|stat| stat.timestamp >= start && stat.timestamp <= end)
+            .collect(),
+    );
+    let mut commits = prepared.commits;
 
-    for stat in stats {
-        if stat.timestamp < start || stat.timestamp > end {
-            continue;
-        }
+    for stat in prepared.representatives {
         let key = bucket_key(granularity, stat.timestamp, offset);
         let Some(bucket) = buckets_by_key.get_mut(&key) else {
             continue;
@@ -920,7 +1061,6 @@ fn aggregate_git_stats_for_window(
         repository.added_lines = repository.added_lines.saturating_add(stat.added_lines);
         repository.deleted_lines = repository.deleted_lines.saturating_add(stat.deleted_lines);
         repository.changed_files = repository.changed_files.saturating_add(stat.changed_files);
-        commits.push(git_usage_commit_from_stat(&stat));
     }
 
     let buckets = starts
@@ -990,7 +1130,13 @@ fn sort_commits(commits: &mut [GitUsageCommit]) {
     });
 }
 
-fn git_usage_commit_from_stat(stat: &GitCommitStat) -> GitUsageCommit {
+fn git_usage_commit_from_stat(
+    stat: &GitCommitStat,
+    duplicate_group_id: &str,
+    duplicate_group_size: usize,
+    is_group_representative: bool,
+    commit_role: &str,
+) -> GitUsageCommit {
     let short_hash = stat.commit_hash.chars().take(10).collect::<String>();
     GitUsageCommit {
         commit_hash: stat.commit_hash.clone(),
@@ -998,12 +1144,39 @@ fn git_usage_commit_from_stat(stat: &GitCommitStat) -> GitUsageCommit {
         timestamp: stat.timestamp,
         author_name: stat.author_name.clone(),
         author_email: stat.author_email.clone(),
+        committer_name: stat.committer_name.clone(),
+        committer_email: stat.committer_email.clone(),
         subject: stat.subject.clone(),
         repository_name: stat.repository_name.clone(),
         repository_path: stat.repository_path.clone(),
+        parent_count: stat.parent_count,
+        patch_id: stat.patch_id.clone(),
+        duplicate_group_id: duplicate_group_id.to_string(),
+        duplicate_group_size,
+        is_group_representative,
+        commit_role: commit_role.to_string(),
         added_lines: stat.added_lines,
         deleted_lines: stat.deleted_lines,
         changed_files: stat.changed_files,
+    }
+}
+
+fn git_stat_from_usage_commit(commit: &GitUsageCommit) -> GitCommitStat {
+    GitCommitStat {
+        commit_hash: commit.commit_hash.clone(),
+        timestamp: commit.timestamp,
+        repository_name: commit.repository_name.clone(),
+        repository_path: commit.repository_path.clone(),
+        author_name: commit.author_name.clone(),
+        author_email: commit.author_email.clone(),
+        committer_name: commit.committer_name.clone(),
+        committer_email: commit.committer_email.clone(),
+        subject: commit.subject.clone(),
+        parent_count: commit.parent_count,
+        patch_id: commit.patch_id.clone(),
+        added_lines: commit.added_lines,
+        deleted_lines: commit.deleted_lines,
+        changed_files: commit.changed_files,
     }
 }
 
@@ -1175,7 +1348,45 @@ mod tests {
             repository_path: repository_path.to_string(),
             author_name: "Test User".into(),
             author_email: "test@example.com".into(),
+            committer_name: "Test User".into(),
+            committer_email: "test@example.com".into(),
             subject: format!("commit {commit_hash}"),
+            parent_count: 1,
+            patch_id: commit_hash.to_string(),
+            added_lines: added,
+            deleted_lines: deleted,
+            changed_files,
+        }
+    }
+
+    fn git_stat_with_metadata(
+        commit_hash: &str,
+        timestamp: &str,
+        added: u64,
+        deleted: u64,
+        changed_files: u64,
+        repository_name: &str,
+        repository_path: &str,
+        subject: &str,
+        committer_name: &str,
+        committer_email: &str,
+        parent_count: usize,
+        patch_id: &str,
+    ) -> GitCommitStat {
+        GitCommitStat {
+            commit_hash: commit_hash.to_string(),
+            timestamp: chrono::DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .with_timezone(&Utc),
+            repository_name: repository_name.to_string(),
+            repository_path: repository_path.to_string(),
+            author_name: "Test User".into(),
+            author_email: "test@example.com".into(),
+            committer_name: committer_name.to_string(),
+            committer_email: committer_email.to_string(),
+            subject: subject.to_string(),
+            parent_count,
+            patch_id: patch_id.to_string(),
             added_lines: added,
             deleted_lines: deleted,
             changed_files,
@@ -1779,9 +1990,17 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
                         timestamp: Utc.with_ymd_and_hms(2026, 4, 20, 8, 0, 0).unwrap(),
                         author_name: "Test User".into(),
                         author_email: "test@example.com".into(),
+                        committer_name: "Test User".into(),
+                        committer_email: "test@example.com".into(),
                         subject: "repo a commit".into(),
                         repository_name: "repo-a".into(),
                         repository_path: "/tmp/repo-a".into(),
+                        parent_count: 1,
+                        patch_id: "repo-a-commit".into(),
+                        duplicate_group_id: "repo-a-group".into(),
+                        duplicate_group_size: 1,
+                        is_group_representative: true,
+                        commit_role: "original".into(),
                         added_lines: 10,
                         deleted_lines: 3,
                         changed_files: 1,
@@ -1813,9 +2032,17 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
                         timestamp: Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
                         author_name: "Test User".into(),
                         author_email: "test@example.com".into(),
+                        committer_name: "Test User".into(),
+                        committer_email: "test@example.com".into(),
                         subject: "repo b commit".into(),
                         repository_name: "repo-b".into(),
                         repository_path: "/tmp/repo-b".into(),
+                        parent_count: 1,
+                        patch_id: "repo-b-commit".into(),
+                        duplicate_group_id: "repo-b-group".into(),
+                        duplicate_group_size: 1,
+                        is_group_representative: true,
+                        commit_role: "original".into(),
                         added_lines: 20,
                         deleted_lines: 5,
                         changed_files: 2,
@@ -1839,6 +2066,117 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         assert_eq!(report.commits.len(), 2);
         assert_eq!(report.commits[0].commit_hash, "repo-b-commit");
         assert_eq!(report.commits[1].commit_hash, "repo-a-commit");
+    }
+
+    #[test]
+    fn custom_report_dedupes_patch_groups_within_selected_range_only() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 30, 12, 0, 0).unwrap();
+        let cache = GitUsageCache {
+            root_path: "/tmp/workspace".into(),
+            generated_at: now,
+            today: empty_report(LocalTokenUsageRange::Today, None),
+            last3_days: empty_report(LocalTokenUsageRange::Last3Days, None),
+            this_week: empty_report(LocalTokenUsageRange::ThisWeek, None),
+            this_month: empty_report(LocalTokenUsageRange::ThisMonth, None),
+            custom_window_start: Some(NaiveDate::from_ymd_opt(2026, 4, 29).unwrap()),
+            custom_window_end: Some(NaiveDate::from_ymd_opt(2026, 4, 30).unwrap()),
+            custom_days: vec![
+                GitUsageCachedDay {
+                    date: "2026-04-29".into(),
+                    totals: GitUsageTotals {
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 1,
+                    },
+                    repositories: vec![GitUsageRepository {
+                        name: "repo-a".into(),
+                        path: "/tmp/repo-a".into(),
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 1,
+                    }],
+                    commits: vec![GitUsageCommit {
+                        commit_hash: "original-commit".into(),
+                        short_hash: "original-c".into(),
+                        timestamp: Utc.with_ymd_and_hms(2026, 4, 29, 7, 0, 0).unwrap(),
+                        author_name: "Test User".into(),
+                        author_email: "test@example.com".into(),
+                        committer_name: "Test User".into(),
+                        committer_email: "test@example.com".into(),
+                        subject: "feat: change package manager".into(),
+                        repository_name: "repo-a".into(),
+                        repository_path: "/tmp/repo-a".into(),
+                        parent_count: 1,
+                        patch_id: "patch-yarn".into(),
+                        duplicate_group_id: String::new(),
+                        duplicate_group_size: 0,
+                        is_group_representative: false,
+                        commit_role: "original".into(),
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 1,
+                    }],
+                },
+                GitUsageCachedDay {
+                    date: "2026-04-30".into(),
+                    totals: GitUsageTotals {
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 1,
+                    },
+                    repositories: vec![GitUsageRepository {
+                        name: "repo-a".into(),
+                        path: "/tmp/repo-a".into(),
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 1,
+                    }],
+                    commits: vec![GitUsageCommit {
+                        commit_hash: "merge-commit".into(),
+                        short_hash: "merge-comm".into(),
+                        timestamp: Utc.with_ymd_and_hms(2026, 4, 30, 8, 0, 0).unwrap(),
+                        author_name: "Test User".into(),
+                        author_email: "test@example.com".into(),
+                        committer_name: "GitHub".into(),
+                        committer_email: "noreply@github.com".into(),
+                        subject: "feat: change package manager (#101)".into(),
+                        repository_name: "repo-a".into(),
+                        repository_path: "/tmp/repo-a".into(),
+                        parent_count: 1,
+                        patch_id: "patch-yarn".into(),
+                        duplicate_group_id: String::new(),
+                        duplicate_group_size: 0,
+                        is_group_representative: false,
+                        commit_role: "pr_merge".into(),
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 1,
+                    }],
+                },
+            ],
+        };
+
+        let first_day = cache.custom_report(
+            NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
+        );
+        assert_eq!(first_day.totals.added_lines, 20);
+        assert_eq!(first_day.commits.len(), 1);
+        assert_eq!(first_day.commits[0].commit_hash, "original-commit");
+
+        let both_days = cache.custom_report(
+            NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 4, 30).unwrap(),
+        );
+        assert_eq!(both_days.totals.added_lines, 20);
+        assert_eq!(both_days.repositories[0].added_lines, 20);
+        assert_eq!(both_days.commits.len(), 2);
+        assert_eq!(both_days.commits[0].commit_hash, "merge-commit");
+        assert_eq!(both_days.commits[0].commit_role, "pr_merge");
+        assert_eq!(both_days.commits[0].duplicate_group_size, 2);
+        assert_eq!(both_days.commits[0].is_group_representative, true);
+        assert_eq!(both_days.commits[1].commit_hash, "original-commit");
+        assert_eq!(both_days.commits[1].commit_role, "original");
     }
 
     #[test]
@@ -1888,5 +2226,113 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         assert_eq!(report.commits.len(), 2);
         assert_eq!(report.commits[0].commit_hash, "unique-commit");
         assert_eq!(report.commits[1].commit_hash, "duplicate-commit");
+    }
+
+    #[test]
+    fn aggregate_git_stats_groups_same_patch_id_and_prefers_pr_merge_as_representative() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 30, 12, 0, 0).unwrap();
+        let report = aggregate_git_stats(
+            LocalTokenUsageRange::Today,
+            now,
+            vec![
+                git_stat_with_metadata(
+                    "original-commit",
+                    "2026-04-30T07:11:05Z",
+                    5453,
+                    9900,
+                    4,
+                    "repo-a",
+                    "/tmp/repo-a",
+                    "core:切换后端包管理器到Yarn",
+                    "Test User",
+                    "test@example.com",
+                    1,
+                    "patch-yarn",
+                ),
+                git_stat_with_metadata(
+                    "merge-commit",
+                    "2026-04-30T07:15:39Z",
+                    5453,
+                    9900,
+                    4,
+                    "repo-a",
+                    "/tmp/repo-a",
+                    "core:切换后端包管理器到Yarn (#101)",
+                    "GitHub",
+                    "noreply@github.com",
+                    1,
+                    "patch-yarn",
+                ),
+            ],
+            1,
+            vec![],
+        );
+
+        assert_eq!(report.totals.added_lines, 5453);
+        assert_eq!(report.totals.deleted_lines, 9900);
+        assert_eq!(report.repositories.len(), 1);
+        assert_eq!(report.repositories[0].added_lines, 5453);
+        assert_eq!(report.commits.len(), 2);
+        assert_eq!(report.commits[0].commit_hash, "merge-commit");
+        assert_eq!(report.commits[0].committer_email, "noreply@github.com");
+        assert_eq!(report.commits[0].duplicate_group_size, 2);
+        assert_eq!(report.commits[0].is_group_representative, true);
+        assert_eq!(report.commits[0].commit_role, "pr_merge");
+        assert_eq!(report.commits[1].commit_hash, "original-commit");
+        assert_eq!(report.commits[1].is_group_representative, false);
+        assert_eq!(report.commits[1].commit_role, "original");
+        assert_eq!(
+            report.commits[0].duplicate_group_id,
+            report.commits[1].duplicate_group_id
+        );
+    }
+
+    #[test]
+    fn aggregate_git_stats_does_not_group_same_patch_id_across_repositories() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 30, 12, 0, 0).unwrap();
+        let report = aggregate_git_stats(
+            LocalTokenUsageRange::Today,
+            now,
+            vec![
+                git_stat_with_metadata(
+                    "repo-a-commit",
+                    "2026-04-30T07:11:05Z",
+                    20,
+                    5,
+                    1,
+                    "repo-a",
+                    "/tmp/repo-a",
+                    "feat: shared patch",
+                    "Test User",
+                    "test@example.com",
+                    1,
+                    "shared-patch",
+                ),
+                git_stat_with_metadata(
+                    "repo-b-commit",
+                    "2026-04-30T07:15:39Z",
+                    20,
+                    5,
+                    1,
+                    "repo-b",
+                    "/tmp/repo-b",
+                    "feat: shared patch",
+                    "Test User",
+                    "test@example.com",
+                    1,
+                    "shared-patch",
+                ),
+            ],
+            2,
+            vec![],
+        );
+
+        assert_eq!(report.totals.added_lines, 40);
+        assert_eq!(report.repositories.len(), 2);
+        assert_eq!(report.commits.len(), 2);
+        assert_ne!(
+            report.commits[0].duplicate_group_id,
+            report.commits[1].duplicate_group_id
+        );
     }
 }

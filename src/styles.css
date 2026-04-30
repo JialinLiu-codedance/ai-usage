@@ -1577,6 +1577,55 @@ textarea {
   padding: 0 12px 12px;
 }
 
+.git-commit-group-details {
+  border-top: 1px solid #f4f4f5;
+  padding-top: 8px;
+}
+
+.git-commit-group-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.git-commit-group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.git-commit-group-title {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-commit-chevron {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: #71717a;
+  transition: transform 160ms ease;
+}
+
+.git-commit-group-details[open] .git-commit-chevron {
+  transform: rotate(90deg);
+}
+
+.git-commit-group-count {
+  color: #52525b;
+}
+
+.git-commit-duplicate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  border-top: 1px solid #f4f4f5;
+  padding-top: 8px;
+}
+
 .git-commit-row {
   display: flex;
   flex-direction: column;
@@ -1626,6 +1675,16 @@ textarea {
 
 .git-commit-hash {
   font-family: "SFMono-Regular", "SF Mono", Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.git-commit-role-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #e4e4e7;
+  border-radius: 999px;
+  background: #fafafa;
+  padding: 1px 6px;
+  color: #52525b;
 }
 
 .token-tool-strip {

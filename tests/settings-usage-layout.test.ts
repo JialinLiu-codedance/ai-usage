@@ -172,8 +172,10 @@ test("Git commit detail is merged into repository ranking with collapsible proje
   assert.match(gitSectionSource, /<details className="git-repository-details" key=\{repository\.path\}>/);
   assert.match(gitSectionSource, /className="git-repository-summary"/);
   assert.match(gitSectionSource, /className="git-commit-list"/);
+  assert.match(gitSectionSource, /className="git-commit-group-details"/);
   assert.match(gitSectionSource, /className="git-commit-added"/);
   assert.match(gitSectionSource, /className="git-commit-deleted"/);
+  assert.match(gitSectionSource, /className="git-commit-role-badge"/);
 });
 
 test("Git trend chart plots line-count metrics only", async () => {
