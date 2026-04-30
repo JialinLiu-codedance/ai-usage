@@ -195,6 +195,7 @@ test("KPI overview explanation is moved behind a hover help trigger", async () =
 
   assert.match(appSource, /className="kpi-summary-heading"/);
   assert.match(appSource, /className="kpi-summary-help"/);
+  assert.match(appSource, /缓存命中\s*\/\s*10/);
   assert.equal(appSource.includes('className="kpi-summary-caption"'), false);
 });
 
