@@ -1,8 +1,8 @@
 use crate::{
     app_time,
     models::{
-        GitUsageBucket, GitUsageReport, GitUsageRepository, GitUsageTotals, LocalTokenUsageRange,
-        CUSTOM_USAGE_WINDOW_DAYS,
+        GitUsageBucket, GitUsageCommit, GitUsageReport, GitUsageRepository, GitUsageTotals,
+        LocalTokenUsageRange, CUSTOM_USAGE_WINDOW_DAYS,
     },
 };
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, Timelike, Utc};
@@ -20,9 +20,27 @@ struct GitCommitStat {
     timestamp: DateTime<Utc>,
     repository_name: String,
     repository_path: String,
+    author_name: String,
+    author_email: String,
+    subject: String,
     added_lines: u64,
     deleted_lines: u64,
     changed_files: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GitAuthorIdentity {
+    name: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitCommitHeader<'a> {
+    commit_hash: &'a str,
+    timestamp: &'a str,
+    author_name: Option<&'a str>,
+    author_email: Option<&'a str>,
+    subject: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -63,6 +81,8 @@ pub struct GitUsageCachedDay {
     pub totals: GitUsageTotals,
     #[serde(default)]
     pub repositories: Vec<GitUsageRepository>,
+    #[serde(default)]
+    pub commits: Vec<GitUsageCommit>,
 }
 
 impl GitUsageCache {
@@ -104,6 +124,7 @@ impl GitUsageCache {
         let mut totals = GitUsageTotals::default();
         let mut repositories_by_path = HashMap::<String, GitUsageRepository>::new();
         let mut buckets = Vec::new();
+        let mut commits = Vec::new();
 
         while current <= end_date {
             let date = current.format("%Y-%m-%d").to_string();
@@ -136,6 +157,13 @@ impl GitUsageCache {
                 entry.changed_files = entry.changed_files.saturating_add(repository.changed_files);
             }
 
+            commits.extend(
+                cached_day
+                    .map(|day| day.commits.iter().cloned())
+                    .into_iter()
+                    .flatten(),
+            );
+
             buckets.push(GitUsageBucket {
                 date,
                 added_lines: day_totals.added_lines,
@@ -156,6 +184,7 @@ impl GitUsageCache {
             })
             .collect::<Vec<_>>();
         sort_repositories(&mut repositories);
+        sort_commits(&mut commits);
 
         GitUsageReport {
             range: LocalTokenUsageRange::Custom,
@@ -165,6 +194,7 @@ impl GitUsageCache {
             totals,
             buckets,
             repositories,
+            commits,
             repository_count: self.this_month.repository_count,
             missing_sources: Vec::new(),
             warnings: filter_stale_worktree_warnings(self.this_month.warnings.clone()),
@@ -302,6 +332,7 @@ fn build_custom_days(
     let end = app_time::local_end_of_day_utc(window_end, offset);
     let mut by_day = HashMap::<String, GitBucketStats>::new();
     let mut repositories_by_day = HashMap::<String, HashMap<String, GitUsageRepository>>::new();
+    let mut commits_by_day = HashMap::<String, Vec<GitUsageCommit>>::new();
 
     for stat in stats {
         if stat.timestamp < start || stat.timestamp > end {
@@ -309,6 +340,10 @@ fn build_custom_days(
         }
         let date = bucket_key(BucketGranularity::Day, stat.timestamp, offset);
         add_stat_to_bucket(by_day.entry(date.clone()).or_default(), stat);
+        commits_by_day
+            .entry(date.clone())
+            .or_default()
+            .push(git_usage_commit_from_stat(stat));
         let repository_key = if stat.repository_path.is_empty() {
             "unknown".to_string()
         } else {
@@ -344,7 +379,9 @@ fn build_custom_days(
             .unwrap_or_default()
             .into_values()
             .collect::<Vec<_>>();
+        let mut commits = commits_by_day.remove(&date).unwrap_or_default();
         sort_repositories(&mut repositories);
+        sort_commits(&mut commits);
         days.push(GitUsageCachedDay {
             date,
             totals: GitUsageTotals {
@@ -353,6 +390,7 @@ fn build_custom_days(
                 changed_files: day_totals.changed_files,
             },
             repositories,
+            commits,
         });
         current += Duration::days(1);
     }
@@ -542,13 +580,14 @@ fn load_repository_stats(
     repository: &Path,
     since: DateTime<Utc>,
 ) -> Result<Vec<GitCommitStat>, String> {
+    let identity = resolve_repository_git_identity(repository)?;
     let output = Command::new("git")
         .arg("-C")
         .arg(repository)
         .args([
             "log",
             "--date=iso-strict",
-            "--pretty=format:commit%x09%H%x09%cI",
+            "--pretty=format:commit%x09%H%x09%cI%x09%an%x09%ae%x09%s",
             "--numstat",
             "--branches",
             "--tags",
@@ -578,17 +617,33 @@ fn load_repository_stats(
         .unwrap_or("repository")
         .to_string();
     let repository_path = repository.to_string_lossy().to_string();
-    Ok(parse_git_log_numstat_output(&stdout)
-        .into_iter()
-        .map(|mut stat| {
-            stat.repository_name = repository_name.clone();
-            stat.repository_path = repository_path.clone();
-            stat
-        })
-        .collect())
+    Ok(
+        parse_git_log_numstat_output_for_identity(&stdout, &identity)
+            .into_iter()
+            .map(|mut stat| {
+                stat.repository_name = repository_name.clone();
+                stat.repository_path = repository_path.clone();
+                stat
+            })
+            .collect(),
+    )
 }
 
 fn parse_git_log_numstat_output(output: &str) -> Vec<GitCommitStat> {
+    parse_git_log_numstat_output_with_identity(output, None)
+}
+
+fn parse_git_log_numstat_output_for_identity(
+    output: &str,
+    identity: &GitAuthorIdentity,
+) -> Vec<GitCommitStat> {
+    parse_git_log_numstat_output_with_identity(output, Some(identity))
+}
+
+fn parse_git_log_numstat_output_with_identity(
+    output: &str,
+    identity: Option<&GitAuthorIdentity>,
+) -> Vec<GitCommitStat> {
     let mut stats = Vec::new();
     let mut current: Option<GitCommitStat> = None;
 
@@ -602,18 +657,35 @@ fn parse_git_log_numstat_output(output: &str) -> Vec<GitCommitStat> {
             if let Some(stat) = current.take() {
                 stats.push(stat);
             }
-            let (commit_hash, timestamp) = parse_commit_header(commit).unwrap_or(("", commit));
-            current = DateTime::parse_from_rfc3339(timestamp)
-                .ok()
-                .map(|timestamp| GitCommitStat {
-                    commit_hash: commit_hash.to_string(),
-                    timestamp: timestamp.with_timezone(&Utc),
-                    repository_name: String::new(),
-                    repository_path: String::new(),
-                    added_lines: 0,
-                    deleted_lines: 0,
-                    changed_files: 0,
-                });
+            current = parse_commit_header(commit).and_then(|header| {
+                if identity
+                    .map(|identity| {
+                        author_matches_git_identity(
+                            header.author_name,
+                            header.author_email,
+                            identity,
+                        )
+                    })
+                    .unwrap_or(true)
+                {
+                    DateTime::parse_from_rfc3339(header.timestamp)
+                        .ok()
+                        .map(|timestamp| GitCommitStat {
+                            commit_hash: header.commit_hash.to_string(),
+                            timestamp: timestamp.with_timezone(&Utc),
+                            repository_name: String::new(),
+                            repository_path: String::new(),
+                            author_name: header.author_name.unwrap_or_default().to_string(),
+                            author_email: header.author_email.unwrap_or_default().to_string(),
+                            subject: header.subject.clone(),
+                            added_lines: 0,
+                            deleted_lines: 0,
+                            changed_files: 0,
+                        })
+                } else {
+                    None
+                }
+            });
             continue;
         }
 
@@ -637,9 +709,82 @@ fn parse_git_log_numstat_output(output: &str) -> Vec<GitCommitStat> {
     stats
 }
 
-fn parse_commit_header(header: &str) -> Option<(&str, &str)> {
-    let (commit_hash, timestamp) = header.split_once('\t')?;
-    Some((commit_hash.trim(), timestamp.trim()))
+fn parse_commit_header(header: &str) -> Option<GitCommitHeader<'_>> {
+    let mut parts = header.split('\t');
+    let commit_hash = parts.next()?.trim();
+    let timestamp = parts.next()?.trim();
+    let author_name = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let author_email = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let subject = parts.collect::<Vec<_>>().join("\t");
+    if commit_hash.is_empty() || timestamp.is_empty() {
+        return None;
+    }
+    Some(GitCommitHeader {
+        commit_hash,
+        timestamp,
+        author_name,
+        author_email,
+        subject: subject.trim().to_string(),
+    })
+}
+
+fn author_matches_git_identity(
+    author_name: Option<&str>,
+    author_email: Option<&str>,
+    identity: &GitAuthorIdentity,
+) -> bool {
+    let name_matches = match (author_name, identity.name.as_deref()) {
+        (Some(author_name), Some(identity_name)) => author_name.trim() == identity_name,
+        _ => false,
+    };
+    let email_matches = match (author_email, identity.email.as_deref()) {
+        (Some(author_email), Some(identity_email)) => {
+            author_email.trim().eq_ignore_ascii_case(identity_email)
+        }
+        _ => false,
+    };
+    name_matches || email_matches
+}
+
+fn resolve_repository_git_identity(repository: &Path) -> Result<GitAuthorIdentity, String> {
+    let identity = GitAuthorIdentity {
+        name: git_config_value(repository, "user.name")?,
+        email: git_config_value(repository, "user.email")?,
+    };
+    if identity.name.is_none() && identity.email.is_none() {
+        return Err("未配置 Git 用户姓名或邮箱，已跳过该仓库".into());
+    }
+    Ok(identity)
+}
+
+fn git_config_value(repository: &Path, key: &str) -> Result<Option<String>, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["config", "--get", key])
+        .output()
+        .map_err(|error| format!("读取 Git 配置 {key} 失败: {error}"))?;
+
+    if !output.status.success() {
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("读取 Git 配置 {key} 返回非零状态")
+        } else {
+            stderr
+        });
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!value.is_empty()).then_some(value))
 }
 
 fn dedupe_git_stats_by_commit_hash(stats: Vec<GitCommitStat>) -> Vec<GitCommitStat> {
@@ -739,6 +884,7 @@ fn aggregate_git_stats_for_window(
         .collect::<HashMap<_, _>>();
     let mut totals = GitUsageTotals::default();
     let mut repositories_by_path = HashMap::<String, GitUsageRepository>::new();
+    let mut commits = Vec::new();
 
     for stat in stats {
         if stat.timestamp < start || stat.timestamp > end {
@@ -774,6 +920,7 @@ fn aggregate_git_stats_for_window(
         repository.added_lines = repository.added_lines.saturating_add(stat.added_lines);
         repository.deleted_lines = repository.deleted_lines.saturating_add(stat.deleted_lines);
         repository.changed_files = repository.changed_files.saturating_add(stat.changed_files);
+        commits.push(git_usage_commit_from_stat(&stat));
     }
 
     let buckets = starts
@@ -799,6 +946,7 @@ fn aggregate_git_stats_for_window(
         })
         .collect::<Vec<_>>();
     sort_repositories(&mut repositories);
+    sort_commits(&mut commits);
 
     GitUsageReport {
         range,
@@ -808,6 +956,7 @@ fn aggregate_git_stats_for_window(
         totals,
         buckets,
         repositories,
+        commits,
         repository_count,
         missing_sources: Vec::new(),
         warnings: filter_stale_worktree_warnings(warnings),
@@ -830,6 +979,32 @@ fn sort_repositories(repositories: &mut [GitUsageRepository]) {
             .then_with(|| b.changed_files.cmp(&a.changed_files))
             .then_with(|| a.name.cmp(&b.name))
     });
+}
+
+fn sort_commits(commits: &mut [GitUsageCommit]) {
+    commits.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| a.repository_name.cmp(&b.repository_name))
+            .then_with(|| a.commit_hash.cmp(&b.commit_hash))
+    });
+}
+
+fn git_usage_commit_from_stat(stat: &GitCommitStat) -> GitUsageCommit {
+    let short_hash = stat.commit_hash.chars().take(10).collect::<String>();
+    GitUsageCommit {
+        commit_hash: stat.commit_hash.clone(),
+        short_hash,
+        timestamp: stat.timestamp,
+        author_name: stat.author_name.clone(),
+        author_email: stat.author_email.clone(),
+        subject: stat.subject.clone(),
+        repository_name: stat.repository_name.clone(),
+        repository_path: stat.repository_path.clone(),
+        added_lines: stat.added_lines,
+        deleted_lines: stat.deleted_lines,
+        changed_files: stat.changed_files,
+    }
 }
 
 fn filter_stale_worktree_warnings(mut warnings: Vec<String>) -> Vec<String> {
@@ -998,6 +1173,9 @@ mod tests {
                 .with_timezone(&Utc),
             repository_name: repository_name.to_string(),
             repository_path: repository_path.to_string(),
+            author_name: "Test User".into(),
+            author_email: "test@example.com".into(),
+            subject: format!("commit {commit_hash}"),
             added_lines: added,
             deleted_lines: deleted,
             changed_files,
@@ -1059,6 +1237,27 @@ mod tests {
             output.status.success(),
             "git {:?} failed: {}",
             args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit_with_author(repository: &Path, message: &str, author_name: &str, author_email: &str) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(["commit", "-m", message])
+            .env("GIT_AUTHOR_NAME", author_name)
+            .env("GIT_AUTHOR_EMAIL", author_email)
+            .env("GIT_AUTHOR_DATE", "2026-04-27T08:00:00+00:00")
+            .env("GIT_COMMITTER_NAME", "Committer User")
+            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
+            .env("GIT_COMMITTER_DATE", "2026-04-27T08:00:00+00:00")
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run git commit: {error}"));
+
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -1130,6 +1329,78 @@ mod tests {
         assert!(!stats[0].commit_hash.is_empty());
         assert_eq!(stats[0].added_lines, 3);
         assert_eq!(stats[0].deleted_lines, 0);
+    }
+
+    #[test]
+    fn load_repository_stats_only_counts_commits_by_configured_git_author_name_or_email() {
+        let root = temp_dir("local-author-filter");
+        let repository = root.join("repo");
+        fs::create_dir_all(repository.join("src")).unwrap();
+        run_git(&repository, &["init"]);
+        run_git(&repository, &["config", "user.name", "Local User"]);
+        run_git(&repository, &["config", "user.email", "local@example.com"]);
+
+        fs::write(repository.join("src").join("by-name.ts"), "one\ntwo\n").unwrap();
+        run_git(&repository, &["add", "."]);
+        commit_with_author(&repository, "by name", "Local User", "other@example.com");
+
+        fs::write(
+            repository.join("src").join("by-email.ts"),
+            "one\ntwo\nthree\n",
+        )
+        .unwrap();
+        run_git(&repository, &["add", "."]);
+        commit_with_author(&repository, "by email", "Other User", "local@example.com");
+
+        fs::write(
+            repository.join("src").join("unmatched.ts"),
+            "one\ntwo\nthree\nfour\nfive\n",
+        )
+        .unwrap();
+        run_git(&repository, &["add", "."]);
+        commit_with_author(
+            &repository,
+            "unmatched",
+            "External User",
+            "external@example.com",
+        );
+
+        let stats = load_repository_stats(
+            &repository,
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats.iter().map(|stat| stat.added_lines).sum::<u64>(), 5);
+    }
+
+    #[test]
+    fn build_cache_warns_and_skips_repository_without_effective_git_user_identity() {
+        let root = temp_dir("missing-local-author-identity");
+        let repository = root.join("repo");
+        fs::create_dir_all(repository.join("src")).unwrap();
+        run_git(&repository, &["init"]);
+        run_git(&repository, &["config", "user.name", ""]);
+        run_git(&repository, &["config", "user.email", ""]);
+
+        fs::write(repository.join("src").join("app.ts"), "one\n").unwrap();
+        run_git(&repository, &["add", "."]);
+        commit_with_author(&repository, "init", "External User", "external@example.com");
+
+        let cache = build_cache(root).unwrap();
+        let report = cache.report(LocalTokenUsageRange::ThisMonth);
+
+        assert_eq!(report.totals.added_lines, 0);
+        assert_eq!(report.repository_count, 1);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("未配置 Git 用户姓名或邮箱")),
+            "warnings were {:?}",
+            report.warnings
+        );
     }
 
     #[test]
@@ -1502,11 +1773,25 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
                         deleted_lines: 3,
                         changed_files: 1,
                     }],
+                    commits: vec![GitUsageCommit {
+                        commit_hash: "repo-a-commit".into(),
+                        short_hash: "repo-a-com".into(),
+                        timestamp: Utc.with_ymd_and_hms(2026, 4, 20, 8, 0, 0).unwrap(),
+                        author_name: "Test User".into(),
+                        author_email: "test@example.com".into(),
+                        subject: "repo a commit".into(),
+                        repository_name: "repo-a".into(),
+                        repository_path: "/tmp/repo-a".into(),
+                        added_lines: 10,
+                        deleted_lines: 3,
+                        changed_files: 1,
+                    }],
                 },
                 GitUsageCachedDay {
                     date: "2026-04-21".into(),
                     totals: GitUsageTotals::default(),
                     repositories: vec![],
+                    commits: vec![],
                 },
                 GitUsageCachedDay {
                     date: "2026-04-22".into(),
@@ -1518,6 +1803,19 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
                     repositories: vec![GitUsageRepository {
                         name: "repo-b".into(),
                         path: "/tmp/repo-b".into(),
+                        added_lines: 20,
+                        deleted_lines: 5,
+                        changed_files: 2,
+                    }],
+                    commits: vec![GitUsageCommit {
+                        commit_hash: "repo-b-commit".into(),
+                        short_hash: "repo-b-com".into(),
+                        timestamp: Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+                        author_name: "Test User".into(),
+                        author_email: "test@example.com".into(),
+                        subject: "repo b commit".into(),
+                        repository_name: "repo-b".into(),
+                        repository_path: "/tmp/repo-b".into(),
                         added_lines: 20,
                         deleted_lines: 5,
                         changed_files: 2,
@@ -1538,6 +1836,9 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         assert_eq!(report.buckets.len(), 3);
         assert_eq!(report.repositories.len(), 2);
         assert_eq!(report.repositories[0].name, "repo-b");
+        assert_eq!(report.commits.len(), 2);
+        assert_eq!(report.commits[0].commit_hash, "repo-b-commit");
+        assert_eq!(report.commits[1].commit_hash, "repo-a-commit");
     }
 
     #[test]
@@ -1584,5 +1885,8 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         assert_eq!(report.repositories[0].added_lines, 20);
         assert_eq!(report.repositories[1].name, "repo-b");
         assert_eq!(report.repositories[1].added_lines, 7);
+        assert_eq!(report.commits.len(), 2);
+        assert_eq!(report.commits[0].commit_hash, "unique-commit");
+        assert_eq!(report.commits[1].commit_hash, "duplicate-commit");
     }
 }

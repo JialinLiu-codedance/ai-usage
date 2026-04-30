@@ -17,6 +17,7 @@ import type {
   CopilotAuthStatus,
   GitHubDeviceCodeResponse,
   GitUsageBucket,
+  GitUsageCommit,
   GitUsageReport,
   LocalProxySettingsState,
   LocalProxyStatus,
@@ -1274,6 +1275,7 @@ function mockGitUsageReport(selection: UsageRangeSelection): GitUsageReport {
   });
   const totals = sumGitStats(buckets);
   const repositories = mockGitRepositories(totals);
+  const commits = mockGitCommits(repositories, generatedAt);
 
   return {
     range,
@@ -1281,6 +1283,7 @@ function mockGitUsageReport(selection: UsageRangeSelection): GitUsageReport {
     totals,
     buckets,
     repositories,
+    commits,
     repository_count: 8,
     missing_sources: [],
     warnings: [],
@@ -1368,6 +1371,45 @@ function mockGitRepositories(totals: GitUsageTotals): GitUsageRepository[] {
     deleted_lines: Math.max(1, Math.round(totals.deleted_lines * row.deletedRatio)),
     changed_files: Math.max(1, Math.round(totals.changed_files * row.filesRatio)),
   }));
+}
+
+function mockGitCommits(repositories: GitUsageRepository[], generatedAt: Date): GitUsageCommit[] {
+  return repositories.flatMap((repository, index) => {
+    const primaryDate = new Date(generatedAt.getTime() - index * 90 * 60 * 1000);
+    const commits: GitUsageCommit[] = [
+      {
+        commit_hash: `mock-commit-${index}-a`.padEnd(40, String(index)),
+        short_hash: `mock${index}a`.padEnd(10, String(index)).slice(0, 10),
+        timestamp: localIsoString(primaryDate),
+        author_name: "Local User",
+        author_email: "local@example.com",
+        subject: `feat: update ${repository.name}`,
+        repository_name: repository.name,
+        repository_path: repository.path,
+        added_lines: Math.max(1, Math.round(repository.added_lines * 0.7)),
+        deleted_lines: Math.max(0, Math.round(repository.deleted_lines * 0.65)),
+        changed_files: Math.max(0, Math.round(repository.changed_files * 0.7)),
+      },
+    ];
+
+    if (index < 2) {
+      commits.push({
+        commit_hash: `mock-commit-${index}-b`.padEnd(40, String(index + 1)),
+        short_hash: `mock${index}b`.padEnd(10, String(index + 1)).slice(0, 10),
+        timestamp: localIsoString(new Date(primaryDate.getTime() - 35 * 60 * 1000)),
+        author_name: "Local User",
+        author_email: "local@example.com",
+        subject: index === 0 ? "" : `fix: trim ${repository.name}`,
+        repository_name: repository.name,
+        repository_path: repository.path,
+        added_lines: Math.max(0, repository.added_lines - commits[0].added_lines),
+        deleted_lines: Math.max(0, repository.deleted_lines - commits[0].deleted_lines),
+        changed_files: Math.max(0, repository.changed_files - commits[0].changed_files),
+      });
+    }
+
+    return commits;
+  });
 }
 
 function mockTokenBucketDates(selection: UsageRangeSelection, now: Date): Date[] {

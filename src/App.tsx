@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, Copy, FileText, FolderOpen, Inbox, Info, KeyRound, Link2, Pencil, Plus, RefreshCw, Settings, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronRight, Copy, FileText, FolderOpen, Inbox, Info, KeyRound, Link2, Pencil, Plus, RefreshCw, Settings, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -83,6 +83,7 @@ import {
 import { quotaAccountCardState, quotaDisplayRows, remainingQuotaProgressValue } from "./lib/quota-display";
 import {
   buildGitUsageChartRows,
+  commitDetailGroups,
   formatCompactLines,
   gitUsageSummaryMetrics,
   repositoryUsageRows,
@@ -2751,6 +2752,8 @@ function GitUsageSection({
   const chartRows = report ? buildGitUsageChartRows(report) : [];
   const metrics = report ? gitUsageSummaryMetrics(report) : [];
   const repositoryRows = report ? repositoryUsageRows(report) : [];
+  const commitGroups = report ? commitDetailGroups(report) : [];
+  const commitGroupsByPath = new Map(commitGroups.map((group) => [group.path, group]));
   const notices = [
     ...(report?.warnings ?? []),
     ...(report?.missing_sources.map((source) => `未找到 ${source}`) ?? []),
@@ -2822,25 +2825,73 @@ function GitUsageSection({
               </div>
               <div className="git-repository-list">
                 {repositoryRows.map((repository) => (
-                  <div className="git-repository-row" key={repository.path}>
-                    <div className="git-repository-row-header">
-                      <span>{repository.name}</span>
-                      <strong>
-                        <span className="git-repository-added">{repository.displayAdded}</span>
-                        <span className="git-repository-deleted">/ {repository.displayDeleted}</span>
-                      </strong>
-                    </div>
-                    <div className="git-repository-progress">
-                      <span
-                        className="git-repository-progress-added"
-                        style={{ width: `${repository.addedPercent}%` }}
-                      />
-                      <span
-                        className="git-repository-progress-deleted"
-                        style={{ width: `${repository.deletedPercent}%` }}
-                      />
-                    </div>
-                  </div>
+                  (() => {
+                    const commitGroup = commitGroupsByPath.get(repository.path);
+
+                    return commitGroup ? (
+                      <details className="git-repository-details" key={repository.path}>
+                        <summary className="git-repository-summary">
+                          <div className="git-repository-row-header">
+                            <span className="git-repository-title-wrap">
+                              <ChevronRight className="git-repository-chevron" />
+                              <span>{repository.name}</span>
+                            </span>
+                            <strong>
+                              <span className="git-repository-added">{repository.displayAdded}</span>
+                              <span className="git-repository-deleted">/ {repository.displayDeleted}</span>
+                            </strong>
+                          </div>
+                          <div className="git-repository-progress">
+                            <span
+                              className="git-repository-progress-added"
+                              style={{ width: `${repository.addedPercent}%` }}
+                            />
+                            <span
+                              className="git-repository-progress-deleted"
+                              style={{ width: `${repository.deletedPercent}%` }}
+                            />
+                          </div>
+                        </summary>
+                        <div className="git-commit-list">
+                          {commitGroup.commits.map((commit) => (
+                            <div className="git-commit-row" key={commit.commit_hash}>
+                              <div className="git-commit-row-header">
+                                <span className="git-commit-subject">{commit.subject}</span>
+                                <strong>
+                                  <span className="git-commit-added">{commit.displayAdded}</span>
+                                  <span className="git-commit-deleted">/ {commit.displayDeleted}</span>
+                                </strong>
+                              </div>
+                              <div className="git-commit-row-meta">
+                                <span className="git-commit-hash">{commit.shortHash}</span>
+                                <span>{commit.timeLabel}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    ) : (
+                      <div className="git-repository-row" key={repository.path}>
+                        <div className="git-repository-row-header">
+                          <span>{repository.name}</span>
+                          <strong>
+                            <span className="git-repository-added">{repository.displayAdded}</span>
+                            <span className="git-repository-deleted">/ {repository.displayDeleted}</span>
+                          </strong>
+                        </div>
+                        <div className="git-repository-progress">
+                          <span
+                            className="git-repository-progress-added"
+                            style={{ width: `${repository.addedPercent}%` }}
+                          />
+                          <span
+                            className="git-repository-progress-deleted"
+                            style={{ width: `${repository.deletedPercent}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()
                 ))}
               </div>
             </section>

@@ -158,6 +158,24 @@ test("Git usage path control is rendered above the refresh footer instead of abo
   assert.ok(rootFieldIndex < footerIndex);
 });
 
+test("Git commit detail is merged into repository ranking with collapsible project rows", async () => {
+  const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const gitSectionStart = appSource.indexOf("function GitUsageSection");
+  const tokenSummaryStart = appSource.indexOf("function TokenUsageSummary");
+  const gitSectionSource = appSource.slice(gitSectionStart, tokenSummaryStart);
+
+  assert.equal(gitSectionSource.includes("git-commit-section"), false);
+  assert.equal(gitSectionSource.includes(">提交明细<"), false);
+  assert.match(gitSectionSource, /const commitGroups = report \? commitDetailGroups\(report\) : \[\]/);
+  assert.match(gitSectionSource, /const commitGroupsByPath = new Map\(commitGroups\.map\(\(group\) => \[group\.path, group\]\)\)/);
+  assert.match(gitSectionSource, /const commitGroup = commitGroupsByPath\.get\(repository\.path\);/);
+  assert.match(gitSectionSource, /<details className="git-repository-details" key=\{repository\.path\}>/);
+  assert.match(gitSectionSource, /className="git-repository-summary"/);
+  assert.match(gitSectionSource, /className="git-commit-list"/);
+  assert.match(gitSectionSource, /className="git-commit-added"/);
+  assert.match(gitSectionSource, /className="git-commit-deleted"/);
+});
+
 test("Git trend chart plots line-count metrics only", async () => {
   const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   const gitSectionStart = appSource.indexOf("function GitUsageSection");

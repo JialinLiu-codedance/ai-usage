@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildGitUsageChartRows,
+  commitDetailGroups,
   formatCompactLines,
   gitUsageSummaryMetrics,
   repositoryUsageRows,
@@ -62,6 +63,47 @@ const report: GitUsageReport = {
       added_lines: 25,
       deleted_lines: 5,
       changed_files: 1,
+    },
+  ],
+  commits: [
+    {
+      commit_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      short_hash: "bbbbbbbbbb",
+      timestamp: "2026-04-27T03:15:00Z",
+      author_name: "Local User",
+      author_email: "local@example.com",
+      subject: "feat: add backend endpoint",
+      repository_name: "backend-api",
+      repository_path: "/Users/test/backend-api",
+      added_lines: 500,
+      deleted_lines: 100,
+      changed_files: 3,
+    },
+    {
+      commit_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      short_hash: "aaaaaaaaaa",
+      timestamp: "2026-04-27T00:15:00Z",
+      author_name: "Local User",
+      author_email: "local@example.com",
+      subject: "fix: adjust settings layout",
+      repository_name: "ai-usage",
+      repository_path: "/Users/test/ai-usage",
+      added_lines: 40,
+      deleted_lines: 12,
+      changed_files: 2,
+    },
+    {
+      commit_hash: "cccccccccccccccccccccccccccccccccccccccc",
+      short_hash: "cccccccccc",
+      timestamp: "2026-04-27T04:15:00Z",
+      author_name: "Local User",
+      author_email: "local@example.com",
+      subject: "",
+      repository_name: "backend-api",
+      repository_path: "/Users/test/backend-api",
+      added_lines: 25,
+      deleted_lines: 0,
+      changed_files: 0,
     },
   ],
 };
@@ -176,6 +218,40 @@ test("repositoryUsageRows returns all counted repositories by default", () => {
   );
 });
 
+test("commitDetailGroups groups commits by project and sorts commits newest first", () => {
+  assert.deepEqual(
+    commitDetailGroups(report).map((group) => ({
+      name: group.name,
+      totalAdded: group.totalAdded,
+      totalDeleted: group.totalDeleted,
+      commitHashes: group.commits.map((commit) => commit.shortHash),
+      commitTitles: group.commits.map((commit) => commit.subject),
+      commitAddedLabels: group.commits.map((commit) => commit.displayAdded),
+      commitDeletedLabels: group.commits.map((commit) => commit.displayDeleted),
+    })),
+    [
+      {
+        name: "backend-api",
+        totalAdded: 525,
+        totalDeleted: 100,
+        commitHashes: ["cccccccccc", "bbbbbbbbbb"],
+        commitTitles: ["未命名提交", "feat: add backend endpoint"],
+        commitAddedLabels: ["+25", "+500"],
+        commitDeletedLabels: ["-0", "-100"],
+      },
+      {
+        name: "ai-usage",
+        totalAdded: 40,
+        totalDeleted: 12,
+        commitHashes: ["aaaaaaaaaa"],
+        commitTitles: ["fix: adjust settings layout"],
+        commitAddedLabels: ["+40"],
+        commitDeletedLabels: ["-12"],
+      },
+    ],
+  );
+});
+
 test("mock getGitUsage returns a complete visible report outside Tauri", async () => {
   resetMockTauriStateForTests();
 
@@ -188,6 +264,7 @@ test("mock getGitUsage returns a complete visible report outside Tauri", async (
   assert.ok(mock.totals.changed_files > 0);
   assert.ok(mock.buckets.length > 0);
   assert.ok(mock.repositories.length > 0);
+  assert.ok(mock.commits.length > 0);
 });
 
 test("mock getGitUsage supports a daily custom date range", async () => {
