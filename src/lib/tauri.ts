@@ -1640,13 +1640,6 @@ function roundOneDecimal(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
-export async function resizePanel(width: number, height: number): Promise<void> {
-  if (!isTauriRuntime) {
-    return;
-  }
-  return invoke("resize_main_panel", { width, height });
-}
-
 async function syncTrayMenu(): Promise<void> {
   if (!isTauriRuntime) {
     return;

@@ -12,7 +12,7 @@ use crate::{
         CUSTOM_USAGE_WINDOW_DAYS, PROVIDER_ANTHROPIC, PROVIDER_COPILOT, PROVIDER_GLM,
         PROVIDER_KIMI, PROVIDER_MINIMAX, PROVIDER_OPENAI,
     },
-    notifications, oauth, panel, pr_kpi, provider, secrets, settings,
+    notifications, oauth, pr_kpi, provider, secrets, settings,
     state::StateStore,
     storage,
 };
@@ -599,11 +599,6 @@ pub async fn delete_connected_account(
     delete_account_snapshot(&app, &account_id)?;
     hydrate_cached_snapshot(&app, &store).await?;
     settings::load_settings(&app)
-}
-
-#[tauri::command]
-pub fn resize_main_panel(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
-    panel::resize_main_panel(&app, width, height)
 }
 
 #[tauri::command]

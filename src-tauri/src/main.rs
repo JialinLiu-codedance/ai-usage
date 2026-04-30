@@ -13,7 +13,6 @@ mod local_usage;
 mod models;
 mod notifications;
 mod oauth;
-mod panel;
 mod pr_kpi;
 mod provider;
 mod secrets;
@@ -43,7 +42,6 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .manage(oauth::OAuthStore::default())
-        .manage(panel::PanelAnchor::default())
         .manage(local_proxy::LocalProxyManager::default())
         .manage(state::StateStore::default())
         .setup(|app| {
@@ -222,7 +220,6 @@ fn main() {
             commands::complete_anthropic_oauth,
             commands::delete_openai_account,
             commands::delete_connected_account,
-            commands::resize_main_panel,
             commands::get_local_token_usage,
             commands::refresh_local_token_usage,
             commands::get_git_usage,

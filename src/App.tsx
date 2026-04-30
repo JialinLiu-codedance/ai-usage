@@ -47,7 +47,6 @@ import {
   importGlmAccount,
   importKimiAccount,
   importMiniMaxAccount,
-  resizePanel,
   refreshPrKpi,
   refreshQuota,
   refreshGitUsage,
@@ -158,9 +157,6 @@ type ProxySubTab = "local" | "reverse";
 type ReverseManagerKind = "copilot" | "openai";
 type Tone = "success" | "warning" | "danger" | "muted";
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-const PANEL_WIDTH = 420;
-const PANEL_HEIGHT_MARGIN = 72;
-const PANEL_MIN_HEIGHT = 240;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const emptyStatus: AppStatus = {
@@ -379,8 +375,6 @@ function nextCopilotAccountName(settings: AppSettings): string {
 }
 
 export default function App() {
-  const panelRootRef = useRef<HTMLElement | null>(null);
-  const lastPanelSizeRef = useRef<{ width: number; height: number } | null>(null);
   const currentViewRef = useRef<PanelView>("overview");
   const oauthRequestIdRef = useRef(0);
   const updateNoticeVersionRef = useRef<string | null>(null);
@@ -566,53 +560,6 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, []);
-
-  useEffect(() => {
-    if (!isTauriRuntime || !panelRootRef.current) {
-      return undefined;
-    }
-
-    const panelRoot = panelRootRef.current;
-    let frameId: number | null = null;
-
-    const scheduleResize = () => {
-      if (frameId !== null) {
-        cancelAnimationFrame(frameId);
-      }
-
-      frameId = requestAnimationFrame(() => {
-        frameId = null;
-        const measuredElement = panelRoot.firstElementChild instanceof HTMLElement ? panelRoot.firstElementChild : panelRoot;
-        const maxHeight = panelMaxHeight();
-        panelRoot.style.setProperty("--panel-max-height", `${maxHeight}px`);
-        const contentHeight = Math.ceil(measuredElement.scrollHeight);
-        const nextHeight = Math.min(contentHeight, maxHeight);
-        const lastPanelSize = lastPanelSizeRef.current;
-        if (!nextHeight || (lastPanelSize?.width === PANEL_WIDTH && lastPanelSize.height === nextHeight)) {
-          return;
-        }
-
-        lastPanelSizeRef.current = { width: PANEL_WIDTH, height: nextHeight };
-        void resizePanel(PANEL_WIDTH, nextHeight);
-      });
-    };
-
-    const observer = new ResizeObserver(scheduleResize);
-    observer.observe(panelRoot);
-    scheduleResize();
-
-    return () => {
-      observer.disconnect();
-      if (frameId !== null) {
-        cancelAnimationFrame(frameId);
-      }
-    };
-  }, [view, loading]);
-
-  function panelMaxHeight(): number {
-    const availableHeight = window.screen?.availHeight || window.innerHeight || PANEL_MIN_HEIGHT;
-    return Math.max(PANEL_MIN_HEIGHT, Math.floor(availableHeight - PANEL_HEIGHT_MARGIN));
-  }
 
   function applySettings(nextSettings: AppSettings) {
     setSettings(nextSettings);
@@ -981,14 +928,14 @@ export default function App() {
 
   if (loading || !settings) {
     return (
-      <main ref={panelRootRef} className="panel-root panel-root-overview">
+      <main className="panel-root panel-root-overview">
         <Card className="overview-panel loading-panel">加载中...</Card>
       </main>
     );
   }
 
   return (
-    <main ref={panelRootRef} className={`panel-root panel-root-${view}`}>
+    <main className={`panel-root panel-root-${view}`}>
       {view === "overview" ? (
         <OverviewPanel
           status={status}

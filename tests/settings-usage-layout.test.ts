@@ -40,16 +40,49 @@ test("Token trend legend does not limit the chart to top three models", async ()
   assert.match(tokenPanelSource, /const chartLegend = report \? buildTokenUsageChartLegend\(report\) : \[\]/);
 });
 
-test("settings panel caps resize height and scrolls overflowing content", async () => {
+test("desktop window keeps a fixed default height and lets users resize it", async () => {
+  const tauriConfig = JSON.parse(
+    await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+  );
+  const mainWindow = tauriConfig.app.windows[0];
+
+  assert.equal(mainWindow.width, 420);
+  assert.equal(mainWindow.height, 640);
+  assert.equal(mainWindow.minWidth, 420);
+  assert.equal(mainWindow.minHeight, 240);
+  assert.equal(mainWindow.resizable, true);
+});
+
+test("app no longer auto-resizes the desktop window from content height", async () => {
+  const [appSource, tauriBridgeSource, mainSource, commandsSource] = await Promise.all([
+    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/tauri.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src-tauri/src/main.rs", import.meta.url), "utf8"),
+    readFile(new URL("../src-tauri/src/commands.rs", import.meta.url), "utf8"),
+  ]);
+
+  assert.equal(appSource.includes("ResizeObserver"), false);
+  assert.equal(appSource.includes("resizePanel"), false);
+  assert.equal(appSource.includes("panelMaxHeight"), false);
+  assert.equal(appSource.includes("--panel-max-height"), false);
+  assert.equal(tauriBridgeSource.includes("resizePanel"), false);
+  assert.equal(commandsSource.includes("resize_main_panel"), false);
+  assert.equal(mainSource.includes("commands::resize_main_panel"), false);
+});
+
+test("panel layout fills the window and scrolls overflowing content internally", async () => {
   const [appSource, styleSource] = await Promise.all([
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
   ]);
 
-  assert.match(appSource, /PANEL_HEIGHT_MARGIN/);
-  assert.match(appSource, /Math\.min\(contentHeight, maxHeight\)/);
-  assert.match(appSource, /--panel-max-height/);
-  assert.match(styleSource, /\.settings-panel\s*\{[^}]*max-height:\s*var\(--panel-max-height/s);
+  assert.match(appSource, /className="panel-root panel-root-overview"/);
+  assert.match(appSource, /className=\{`panel-root panel-root-\$\{view\}`\}/);
+  assert.match(styleSource, /html,\s*body,\s*#root\s*\{[^}]*height:\s*100%/s);
+  assert.match(styleSource, /\.panel-root\s*\{[^}]*height:\s*100%/s);
+  assert.match(styleSource, /\.overview-panel,\s*\.settings-panel\s*\{[^}]*flex:\s*1 1 auto/s);
+  assert.match(styleSource, /\.overview-panel,\s*\.settings-panel\s*\{[^}]*min-height:\s*0/s);
+  assert.match(styleSource, /\.overview-panel,\s*\.settings-panel\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(styleSource, /\.settings-panel\s*\{[^}]*overflow-y:\s*auto/s);
 });
 
