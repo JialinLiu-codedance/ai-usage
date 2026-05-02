@@ -189,11 +189,36 @@ test("Git trend chart plots line-count metrics only", async () => {
 });
 
 test("statistics panel includes the KPI subtab and preserves the shared range selector", async () => {
-  const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const [appSource, styleSource] = await Promise.all([
+    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
+  ]);
 
   assert.match(appSource, />\s*KPI 分析\s*</);
-  assert.match(appSource, /type SettingsUsageTab = "token" \| "git" \| "kpi"/);
+  assert.match(appSource, />\s*默认分支\s*</);
+  assert.match(appSource, /type SettingsUsageTab = "token" \| "git" \| "kpi" \| "branch"/);
   assert.match(appSource, /const \[usageRangeUiState, setUsageRangeUiState\]/);
+  assert.match(
+    styleSource,
+    /\.usage-subtabs\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*1px\s*minmax\(0,\s*1fr\)\s*1px\s*minmax\(0,\s*1fr\)\s*1px\s*minmax\(0,\s*1fr\)/s,
+  );
+});
+
+test("statistics panel includes a dedicated default branch management section", async () => {
+  const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+
+  assert.match(appSource, /getGitBranchManagement/);
+  assert.match(appSource, /const \[branchManagementState, setBranchManagementState\]/);
+  assert.match(appSource, /function BranchManagementSection/);
+  assert.match(appSource, /const \[openBranchPickerByPath, setOpenBranchPickerByPath\]/);
+  assert.match(appSource, /const \[branchFilterByPath, setBranchFilterByPath\]/);
+  assert.match(appSource, /GitHub 默认分支：/);
+  assert.match(appSource, /当前生效分支：/);
+  assert.match(appSource, /className="git-branch-combobox"/);
+  assert.match(appSource, /className="git-branch-combobox-panel"/);
+  assert.match(appSource, /placeholder="搜索分支"/);
+  assert.match(appSource, /candidate\.display_name\.toLowerCase\(\)\.includes\(filterKeyword\)/);
+  assert.match(appSource, />\s*恢复自动识别\s*</);
 });
 
 test("Token and Git trend charts render every returned bucket", async () => {

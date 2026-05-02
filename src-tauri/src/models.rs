@@ -111,6 +111,8 @@ pub struct AppSettings {
     #[serde(default = "default_git_usage_root")]
     pub git_usage_root: String,
     #[serde(default)]
+    pub git_default_branch_overrides: HashMap<String, String>,
+    #[serde(default)]
     pub launch_at_login: bool,
     #[serde(default)]
     pub claude_proxy: ClaudeProxyConfig,
@@ -136,6 +138,7 @@ impl Default for AppSettings {
             notify_on_reset: false,
             reset_notify_lead_minutes: 15,
             git_usage_root: default_git_usage_root(),
+            git_default_branch_overrides: HashMap::new(),
             launch_at_login: false,
             claude_proxy: ClaudeProxyConfig::default(),
             claude_proxy_profiles: HashMap::new(),
@@ -170,6 +173,8 @@ pub struct SaveSettingsInput {
     pub reset_notify_lead_minutes: u32,
     #[serde(default = "default_git_usage_root")]
     pub git_usage_root: String,
+    #[serde(default)]
+    pub git_default_branch_overrides: HashMap<String, String>,
     #[serde(default)]
     pub launch_at_login: bool,
     pub auth_secret: Option<String>,
@@ -698,6 +703,45 @@ pub struct GitUsageCommit {
     pub added_lines: u64,
     pub deleted_lines: u64,
     pub changed_files: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitDefaultBranchSource {
+    Override,
+    Github,
+    Fallback,
+    Missing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchCandidate {
+    pub reference: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchProject {
+    pub name: String,
+    pub path: String,
+    pub github_default_branch: Option<String>,
+    pub fallback_default_branch: Option<String>,
+    pub override_branch: Option<String>,
+    pub effective_default_branch: Option<String>,
+    pub effective_source: GitDefaultBranchSource,
+    #[serde(default)]
+    pub candidates: Vec<GitBranchCandidate>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitBranchManagementState {
+    pub root_path: String,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
+    pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub projects: Vec<GitBranchProject>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

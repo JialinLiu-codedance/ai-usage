@@ -77,6 +77,8 @@ pub struct GitUsageCache {
     pub root_path: String,
     #[serde(with = "crate::app_time::local_datetime_serde")]
     pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub default_branch_override_fingerprint: String,
     pub today: GitUsageReport,
     pub last3_days: GitUsageReport,
     pub this_week: GitUsageReport,
@@ -160,6 +162,13 @@ impl GitUsageCache {
 }
 
 pub fn build_cache(root: PathBuf) -> Result<GitUsageCache, String> {
+    build_cache_with_override_fingerprint(root, String::new())
+}
+
+pub fn build_cache_with_override_fingerprint(
+    root: PathBuf,
+    default_branch_override_fingerprint: String,
+) -> Result<GitUsageCache, String> {
     let now = Utc::now();
     let root_path = root.to_string_lossy().to_string();
     let (repositories, mut warnings) = match discover_git_repositories(&root) {
@@ -179,6 +188,7 @@ pub fn build_cache(root: PathBuf) -> Result<GitUsageCache, String> {
     Ok(build_cache_from_stats(
         now,
         root_path,
+        default_branch_override_fingerprint,
         stats,
         repositories.len(),
         warnings,
@@ -232,6 +242,7 @@ pub fn pending_custom_report(
 fn build_cache_from_stats(
     now: DateTime<Utc>,
     root_path: String,
+    default_branch_override_fingerprint: String,
     stats: Vec<GitCommitStat>,
     repository_count: usize,
     warnings: Vec<String>,
@@ -243,6 +254,7 @@ fn build_cache_from_stats(
     GitUsageCache {
         root_path,
         generated_at: now,
+        default_branch_override_fingerprint,
         today: aggregate_git_stats(
             LocalTokenUsageRange::Today,
             now,
@@ -1685,6 +1697,7 @@ mod tests {
         let cache = GitUsageCache {
             root_path: root.to_string_lossy().to_string(),
             generated_at: Utc::now(),
+            default_branch_override_fingerprint: String::new(),
             today: empty_report(LocalTokenUsageRange::Today, None),
             last3_days: empty_report(LocalTokenUsageRange::Last3Days, None),
             this_week: empty_report(LocalTokenUsageRange::ThisWeek, None),
@@ -1921,7 +1934,14 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
             git_stat("2026-04-01T06:10:00Z", 40, 9, 3),
         ];
 
-        let cache = build_cache_from_stats(now, "/tmp/workspace".into(), stats, 4, vec![]);
+        let cache = build_cache_from_stats(
+            now,
+            "/tmp/workspace".into(),
+            String::new(),
+            stats,
+            4,
+            vec![],
+        );
 
         assert_eq!(cache.root_path, "/tmp/workspace");
         assert_eq!(
@@ -1963,6 +1983,7 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         let cache = GitUsageCache {
             root_path: "/tmp/workspace".into(),
             generated_at: now,
+            default_branch_override_fingerprint: String::new(),
             today: empty_report(LocalTokenUsageRange::Today, None),
             last3_days: empty_report(LocalTokenUsageRange::Last3Days, None),
             this_week: empty_report(LocalTokenUsageRange::ThisWeek, None),
@@ -2074,6 +2095,7 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
         let cache = GitUsageCache {
             root_path: "/tmp/workspace".into(),
             generated_at: now,
+            default_branch_override_fingerprint: String::new(),
             today: empty_report(LocalTokenUsageRange::Today, None),
             last3_days: empty_report(LocalTokenUsageRange::Last3Days, None),
             this_week: empty_report(LocalTokenUsageRange::ThisWeek, None),
@@ -2212,8 +2234,15 @@ commit\t2222222222222222222222222222222222222222\t2026-04-26T20:30:00+00:00
             ),
         ];
 
-        let report = build_cache_from_stats(now, "/tmp/workspace".into(), stats, 2, vec![])
-            .report(LocalTokenUsageRange::Today);
+        let report = build_cache_from_stats(
+            now,
+            "/tmp/workspace".into(),
+            String::new(),
+            stats,
+            2,
+            vec![],
+        )
+        .report(LocalTokenUsageRange::Today);
 
         assert_eq!(report.totals.added_lines, 27);
         assert_eq!(report.totals.deleted_lines, 7);

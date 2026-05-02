@@ -8,7 +8,10 @@ use crate::{
     },
     secrets, storage,
 };
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 use tauri::AppHandle;
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -139,6 +142,9 @@ fn settings_from_save_input(existing: AppSettings, input: SaveSettingsInput) -> 
         notify_on_reset: false,
         reset_notify_lead_minutes: input.reset_notify_lead_minutes.max(1),
         git_usage_root: sanitize_git_usage_root(input.git_usage_root),
+        git_default_branch_overrides: sanitize_git_default_branch_overrides(
+            input.git_default_branch_overrides,
+        ),
         launch_at_login: input.launch_at_login,
         claude_proxy: existing.claude_proxy,
         claude_proxy_profiles: existing.claude_proxy_profiles,
@@ -535,6 +541,26 @@ fn sanitize_git_usage_root(input: String) -> String {
     }
 
     expand_home_path(trimmed).to_string_lossy().to_string()
+}
+
+fn sanitize_git_default_branch_overrides(
+    input: HashMap<String, String>,
+) -> HashMap<String, String> {
+    input
+        .into_iter()
+        .filter_map(|(path, reference)| {
+            let normalized_path = path.trim();
+            let normalized_reference = reference.trim();
+            if normalized_path.is_empty() || normalized_reference.is_empty() {
+                None
+            } else {
+                Some((
+                    normalized_path.to_string(),
+                    normalized_reference.to_string(),
+                ))
+            }
+        })
+        .collect()
 }
 
 fn sanitize_claude_proxy_config(input: ClaudeProxyConfig) -> ClaudeProxyConfig {
@@ -968,6 +994,7 @@ mod tests {
                 notify_on_reset: true,
                 reset_notify_lead_minutes: 30,
                 git_usage_root: " ~/project ".into(),
+                git_default_branch_overrides: HashMap::new(),
                 launch_at_login: false,
                 auth_secret: None,
             },
@@ -992,6 +1019,7 @@ mod tests {
                 notify_on_reset: false,
                 reset_notify_lead_minutes: 30,
                 git_usage_root: " ~/project ".into(),
+                git_default_branch_overrides: HashMap::new(),
                 launch_at_login: false,
                 auth_secret: None,
             },
@@ -1023,11 +1051,44 @@ mod tests {
                 notify_on_reset: false,
                 reset_notify_lead_minutes: 30,
                 git_usage_root: default_git_usage_root(),
+                git_default_branch_overrides: HashMap::new(),
                 launch_at_login: true,
                 auth_secret: None,
             },
         );
 
         assert!(settings.launch_at_login);
+    }
+
+    #[test]
+    fn save_settings_preserves_git_default_branch_overrides() {
+        let settings = settings_from_save_input(
+            AppSettings::default(),
+            SaveSettingsInput {
+                account_id: default_account_id(),
+                account_name: "OpenAI Account".into(),
+                auth_mode: AuthMode::ApiKey,
+                base_url_override: None,
+                chatgpt_account_id: None,
+                refresh_interval_minutes: 30,
+                low_quota_threshold_percent: 15.0,
+                notify_on_low_quota: false,
+                notify_on_reset: false,
+                reset_notify_lead_minutes: 30,
+                git_usage_root: default_git_usage_root(),
+                git_default_branch_overrides: HashMap::from([
+                    ("/tmp/repo-a".into(), "refs/heads/main".into()),
+                    ("   ".into(), "refs/heads/dev".into()),
+                    ("/tmp/repo-b".into(), "   ".into()),
+                ]),
+                launch_at_login: false,
+                auth_secret: None,
+            },
+        );
+
+        assert_eq!(
+            settings.git_default_branch_overrides,
+            HashMap::from([("/tmp/repo-a".into(), "refs/heads/main".into(),)])
+        );
     }
 }

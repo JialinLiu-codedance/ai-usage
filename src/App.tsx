@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
   Select,
@@ -32,6 +33,7 @@ import {
   ensureNotificationPermission,
   chooseGitUsageRoot,
   getCurrentQuota,
+  getGitBranchManagement,
   installAppUpdate,
   getLocalProxySettings,
   getLocalProxyStatus,
@@ -50,6 +52,7 @@ import {
   refreshPrKpi,
   refreshQuota,
   refreshGitUsage,
+  refreshGitBranchManagement,
   refreshLocalTokenUsage,
   relaunchApp,
   saveClaudeProxyProfile,
@@ -125,6 +128,7 @@ import type {
   ClaudeProxyCapability,
   ConnectedAccount,
   CopilotAuthStatus,
+  GitBranchManagementState,
   GitUsageReport,
   GitHubDeviceCodeResponse,
   LocalProxySettingsState,
@@ -153,11 +157,12 @@ type PanelView =
 type AddAccountBackView = Extract<PanelView, "overview" | "settings">;
 type OAuthProviderKey = "openai" | "anthropic";
 type SettingsTab = "quota" | "tokens" | "proxy";
-type SettingsUsageTab = "token" | "git" | "kpi";
+type SettingsUsageTab = "token" | "git" | "kpi" | "branch";
 type ProxySubTab = "local" | "reverse";
 type ReverseManagerKind = "copilot" | "openai";
 type Tone = "success" | "warning" | "danger" | "muted";
 const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const AUTO_BRANCH_VALUE = "__auto__";
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const emptyStatus: AppStatus = {
@@ -432,6 +437,7 @@ export default function App() {
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     git_usage_root: "",
+    git_default_branch_overrides: {},
     launch_at_login: false,
     auth_secret: "",
   });
@@ -577,6 +583,7 @@ export default function App() {
       notify_on_reset: nextSettings.notify_on_reset,
       reset_notify_lead_minutes: nextSettings.reset_notify_lead_minutes,
       git_usage_root: nextSettings.git_usage_root,
+      git_default_branch_overrides: nextSettings.git_default_branch_overrides,
       launch_at_login: nextSettings.launch_at_login,
       auth_secret: "",
     }));
@@ -1312,14 +1319,18 @@ function SettingsPanel({
   const [tokenLoading, setTokenLoading] = useState(false);
   const [gitLoading, setGitLoading] = useState(false);
   const [kpiLoading, setKpiLoading] = useState(false);
+  const [branchLoading, setBranchLoading] = useState(false);
   const [tokenRefreshing, setTokenRefreshing] = useState(false);
   const [gitRefreshing, setGitRefreshing] = useState(false);
   const [kpiRefreshing, setKpiRefreshing] = useState(false);
+  const [branchRefreshing, setBranchRefreshing] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
   const [kpiError, setKpiError] = useState<string | null>(null);
+  const [branchError, setBranchError] = useState<string | null>(null);
   const [gitRootDraft, setGitRootDraft] = useState(form.git_usage_root);
   const [gitRootPicking, setGitRootPicking] = useState(false);
+  const [branchManagementState, setBranchManagementState] = useState<GitBranchManagementState | null>(null);
   const [proxySubTab, setProxySubTab] = useState<ProxySubTab>("local");
   const [proxySettingsState, setProxySettingsState] = useState<LocalProxySettingsState | null>(null);
   const [proxyStatus, setProxyStatus] = useState<LocalProxyStatus | null>(null);
@@ -1589,6 +1600,68 @@ function SettingsPanel({
   }, [activeTab, activeUsageTab, usageRangeKey, usageRangeSelection, form.git_usage_root]);
 
   useEffect(() => {
+    if (activeTab !== "tokens" || activeUsageTab !== "branch") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    setBranchLoading(true);
+    setBranchError(null);
+
+    getGitBranchManagement()
+      .then((nextState) => {
+        if (!cancelled) {
+          setBranchManagementState(nextState);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setBranchError(errorMessage(error, "Default Branch 读取失败"));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBranchLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeTab,
+    activeUsageTab,
+    form.git_usage_root,
+    JSON.stringify(form.git_default_branch_overrides),
+  ]);
+
+  useEffect(() => {
+    if (!isTauriRuntime || activeTab !== "tokens" || activeUsageTab !== "branch") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const unlisten = listen("git-branch-management-cache-updated", () => {
+      getGitBranchManagement()
+        .then((nextState) => {
+          if (!cancelled) {
+            setBranchManagementState(nextState);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setBranchError(errorMessage(error, "Default Branch 读取失败"));
+          }
+        });
+    });
+
+    return () => {
+      cancelled = true;
+      void unlisten.then((dispose) => dispose());
+    };
+  }, [activeTab, activeUsageTab]);
+
+  useEffect(() => {
     if (!isTauriRuntime || activeTab !== "tokens" || activeUsageTab !== "token") {
       return undefined;
     }
@@ -1739,6 +1812,36 @@ function SettingsPanel({
       setKpiError(errorMessage(error, "KPI 分析刷新失败"));
     } finally {
       setKpiRefreshing(false);
+    }
+  }
+
+  function handleDefaultBranchOverrideChange(repositoryPath: string, reference: string | null) {
+    const nextOverrides = { ...form.git_default_branch_overrides };
+    if (reference) {
+      nextOverrides[repositoryPath] = reference;
+    } else {
+      delete nextOverrides[repositoryPath];
+    }
+    setGitReportsByRange({});
+    setKpiReportsByRange({});
+    setLastReadyGitRangeKey(null);
+    setLastReadyKpiRangeKey(null);
+    onChange({
+      ...form,
+      git_default_branch_overrides: nextOverrides,
+    });
+  }
+
+  async function handleBranchRefresh() {
+    setBranchRefreshing(true);
+    setBranchError(null);
+    try {
+      const nextState = await refreshGitBranchManagement();
+      setBranchManagementState(nextState);
+    } catch (error) {
+      setBranchError(errorMessage(error, "Default Branch 刷新失败"));
+    } finally {
+      setBranchRefreshing(false);
     }
   }
 
@@ -2252,6 +2355,8 @@ function SettingsPanel({
           report={tokenReport}
           gitReport={gitReport}
           kpiReport={kpiReport}
+          branchManagementState={branchManagementState}
+          branchOverrides={form.git_default_branch_overrides}
           selectedRangeOption={selectedRangeOption}
           customRangeDraft={customRangeDraft}
           customRangeBounds={customRangeBounds}
@@ -2262,15 +2367,18 @@ function SettingsPanel({
           loading={tokenLoading}
           gitLoading={gitLoading}
           kpiLoading={kpiLoading}
+          branchLoading={branchLoading}
           preparing={tokenPreparing}
           gitPreparing={gitPreparing}
           kpiPreparing={kpiPreparing}
           refreshing={tokenRefreshing}
           gitRefreshing={gitRefreshing}
           kpiRefreshing={kpiRefreshing}
+          branchRefreshing={branchRefreshing}
           error={tokenError}
           gitError={gitError}
           kpiError={kpiError}
+          branchError={branchError}
           onRangeChange={handleUsageRangeChange}
           onCustomRangeChange={handleCustomRangeChange}
           onCustomRangeApply={handleCustomRangeApply}
@@ -2281,6 +2389,8 @@ function SettingsPanel({
           onRefresh={handleTokenRefresh}
           onGitRefresh={handleGitRefresh}
           onKpiRefresh={handleKpiRefresh}
+          onBranchRefresh={handleBranchRefresh}
+          onDefaultBranchOverrideChange={handleDefaultBranchOverrideChange}
         />
       ) : (
         <LocalProxyPanel
@@ -2416,6 +2526,8 @@ function TokenUsagePanel({
   report,
   gitReport,
   kpiReport,
+  branchManagementState,
+  branchOverrides,
   selectedRangeOption,
   customRangeDraft,
   customRangeBounds,
@@ -2426,15 +2538,18 @@ function TokenUsagePanel({
   loading,
   gitLoading,
   kpiLoading,
+  branchLoading,
   preparing,
   gitPreparing,
   kpiPreparing,
   refreshing,
   gitRefreshing,
   kpiRefreshing,
+  branchRefreshing,
   error,
   gitError,
   kpiError,
+  branchError,
   onRangeChange,
   onCustomRangeChange,
   onCustomRangeApply,
@@ -2445,10 +2560,14 @@ function TokenUsagePanel({
   onRefresh,
   onGitRefresh,
   onKpiRefresh,
+  onBranchRefresh,
+  onDefaultBranchOverrideChange,
 }: {
   report: LocalTokenUsageReport | null;
   gitReport: GitUsageReport | null;
   kpiReport: PrKpiReport | null;
+  branchManagementState: GitBranchManagementState | null;
+  branchOverrides: Record<string, string>;
   selectedRangeOption: UsageRangeOption;
   customRangeDraft: Extract<UsageRangeSelection, { kind: "custom" }>;
   customRangeBounds: { minDate: string; maxDate: string };
@@ -2459,15 +2578,18 @@ function TokenUsagePanel({
   loading: boolean;
   gitLoading: boolean;
   kpiLoading: boolean;
+  branchLoading: boolean;
   preparing: boolean;
   gitPreparing: boolean;
   kpiPreparing: boolean;
   refreshing: boolean;
   gitRefreshing: boolean;
   kpiRefreshing: boolean;
+  branchRefreshing: boolean;
   error: string | null;
   gitError: string | null;
   kpiError: string | null;
+  branchError: string | null;
   onRangeChange: (range: UsageRangeOption) => void;
   onCustomRangeChange: (field: "startDate" | "endDate", value: string) => void;
   onCustomRangeApply: () => void;
@@ -2478,6 +2600,8 @@ function TokenUsagePanel({
   onRefresh: () => void;
   onGitRefresh: () => void;
   onKpiRefresh: () => void;
+  onBranchRefresh: () => void;
+  onDefaultBranchOverrideChange: (repositoryPath: string, reference: string | null) => void;
 }) {
   const chartRows = report ? buildTokenUsageChartRows(report) : [];
   const chartLegend = report ? buildTokenUsageChartLegend(report) : [];
@@ -2566,6 +2690,16 @@ function TokenUsagePanel({
           onClick={() => onUsageTabChange("kpi")}
         >
           KPI 分析
+        </button>
+        <span className="usage-subtab-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className={`usage-subtab ${activeUsageTab === "branch" ? "usage-subtab-active" : ""}`}
+          role="tab"
+          aria-selected={activeUsageTab === "branch"}
+          onClick={() => onUsageTabChange("branch")}
+        >
+          默认分支
         </button>
       </div>
 
@@ -2710,7 +2844,7 @@ function TokenUsagePanel({
           onGitUsageRootPick={onGitUsageRootPick}
           onRefresh={onGitRefresh}
         />
-      ) : (
+      ) : activeUsageTab === "kpi" ? (
         <KpiUsageSection
           report={kpiReport}
           loading={kpiLoading}
@@ -2718,6 +2852,16 @@ function TokenUsagePanel({
           refreshing={kpiRefreshing}
           error={kpiError}
           onRefresh={onKpiRefresh}
+        />
+      ) : (
+        <BranchManagementSection
+          state={branchManagementState}
+          loading={branchLoading}
+          error={branchError}
+          overrides={branchOverrides}
+          refreshing={branchRefreshing}
+          onRefresh={onBranchRefresh}
+          onOverrideChange={onDefaultBranchOverrideChange}
         />
       )}
     </section>
@@ -3167,6 +3311,175 @@ function KpiUsageSection({
               {refreshing ? "计算中" : "刷新 KPI"}
             </Button>
           </div>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function BranchManagementSection({
+  state,
+  loading,
+  error,
+  overrides,
+  refreshing,
+  onRefresh,
+  onOverrideChange,
+}: {
+  state: GitBranchManagementState | null;
+  loading: boolean;
+  error: string | null;
+  overrides: Record<string, string>;
+  refreshing: boolean;
+  onRefresh: () => void;
+  onOverrideChange: (repositoryPath: string, reference: string | null) => void;
+}) {
+  const [openBranchPickerByPath, setOpenBranchPickerByPath] = useState<Record<string, boolean>>({});
+  const [branchFilterByPath, setBranchFilterByPath] = useState<Record<string, string>>({});
+
+  return (
+    <section className="kpi-usage-section">
+      {error ? <div className="inline-error">{error}</div> : null}
+      {loading && !state ? <div className="token-loading">读取 Default Branch 配置...</div> : null}
+
+      {state ? (
+        <>
+          <section className="token-card git-branch-card">
+            <div className="token-section-header">
+              <h2>Default Branch 管理</h2>
+              <div className="git-branch-header-meta">
+                <span>{state.root_path}</span>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="token-refresh-button"
+                  disabled={refreshing}
+                  onClick={onRefresh}
+                >
+                  <RefreshCw
+                    data-icon="inline-start"
+                    className={refreshing ? "refresh-icon-spinning" : undefined}
+                  />
+                  {refreshing ? "刷新中" : "刷新"}
+                </Button>
+              </div>
+            </div>
+            <div className="git-branch-project-list">
+              {state.projects.map((project) => {
+                const selectedReference = overrides[project.path] ?? AUTO_BRANCH_VALUE;
+                const filterKeyword = (branchFilterByPath[project.path] ?? "").trim().toLowerCase();
+                const visibleCandidates = project.candidates.filter((candidate) =>
+                  candidate.display_name.toLowerCase().includes(filterKeyword),
+                );
+                const pickerOpen = openBranchPickerByPath[project.path] ?? false;
+                const selectedDisplayName =
+                  selectedReference === AUTO_BRANCH_VALUE
+                    ? "自动识别"
+                    : project.candidates.find((candidate) => candidate.reference === selectedReference)
+                        ?.display_name ?? displayBranchValue(selectedReference);
+                return (
+                  <div className="git-branch-project-row" key={project.path}>
+                    <div className="git-branch-project-meta">
+                      <strong>{project.name}</strong>
+                      <span>{project.path}</span>
+                    </div>
+                    <div className="git-branch-project-facts">
+                      <span>{`GitHub 默认分支：${displayBranchValue(project.github_default_branch)}`}</span>
+                      <span>{`当前生效分支：${displayBranchValue(project.effective_default_branch)}`}</span>
+                      <span>{`来源：${formatBranchSourceLabel(project.effective_source)}`}</span>
+                    </div>
+                    <div className="git-branch-project-actions">
+                      <div className="git-branch-combobox">
+                        <button
+                          type="button"
+                          className={`git-branch-combobox-trigger ${pickerOpen ? "git-branch-combobox-trigger-open" : ""}`}
+                          aria-expanded={pickerOpen}
+                          onClick={() =>
+                            setOpenBranchPickerByPath((current) => ({
+                              ...current,
+                              [project.path]: !pickerOpen,
+                            }))
+                          }
+                        >
+                          <span>{selectedDisplayName}</span>
+                          <ChevronRight className="git-branch-combobox-chevron" />
+                        </button>
+                        {pickerOpen ? (
+                          <div className="git-branch-combobox-panel">
+                            <Input
+                              value={branchFilterByPath[project.path] ?? ""}
+                              placeholder="搜索分支"
+                              className="git-branch-combobox-input"
+                              onChange={(event) =>
+                                setBranchFilterByPath((current) => ({
+                                  ...current,
+                                  [project.path]: event.target.value,
+                                }))
+                              }
+                            />
+                            <div className="git-branch-combobox-list">
+                              <button
+                                type="button"
+                                className={`git-branch-combobox-item ${selectedReference === AUTO_BRANCH_VALUE ? "git-branch-combobox-item-active" : ""}`}
+                                onClick={() => {
+                                  onOverrideChange(project.path, null);
+                                  setOpenBranchPickerByPath((current) => ({
+                                    ...current,
+                                    [project.path]: false,
+                                  }));
+                                }}
+                              >
+                                自动识别
+                              </button>
+                              {visibleCandidates.map((candidate) => (
+                                <button
+                                  type="button"
+                                  key={candidate.reference}
+                                  className={`git-branch-combobox-item ${candidate.reference === selectedReference ? "git-branch-combobox-item-active" : ""}`}
+                                  onClick={() => {
+                                    onOverrideChange(project.path, candidate.reference);
+                                    setOpenBranchPickerByPath((current) => ({
+                                      ...current,
+                                      [project.path]: false,
+                                    }));
+                                  }}
+                                >
+                                  {candidate.display_name}
+                                </button>
+                              ))}
+                              {visibleCandidates.length === 0 ? (
+                                <div className="git-branch-combobox-empty">未找到匹配分支</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={!project.override_branch}
+                        onClick={() => onOverrideChange(project.path, null)}
+                      >
+                        恢复自动识别
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <div className="token-generated-at">更新于 {formatGeneratedAt(state.generated_at)}</div>
+
+          {state.warnings.length > 0 ? (
+            <div className="token-warning-list">
+              {state.warnings.slice(0, 4).map((warning) => (
+                <div key={warning}>{warning}</div>
+              ))}
+            </div>
+          ) : null}
         </>
       ) : null}
     </section>
@@ -3906,6 +4219,28 @@ function formatGeneratedAt(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function displayBranchValue(value: string | null | undefined): string {
+  if (!value) {
+    return "未识别";
+  }
+  return value.replace(/^refs\/heads\//, "").replace(/^refs\/remotes\/origin\//, "");
+}
+
+function formatBranchSourceLabel(
+  source: GitBranchManagementState["projects"][number]["effective_source"],
+): string {
+  if (source === "override") {
+    return "Override";
+  }
+  if (source === "github") {
+    return "GitHub";
+  }
+  if (source === "fallback") {
+    return "Fallback";
+  }
+  return "未识别";
 }
 
 function AddAccountPanel({

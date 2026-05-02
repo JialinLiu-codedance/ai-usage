@@ -32,6 +32,7 @@ export interface AppSettings {
   notify_on_reset: boolean;
   reset_notify_lead_minutes: number;
   git_usage_root: string;
+  git_default_branch_overrides: Record<string, string>;
   launch_at_login: boolean;
   claude_proxy: ClaudeProxyConfig;
   claude_proxy_profiles: Record<string, ClaudeProxyProfileSummary>;
@@ -51,6 +52,7 @@ export interface SaveSettingsInput {
   notify_on_reset: boolean;
   reset_notify_lead_minutes: number;
   git_usage_root: string;
+  git_default_branch_overrides: Record<string, string>;
   launch_at_login: boolean;
   auth_secret?: string | null;
 }
@@ -323,6 +325,31 @@ export interface GitUsageReport {
   missing_sources: string[];
   warnings: string[];
   generated_at: string;
+}
+
+export type GitDefaultBranchSource = "override" | "github" | "fallback" | "missing";
+
+export interface GitBranchCandidate {
+  reference: string;
+  display_name: string;
+}
+
+export interface GitBranchProject {
+  name: string;
+  path: string;
+  github_default_branch?: string | null;
+  fallback_default_branch?: string | null;
+  override_branch?: string | null;
+  effective_default_branch?: string | null;
+  effective_source: GitDefaultBranchSource;
+  candidates: GitBranchCandidate[];
+}
+
+export interface GitBranchManagementState {
+  root_path: string;
+  generated_at: string;
+  projects: GitBranchProject[];
+  warnings: string[];
 }
 
 export type PrKpiMetricKey =

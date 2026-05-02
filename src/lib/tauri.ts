@@ -15,6 +15,7 @@ import type {
   ConnectedAccount,
   ConnectionTestResult,
   CopilotAuthStatus,
+  GitBranchManagementState,
   GitHubDeviceCodeResponse,
   GitUsageBucket,
   GitUsageCommit,
@@ -119,6 +120,7 @@ function initialMockSettings(): AppSettings {
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     git_usage_root: mockGitUsageRoot,
+    git_default_branch_overrides: {},
     launch_at_login: false,
     claude_proxy: defaultMockClaudeProxyConfig,
     claude_proxy_profiles: {},
@@ -141,6 +143,7 @@ function emptyMockSettings(): AppSettings {
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     git_usage_root: mockGitUsageRoot,
+    git_default_branch_overrides: {},
     launch_at_login: false,
     claude_proxy: defaultMockClaudeProxyConfig,
     claude_proxy_profiles: {},
@@ -315,6 +318,53 @@ export async function saveSettings(input: SaveSettingsInput): Promise<AppSetting
     return mockSettings;
   }
   return invoke("save_settings", { input });
+}
+
+export async function getGitBranchManagement(): Promise<GitBranchManagementState> {
+  if (!isTauriRuntime) {
+    return {
+      root_path: mockGitUsageRoot,
+      generated_at: localIsoString(new Date()),
+      warnings: [],
+      projects: [
+        {
+          name: "ai-usage",
+          path: "/Users/local/project/ai-usage",
+          github_default_branch: "refs/heads/main",
+          fallback_default_branch: "refs/heads/main",
+          override_branch: null,
+          effective_default_branch: "refs/heads/main",
+          effective_source: "github",
+          candidates: [
+            { reference: "refs/heads/main", display_name: "main" },
+            { reference: "refs/heads/dev", display_name: "dev" },
+          ],
+        },
+        {
+          name: "backend-api",
+          path: "/Users/local/project/backend-api",
+          github_default_branch: "refs/heads/development",
+          fallback_default_branch: "refs/heads/main",
+          override_branch: "refs/heads/release",
+          effective_default_branch: "refs/heads/release",
+          effective_source: "override",
+          candidates: [
+            { reference: "refs/heads/main", display_name: "main" },
+            { reference: "refs/heads/development", display_name: "development" },
+            { reference: "refs/heads/release", display_name: "release" },
+          ],
+        },
+      ],
+    };
+  }
+  return invoke("get_git_branch_management");
+}
+
+export async function refreshGitBranchManagement(): Promise<GitBranchManagementState> {
+  if (!isTauriRuntime) {
+    return getGitBranchManagement();
+  }
+  return invoke("refresh_git_branch_management");
 }
 
 export async function getLocalProxySettings(): Promise<LocalProxySettingsState> {

@@ -31,6 +31,7 @@ function baseSettings(): AppSettings {
     notify_on_reset: false,
     reset_notify_lead_minutes: 15,
     git_usage_root: "/Users/test/project",
+    git_default_branch_overrides: {},
     launch_at_login: false,
     claude_proxy: {
       listen_address: "127.0.0.1",

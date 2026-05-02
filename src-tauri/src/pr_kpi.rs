@@ -1,8 +1,9 @@
 use crate::{
     app_time, git_usage,
     models::{
-        GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport, LocalTokenUsageTotals,
-        PrKpiMetric, PrKpiMetricKey, PrKpiOverview, PrKpiReport, CUSTOM_USAGE_WINDOW_DAYS,
+        GitDefaultBranchSource, GitUsageReport, LocalTokenUsageRange, LocalTokenUsageReport,
+        LocalTokenUsageTotals, PrKpiMetric, PrKpiMetricKey, PrKpiOverview, PrKpiReport,
+        CUSTOM_USAGE_WINDOW_DAYS,
     },
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
@@ -32,6 +33,8 @@ pub struct PrKpiCache {
     pub root_path: String,
     #[serde(with = "crate::app_time::local_datetime_serde")]
     pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub default_branch_override_fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_login: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,7 +183,12 @@ impl PrKpiCache {
     }
 }
 
-pub fn build_cache(root: PathBuf, github_token: Option<String>) -> Result<PrKpiCache, String> {
+pub fn build_cache(
+    root: PathBuf,
+    github_token: Option<String>,
+    default_branch_overrides: HashMap<String, String>,
+    default_branch_override_fingerprint: String,
+) -> Result<PrKpiCache, String> {
     let now = Utc::now();
     let offset = app_time::local_offset();
     let window_end = app_time::local_date(now, offset);
@@ -199,6 +207,7 @@ pub fn build_cache(root: PathBuf, github_token: Option<String>) -> Result<PrKpiC
             root_path,
             generated_at: now,
             github_login: None,
+            default_branch_override_fingerprint,
             custom_window_start: Some(window_start),
             custom_window_end: Some(window_end),
             pull_requests: Vec::new(),
@@ -216,6 +225,7 @@ pub fn build_cache(root: PathBuf, github_token: Option<String>) -> Result<PrKpiC
                 root_path,
                 generated_at: now,
                 github_login: None,
+                default_branch_override_fingerprint,
                 custom_window_start: Some(window_start),
                 custom_window_end: Some(window_end),
                 pull_requests: Vec::new(),
@@ -233,6 +243,9 @@ pub fn build_cache(root: PathBuf, github_token: Option<String>) -> Result<PrKpiC
             repository,
             window_start,
             window_end,
+            default_branch_overrides
+                .get(repository.path.to_string_lossy().as_ref())
+                .map(|value| value.as_str()),
         ) {
             Ok((mut records, repository_warnings)) => {
                 pull_requests.append(&mut records);
@@ -257,6 +270,7 @@ pub fn build_cache(root: PathBuf, github_token: Option<String>) -> Result<PrKpiC
         root_path,
         generated_at: now,
         github_login: Some(login),
+        default_branch_override_fingerprint,
         custom_window_start: Some(window_start),
         custom_window_end: Some(window_end),
         pull_requests,
@@ -643,7 +657,7 @@ fn discover_github_repository_sources(repositories: Vec<PathBuf>) -> Vec<Reposit
     sources
 }
 
-fn github_repository_for_path(repository: &Path) -> Option<(String, String)> {
+pub(crate) fn github_repository_for_path(repository: &Path) -> Option<(String, String)> {
     if let Ok(remote) = git_output(repository, &["remote", "get-url", "origin"]) {
         if let Some(parsed) = parse_github_remote_owner_repo(&remote) {
             return Some(parsed);
@@ -664,7 +678,7 @@ fn github_repository_for_path(repository: &Path) -> Option<(String, String)> {
     None
 }
 
-fn build_github_client(token: &str) -> Result<Client, String> {
+pub(crate) fn build_github_client(token: &str) -> Result<Client, String> {
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static(GITHUB_ACCEPT));
     headers.insert(USER_AGENT, HeaderValue::from_static(GITHUB_USER_AGENT));
@@ -702,12 +716,36 @@ fn fetch_viewer_login(client: &Client) -> Result<String, String> {
         .map_err(|error| format!("解析 GitHub 当前用户失败: {error}"))
 }
 
+pub(crate) fn fetch_repository_default_branch(
+    client: &Client,
+    owner: &str,
+    repository: &str,
+) -> Result<String, String> {
+    #[derive(Debug, Deserialize)]
+    struct GithubRepositoryDetail {
+        default_branch: String,
+    }
+
+    let response = client
+        .get(format!("{GITHUB_API_BASE}/repos/{owner}/{repository}"))
+        .send()
+        .map_err(|error| format!("读取仓库默认分支失败: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("读取仓库默认分支失败: {}", response.status()));
+    }
+    response
+        .json::<GithubRepositoryDetail>()
+        .map(|detail| detail.default_branch)
+        .map_err(|error| format!("解析仓库默认分支失败: {error}"))
+}
+
 fn fetch_repository_pull_request_records(
     client: &Client,
     login: &str,
     repository: &RepositorySource,
     window_start: NaiveDate,
     window_end: NaiveDate,
+    default_branch_override: Option<&str>,
 ) -> Result<(Vec<PrKpiPullRequestRecord>, Vec<String>), String> {
     let pull_numbers = search_repository_pull_request_numbers(
         client,
@@ -719,6 +757,14 @@ fn fetch_repository_pull_request_records(
     )?;
     let mut warnings = Vec::new();
     let mut records = Vec::new();
+    let github_default_branch =
+        fetch_repository_default_branch(client, &repository.owner, &repository.name).ok();
+    let effective_default_ref = resolve_effective_default_branch(
+        &repository.path,
+        default_branch_override,
+        github_default_branch.as_deref(),
+    )
+    .map(|(reference, _)| reference);
 
     for number in pull_numbers {
         let detail =
@@ -737,7 +783,12 @@ fn fetch_repository_pull_request_records(
             .merge_commit_sha
             .as_deref()
             .and_then(|merge_commit_sha| {
-                match analyze_local_stability(&repository.path, merge_commit_sha, merged_at) {
+                match analyze_local_stability(
+                    &repository.path,
+                    merge_commit_sha,
+                    merged_at,
+                    effective_default_ref.as_deref(),
+                ) {
                     Ok(result) => Some(result),
                     Err(error) => {
                         warnings.push(format!("{}/#{}: {error}", repository.name, detail.number));
@@ -881,8 +932,10 @@ fn analyze_local_stability(
     repository: &Path,
     merge_commit_sha: &str,
     merged_at: DateTime<Utc>,
+    default_ref_override: Option<&str>,
 ) -> Result<PrKpiLocalStability, String> {
-    let default_ref = resolve_default_branch_ref(repository)
+    let default_ref = resolve_effective_default_branch(repository, default_ref_override, None)
+        .map(|(reference, _)| reference)
         .ok_or_else(|| "未找到可用于分析的默认分支".to_string())?;
     let cutoff_at = merged_at + Duration::days(7);
     let tip_timestamp = git_commit_timestamp(repository, &default_ref)?;
@@ -1114,7 +1167,34 @@ fn intersect_line_ranges(left: &[LineRange], right: &[LineRange]) -> u64 {
     total
 }
 
-fn resolve_default_branch_ref(repository: &Path) -> Option<String> {
+pub(crate) fn resolve_effective_default_branch(
+    repository: &Path,
+    override_reference: Option<&str>,
+    github_default_branch: Option<&str>,
+) -> Option<(String, GitDefaultBranchSource)> {
+    if let Some(override_reference) = override_reference
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some((
+            override_reference.to_string(),
+            GitDefaultBranchSource::Override,
+        ));
+    }
+
+    if let Some(github_default_branch) = github_default_branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|branch| branch_ref_for_name(repository, branch))
+    {
+        return Some((github_default_branch, GitDefaultBranchSource::Github));
+    }
+
+    resolve_local_default_branch_ref(repository)
+        .map(|reference| (reference, GitDefaultBranchSource::Fallback))
+}
+
+pub(crate) fn resolve_local_default_branch_ref(repository: &Path) -> Option<String> {
     let mut candidates = Vec::new();
 
     if let Ok(symbolic) = git_output(repository, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
@@ -1161,6 +1241,69 @@ fn resolve_default_branch_ref(repository: &Path) -> Option<String> {
         return Some("HEAD".to_string());
     }
 
+    None
+}
+
+fn resolve_default_branch_ref(repository: &Path) -> Option<String> {
+    resolve_local_default_branch_ref(repository)
+}
+
+pub(crate) fn list_branch_candidates(repository: &Path) -> Vec<String> {
+    let refs = git_output(
+        repository,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ],
+    )
+    .unwrap_or_default();
+    let mut by_display_name = HashMap::<String, String>::new();
+    for reference in refs
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "refs/remotes/origin/HEAD")
+    {
+        let display_name = branch_display_name(reference);
+        if display_name.is_empty() {
+            continue;
+        }
+        by_display_name
+            .entry(display_name)
+            .and_modify(|existing| {
+                if existing.starts_with("refs/remotes/origin/")
+                    && reference.starts_with("refs/heads/")
+                {
+                    *existing = reference.to_string();
+                }
+            })
+            .or_insert_with(|| reference.to_string());
+    }
+
+    let mut candidates = by_display_name.into_values().collect::<Vec<_>>();
+    candidates.sort_by_key(|reference| branch_display_name(reference));
+    candidates
+}
+
+pub(crate) fn branch_display_name(reference: &str) -> String {
+    reference
+        .trim()
+        .strip_prefix("refs/heads/")
+        .or_else(|| reference.trim().strip_prefix("refs/remotes/origin/"))
+        .unwrap_or(reference.trim())
+        .to_string()
+}
+
+fn branch_ref_for_name(repository: &Path, branch_name: &str) -> Option<String> {
+    let local_ref = format!("refs/heads/{branch_name}");
+    if git_ref_exists(repository, &local_ref) {
+        return Some(local_ref);
+    }
+    let remote_ref = format!("refs/remotes/origin/{branch_name}");
+    if git_ref_exists(repository, &remote_ref) {
+        return Some(remote_ref);
+    }
     None
 }
 
@@ -1351,6 +1494,7 @@ mod tests {
         let cache = PrKpiCache {
             root_path: "/tmp/workspace".into(),
             generated_at: Utc.with_ymd_and_hms(2026, 4, 28, 7, 30, 0).unwrap(),
+            default_branch_override_fingerprint: String::new(),
             github_login: Some("octocat".into()),
             custom_window_start: Some(NaiveDate::from_ymd_opt(2026, 1, 30).unwrap()),
             custom_window_end: Some(NaiveDate::from_ymd_opt(2026, 4, 28).unwrap()),
@@ -1415,6 +1559,7 @@ mod tests {
         let cache = PrKpiCache {
             root_path: "/tmp/workspace".into(),
             generated_at: local_time_utc(2026, 4, 28, 15, 30, 0),
+            default_branch_override_fingerprint: String::new(),
             github_login: Some("octocat".into()),
             custom_window_start: Some(NaiveDate::from_ymd_opt(2026, 1, 30).unwrap()),
             custom_window_end: Some(NaiveDate::from_ymd_opt(2026, 4, 28).unwrap()),
@@ -1588,6 +1733,7 @@ mod tests {
             DateTime::parse_from_rfc3339("2026-04-02T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
+            None,
         )
         .unwrap();
 
@@ -1632,6 +1778,7 @@ mod tests {
             DateTime::parse_from_rfc3339("2026-04-02T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
+            None,
         )
         .unwrap_err();
 

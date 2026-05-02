@@ -137,6 +137,12 @@ fn main() {
                         token_cache_max_age,
                         &initial_settings.git_usage_root,
                     );
+                    commands::ensure_git_branch_management_cache(
+                        &handle,
+                        token_cache_max_age,
+                        &initial_settings.git_usage_root,
+                        &commands::git_default_branch_overrides_fingerprint(&initial_settings),
+                    );
                     refresh_tray_menu_from_state(&handle).await;
                 }
 
@@ -157,6 +163,12 @@ fn main() {
                             &handle,
                             i64::from(settings.refresh_interval_minutes),
                             &settings.git_usage_root,
+                        );
+                        commands::ensure_git_branch_management_cache(
+                            &handle,
+                            i64::from(settings.refresh_interval_minutes),
+                            &settings.git_usage_root,
+                            &commands::git_default_branch_overrides_fingerprint(&settings),
                         );
 
                         let should_refresh = {
@@ -194,6 +206,7 @@ fn main() {
             commands::test_connection,
             commands::get_settings,
             commands::save_settings,
+            commands::get_git_branch_management,
             commands::get_local_proxy_settings,
             commands::save_local_proxy_settings,
             commands::save_claude_proxy_profile,

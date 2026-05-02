@@ -4,7 +4,8 @@ use crate::{
     git_usage, local_proxy, local_usage,
     models::{
         AccountQuotaStatus, AppSettings, AppStatus, AuthMode, ClaudeProxyProfileInput,
-        ConnectedAccount, ConnectionTestResult, GitHubDeviceCodeResponse, GitUsageReport,
+        ConnectedAccount, ConnectionTestResult, GitBranchCandidate, GitBranchManagementState,
+        GitBranchProject, GitDefaultBranchSource, GitHubDeviceCodeResponse, GitUsageReport,
         LocalProxySettingsState, LocalProxyStatus, LocalTokenUsageRange, LocalTokenUsageReport,
         ManagedAuthAccount, PrKpiOverview, PrKpiReport, ProbeCredentials, QuotaSnapshot,
         ReverseProxySettingsState, ReverseProxyStatus, SaveLocalProxySettingsInput,
@@ -17,6 +18,7 @@ use crate::{
     storage,
 };
 use chrono::{Local, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -31,11 +33,38 @@ const TOKEN_USAGE_CACHE_FILE: &str = "local-token-usage-cache.json";
 const TOKEN_USAGE_CACHE_UPDATED_EVENT: &str = "local-token-usage-cache-updated";
 const GIT_USAGE_CACHE_FILE: &str = "git-usage-cache.json";
 const GIT_USAGE_CACHE_UPDATED_EVENT: &str = "git-usage-cache-updated";
+const GIT_BRANCH_MANAGEMENT_CACHE_FILE: &str = "git-branch-management-cache.json";
+const GIT_BRANCH_MANAGEMENT_CACHE_UPDATED_EVENT: &str = "git-branch-management-cache-updated";
 const PR_KPI_CACHE_FILE: &str = "pr-kpi-cache.json";
 const PR_KPI_CACHE_UPDATED_EVENT: &str = "pr-kpi-cache-updated";
 static TOKEN_USAGE_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
 static GIT_USAGE_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
+static GIT_BRANCH_MANAGEMENT_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
 static PR_KPI_CACHE_REFRESHING: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitBranchManagementCache {
+    pub root_path: String,
+    #[serde(with = "crate::app_time::local_datetime_serde")]
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub default_branch_override_fingerprint: String,
+    #[serde(default)]
+    pub projects: Vec<GitBranchProject>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl From<GitBranchManagementCache> for GitBranchManagementState {
+    fn from(value: GitBranchManagementCache) -> Self {
+        Self {
+            root_path: value.root_path,
+            generated_at: value.generated_at,
+            projects: value.projects,
+            warnings: value.warnings,
+        }
+    }
+}
 
 #[tauri::command]
 pub async fn get_current_quota(
@@ -699,8 +728,12 @@ pub fn get_git_usage(app: AppHandle, request: UsageRangeRequest) -> Result<GitUs
         let should_refresh = cache
             .as_ref()
             .map(|cache| {
-                git_usage_cache_is_stale(cache, max_age_minutes, &settings.git_usage_root)
-                    || !cache.covers_custom_range(start_date, end_date)
+                git_usage_cache_is_stale(
+                    cache,
+                    max_age_minutes,
+                    &settings.git_usage_root,
+                    &git_default_branch_overrides_fingerprint(&settings),
+                ) || !cache.covers_custom_range(start_date, end_date)
             })
             .unwrap_or(true);
         if should_refresh {
@@ -727,7 +760,14 @@ pub fn get_git_usage(app: AppHandle, request: UsageRangeRequest) -> Result<GitUs
 
     let cache_is_stale = cache
         .as_ref()
-        .map(|cache| git_usage_cache_is_stale(cache, max_age_minutes, &settings.git_usage_root))
+        .map(|cache| {
+            git_usage_cache_is_stale(
+                cache,
+                max_age_minutes,
+                &settings.git_usage_root,
+                &git_default_branch_overrides_fingerprint(&settings),
+            )
+        })
         .unwrap_or(true);
 
     if cache_is_stale {
@@ -770,6 +810,155 @@ pub async fn refresh_git_usage(
 }
 
 #[tauri::command]
+pub async fn get_git_branch_management(app: AppHandle) -> Result<GitBranchManagementState, String> {
+    let settings = settings::load_settings(&app).unwrap_or_default();
+    let fingerprint = git_default_branch_overrides_fingerprint(&settings);
+    let max_age_minutes = i64::from(settings.refresh_interval_minutes);
+    let cache = read_git_branch_management_cache(&app)?;
+    let cache_is_stale = cache
+        .as_ref()
+        .map(|cache| {
+            git_branch_management_cache_is_stale(
+                cache,
+                &settings.git_usage_root,
+                &fingerprint,
+                max_age_minutes,
+            )
+        })
+        .unwrap_or(true);
+
+    if cache.is_none() {
+        start_git_branch_management_cache_refresh(app.clone());
+        return Ok(GitBranchManagementState {
+            root_path: settings.git_usage_root,
+            generated_at: Utc::now(),
+            projects: vec![],
+            warnings: vec!["Default Branch 管理数据正在后台生成，完成后会自动更新".into()],
+        });
+    }
+
+    if cache
+        .as_ref()
+        .is_some_and(|cache| cache.default_branch_override_fingerprint != fingerprint)
+    {
+        return refresh_git_branch_management(app, false).await;
+    }
+
+    if cache_is_stale {
+        start_git_branch_management_cache_refresh(app.clone());
+    }
+
+    Ok(cache
+        .map(Into::into)
+        .unwrap_or_else(|| GitBranchManagementState {
+            root_path: settings.git_usage_root,
+            generated_at: Utc::now(),
+            projects: vec![],
+            warnings: vec!["Default Branch 管理数据正在后台生成，完成后会自动更新".into()],
+        }))
+}
+
+#[tauri::command]
+pub async fn refresh_git_branch_management(
+    app: AppHandle,
+    emit_update: bool,
+) -> Result<GitBranchManagementState, String> {
+    let cache = refresh_git_branch_management_cache(app, emit_update).await?;
+    Ok(cache.into())
+}
+
+fn build_git_branch_management_state(
+    root_path: String,
+    overrides: HashMap<String, String>,
+    github_token: Option<String>,
+) -> Result<GitBranchManagementCache, String> {
+    let root = PathBuf::from(&root_path);
+    let repositories = git_usage::discover_git_repositories(&root)
+        .map_err(|error| format!("扫描本地 Git 仓库失败: {error}"))?;
+    let github_client = github_token
+        .filter(|value| !value.trim().is_empty())
+        .map(|token| pr_kpi::build_github_client(&token))
+        .transpose()?;
+    let mut warnings = Vec::new();
+    let mut projects = Vec::new();
+
+    for repository in repositories {
+        let path = repository.to_string_lossy().to_string();
+        let name = repository
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("repository")
+            .to_string();
+        let github_default_branch = match (
+            github_client.as_ref(),
+            pr_kpi::github_repository_for_path(&repository),
+        ) {
+            (Some(client), Some((owner, repository_name))) => {
+                match pr_kpi::fetch_repository_default_branch(client, &owner, &repository_name) {
+                    Ok(branch) => {
+                        pr_kpi::resolve_effective_default_branch(&repository, None, Some(&branch))
+                            .map(|(reference, _)| reference)
+                    }
+                    Err(error) => {
+                        warnings.push(format!("{name}: {error}"));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let fallback_default_branch = pr_kpi::resolve_local_default_branch_ref(&repository);
+        let override_branch = overrides.get(&path).cloned();
+        let github_default_branch_name = github_default_branch
+            .as_deref()
+            .map(pr_kpi::branch_display_name);
+        let effective = pr_kpi::resolve_effective_default_branch(
+            &repository,
+            override_branch.as_deref(),
+            github_default_branch_name.as_deref(),
+        );
+
+        projects.push(GitBranchProject {
+            name,
+            path,
+            github_default_branch,
+            fallback_default_branch,
+            override_branch,
+            effective_default_branch: effective.as_ref().map(|(reference, _)| reference.clone()),
+            effective_source: effective
+                .map(|(_, source)| source)
+                .unwrap_or(GitDefaultBranchSource::Missing),
+            candidates: pr_kpi::list_branch_candidates(&repository)
+                .into_iter()
+                .map(|reference| GitBranchCandidate {
+                    display_name: pr_kpi::branch_display_name(&reference),
+                    reference,
+                })
+                .collect(),
+        });
+    }
+
+    projects.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    Ok(GitBranchManagementCache {
+        root_path,
+        generated_at: Utc::now(),
+        default_branch_override_fingerprint: overrides
+            .iter()
+            .map(|(path, reference)| format!("{path}={reference}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        projects,
+        warnings,
+    })
+}
+
+#[tauri::command]
 pub fn get_pr_kpi(app: AppHandle, request: UsageRangeRequest) -> Result<PrKpiReport, String> {
     let resolved = validate_usage_range_request(&request)?;
     let overview = kpi_overview_from_cached_stats(&app, &request)?;
@@ -785,8 +974,12 @@ pub fn get_pr_kpi(app: AppHandle, request: UsageRangeRequest) -> Result<PrKpiRep
         let should_refresh = cache
             .as_ref()
             .map(|cache| {
-                pr_kpi_cache_is_stale(cache, max_age_minutes, &settings.git_usage_root)
-                    || !cache.covers_custom_range(start_date, end_date)
+                pr_kpi_cache_is_stale(
+                    cache,
+                    max_age_minutes,
+                    &settings.git_usage_root,
+                    &git_default_branch_overrides_fingerprint(&settings),
+                ) || !cache.covers_custom_range(start_date, end_date)
             })
             .unwrap_or(true);
         if should_refresh {
@@ -814,7 +1007,14 @@ pub fn get_pr_kpi(app: AppHandle, request: UsageRangeRequest) -> Result<PrKpiRep
 
     let cache_is_stale = cache
         .as_ref()
-        .map(|cache| pr_kpi_cache_is_stale(cache, max_age_minutes, &settings.git_usage_root))
+        .map(|cache| {
+            pr_kpi_cache_is_stale(
+                cache,
+                max_age_minutes,
+                &settings.git_usage_root,
+                &git_default_branch_overrides_fingerprint(&settings),
+            )
+        })
         .unwrap_or(true);
     if cache_is_stale {
         start_pr_kpi_cache_refresh(app.clone());
@@ -924,11 +1124,21 @@ pub fn ensure_local_token_usage_cache(app: &AppHandle, max_age_minutes: i64) {
 }
 
 pub fn ensure_git_usage_cache(app: &AppHandle, max_age_minutes: i64, root_path: &str) {
+    let branch_override_fingerprint = settings::load_settings(app)
+        .map(|settings| git_default_branch_overrides_fingerprint(&settings))
+        .unwrap_or_default();
     let should_refresh = read_git_usage_cache(app)
         .map(|cache| {
             cache
                 .as_ref()
-                .map(|cache| git_usage_cache_is_stale(cache, max_age_minutes, root_path))
+                .map(|cache| {
+                    git_usage_cache_is_stale(
+                        cache,
+                        max_age_minutes,
+                        root_path,
+                        &branch_override_fingerprint,
+                    )
+                })
                 .unwrap_or(true)
         })
         .unwrap_or(true);
@@ -938,16 +1148,52 @@ pub fn ensure_git_usage_cache(app: &AppHandle, max_age_minutes: i64, root_path: 
 }
 
 pub fn ensure_pr_kpi_cache(app: &AppHandle, max_age_minutes: i64, root_path: &str) {
+    let branch_override_fingerprint = settings::load_settings(app)
+        .map(|settings| git_default_branch_overrides_fingerprint(&settings))
+        .unwrap_or_default();
     let should_refresh = read_pr_kpi_cache(app)
         .map(|cache| {
             cache
                 .as_ref()
-                .map(|cache| pr_kpi_cache_is_stale(cache, max_age_minutes, root_path))
+                .map(|cache| {
+                    pr_kpi_cache_is_stale(
+                        cache,
+                        max_age_minutes,
+                        root_path,
+                        &branch_override_fingerprint,
+                    )
+                })
                 .unwrap_or(true)
         })
         .unwrap_or(true);
     if should_refresh {
         start_pr_kpi_cache_refresh(app.clone());
+    }
+}
+
+pub fn ensure_git_branch_management_cache(
+    app: &AppHandle,
+    max_age_minutes: i64,
+    root_path: &str,
+    branch_override_fingerprint: &str,
+) {
+    let should_refresh = read_git_branch_management_cache(app)
+        .map(|cache| {
+            cache
+                .as_ref()
+                .map(|cache| {
+                    git_branch_management_cache_is_stale(
+                        cache,
+                        root_path,
+                        branch_override_fingerprint,
+                        max_age_minutes,
+                    )
+                })
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+    if should_refresh {
+        start_git_branch_management_cache_refresh(app.clone());
     }
 }
 
@@ -984,6 +1230,17 @@ fn start_pr_kpi_cache_refresh(app: AppHandle) {
     });
 }
 
+fn start_git_branch_management_cache_refresh(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        match refresh_git_branch_management(app, true).await {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Git branch management cache refresh failed: {error}");
+            }
+        }
+    });
+}
+
 async fn refresh_local_token_usage_cache(
     app: AppHandle,
     emit_update: bool,
@@ -1004,12 +1261,22 @@ async fn refresh_git_usage_cache(
     emit_update: bool,
 ) -> Result<git_usage::GitUsageCache, String> {
     let _guard = claim_git_usage_refresh()?;
-    let root = settings::load_settings(&app)
-        .map(|settings| PathBuf::from(settings.git_usage_root))
-        .unwrap_or_else(|_| PathBuf::from(crate::models::default_git_usage_root()));
-    let cache = tauri::async_runtime::spawn_blocking(move || git_usage::build_cache(root))
-        .await
-        .map_err(|error| format!("Git 统计缓存任务失败: {error}"))??;
+    let (root, branch_override_fingerprint) = settings::load_settings(&app)
+        .map(|settings| {
+            let fingerprint = git_default_branch_overrides_fingerprint(&settings);
+            (PathBuf::from(settings.git_usage_root), fingerprint)
+        })
+        .unwrap_or_else(|_| {
+            (
+                PathBuf::from(crate::models::default_git_usage_root()),
+                String::new(),
+            )
+        });
+    let cache = tauri::async_runtime::spawn_blocking(move || {
+        git_usage::build_cache_with_override_fingerprint(root, branch_override_fingerprint)
+    })
+    .await
+    .map_err(|error| format!("Git 统计缓存任务失败: {error}"))??;
     storage::write_json(&app, GIT_USAGE_CACHE_FILE, &cache)?;
     if emit_update {
         let _ = app.emit(GIT_USAGE_CACHE_UPDATED_EVENT, ());
@@ -1022,17 +1289,63 @@ async fn refresh_pr_kpi_cache(
     emit_update: bool,
 ) -> Result<pr_kpi::PrKpiCache, String> {
     let _guard = claim_pr_kpi_refresh()?;
-    let root = settings::load_settings(&app)
-        .map(|settings| PathBuf::from(settings.git_usage_root))
-        .unwrap_or_else(|_| PathBuf::from(crate::models::default_git_usage_root()));
+    let (root, overrides, fingerprint) = settings::load_settings(&app)
+        .map(|settings| {
+            let fingerprint = git_default_branch_overrides_fingerprint(&settings);
+            (
+                PathBuf::from(settings.git_usage_root),
+                settings.git_default_branch_overrides,
+                fingerprint,
+            )
+        })
+        .unwrap_or_else(|_| {
+            (
+                PathBuf::from(crate::models::default_git_usage_root()),
+                HashMap::new(),
+                String::new(),
+            )
+        });
     let github_token = secrets::load_github_cli_token().ok().flatten();
-    let cache =
-        tauri::async_runtime::spawn_blocking(move || pr_kpi::build_cache(root, github_token))
-            .await
-            .map_err(|error| format!("KPI 分析缓存任务失败: {error}"))??;
+    let cache = tauri::async_runtime::spawn_blocking(move || {
+        pr_kpi::build_cache(root, github_token, overrides, fingerprint)
+    })
+    .await
+    .map_err(|error| format!("KPI 分析缓存任务失败: {error}"))??;
     storage::write_json(&app, PR_KPI_CACHE_FILE, &cache)?;
     if emit_update {
         let _ = app.emit(PR_KPI_CACHE_UPDATED_EVENT, ());
+    }
+    Ok(cache)
+}
+
+async fn refresh_git_branch_management_cache(
+    app: AppHandle,
+    emit_update: bool,
+) -> Result<GitBranchManagementCache, String> {
+    let _guard = claim_git_branch_management_refresh()?;
+    let (root_path, overrides, github_token) = settings::load_settings(&app)
+        .map(|settings| {
+            (
+                settings.git_usage_root,
+                settings.git_default_branch_overrides,
+                secrets::load_github_cli_token().ok().flatten(),
+            )
+        })
+        .unwrap_or_else(|_| {
+            (
+                crate::models::default_git_usage_root(),
+                HashMap::new(),
+                secrets::load_github_cli_token().ok().flatten(),
+            )
+        });
+    let cache = tauri::async_runtime::spawn_blocking(move || {
+        build_git_branch_management_state(root_path, overrides, github_token)
+    })
+    .await
+    .map_err(|error| format!("Default Branch 管理缓存任务失败: {error}"))??;
+    storage::write_json(&app, GIT_BRANCH_MANAGEMENT_CACHE_FILE, &cache)?;
+    if emit_update {
+        let _ = app.emit(GIT_BRANCH_MANAGEMENT_CACHE_UPDATED_EVENT, ());
     }
     Ok(cache)
 }
@@ -1067,6 +1380,22 @@ fn claim_git_usage_refresh() -> Result<GitUsageRefreshGuard, String> {
         return Err("Git 统计正在刷新，请稍后再试".into());
     }
     Ok(GitUsageRefreshGuard)
+}
+
+#[derive(Debug)]
+struct GitBranchManagementRefreshGuard;
+
+impl Drop for GitBranchManagementRefreshGuard {
+    fn drop(&mut self) {
+        GIT_BRANCH_MANAGEMENT_CACHE_REFRESHING.store(false, Ordering::Release);
+    }
+}
+
+fn claim_git_branch_management_refresh() -> Result<GitBranchManagementRefreshGuard, String> {
+    if GIT_BRANCH_MANAGEMENT_CACHE_REFRESHING.swap(true, Ordering::AcqRel) {
+        return Err("Default Branch 管理数据正在刷新，请稍后再试".into());
+    }
+    Ok(GitBranchManagementRefreshGuard)
 }
 
 #[derive(Debug)]
@@ -1388,6 +1717,12 @@ fn read_git_usage_cache(app: &AppHandle) -> Result<Option<git_usage::GitUsageCac
     storage::read_json::<git_usage::GitUsageCache>(app, GIT_USAGE_CACHE_FILE)
 }
 
+fn read_git_branch_management_cache(
+    app: &AppHandle,
+) -> Result<Option<GitBranchManagementCache>, String> {
+    storage::read_json::<GitBranchManagementCache>(app, GIT_BRANCH_MANAGEMENT_CACHE_FILE)
+}
+
 fn read_pr_kpi_cache(app: &AppHandle) -> Result<Option<pr_kpi::PrKpiCache>, String> {
     storage::read_json::<pr_kpi::PrKpiCache>(app, PR_KPI_CACHE_FILE)
 }
@@ -1406,8 +1741,13 @@ fn git_usage_cache_is_stale(
     cache: &git_usage::GitUsageCache,
     max_age_minutes: i64,
     root_path: &str,
+    branch_override_fingerprint: &str,
 ) -> bool {
     if cache.root_path != root_path {
+        return true;
+    }
+
+    if cache.default_branch_override_fingerprint != branch_override_fingerprint {
         return true;
     }
 
@@ -1468,12 +1808,53 @@ fn git_usage_commit_has_duplicate_metadata(commit: &crate::models::GitUsageCommi
         && (commit.duplicate_group_size == 0 || !commit.duplicate_group_id.trim().is_empty())
 }
 
+pub(crate) fn git_default_branch_overrides_fingerprint(settings: &AppSettings) -> String {
+    git_default_branch_overrides_fingerprint_from_map(&settings.git_default_branch_overrides)
+}
+
+fn git_default_branch_overrides_fingerprint_from_map(
+    overrides: &HashMap<String, String>,
+) -> String {
+    let mut items = overrides
+        .iter()
+        .map(|(path, reference)| (path.as_str(), reference.as_str()))
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| left.cmp(right));
+    items
+        .into_iter()
+        .map(|(path, reference)| format!("{path}={reference}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn git_branch_management_cache_is_stale(
+    cache: &GitBranchManagementCache,
+    root_path: &str,
+    branch_override_fingerprint: &str,
+    max_age_minutes: i64,
+) -> bool {
+    if cache.root_path != root_path {
+        return true;
+    }
+    if cache.default_branch_override_fingerprint != branch_override_fingerprint {
+        return true;
+    }
+    if max_age_minutes <= 0 {
+        return true;
+    }
+    (Utc::now() - cache.generated_at).num_minutes() >= max_age_minutes
+}
+
 fn pr_kpi_cache_is_stale(
     cache: &pr_kpi::PrKpiCache,
     max_age_minutes: i64,
     root_path: &str,
+    branch_override_fingerprint: &str,
 ) -> bool {
     if cache.root_path != root_path {
+        return true;
+    }
+    if cache.default_branch_override_fingerprint != branch_override_fingerprint {
         return true;
     }
     if max_age_minutes <= 0 {
@@ -1908,6 +2289,7 @@ mod tests {
         let cache = git_usage::GitUsageCache {
             root_path: "/tmp/old".into(),
             generated_at: now,
+            default_branch_override_fingerprint: String::new(),
             today: git_usage::empty_report(LocalTokenUsageRange::Today, None),
             last3_days: git_usage::empty_report(LocalTokenUsageRange::Last3Days, None),
             this_week: git_usage::empty_report(LocalTokenUsageRange::ThisWeek, None),
@@ -1917,8 +2299,8 @@ mod tests {
             custom_days: vec![],
         };
 
-        assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/new"));
-        assert!(!git_usage_cache_is_stale(&cache, 15, "/tmp/old"));
+        assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/new", ""));
+        assert!(!git_usage_cache_is_stale(&cache, 15, "/tmp/old", ""));
     }
 
     #[test]
@@ -1927,6 +2309,7 @@ mod tests {
         let mut cache = git_usage::GitUsageCache {
             root_path: "/tmp/old".into(),
             generated_at: now,
+            default_branch_override_fingerprint: String::new(),
             today: git_usage::empty_report(LocalTokenUsageRange::Today, None),
             last3_days: git_usage::empty_report(LocalTokenUsageRange::Last3Days, None),
             this_week: git_usage::empty_report(LocalTokenUsageRange::ThisWeek, None),
@@ -1939,7 +2322,7 @@ mod tests {
         cache.today.totals.deleted_lines = 3;
         cache.today.commits.clear();
 
-        assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/old"));
+        assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/old", ""));
 
         cache.today.commits.push(crate::models::GitUsageCommit {
             commit_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -1963,7 +2346,65 @@ mod tests {
             changed_files: 1,
         });
 
-        assert!(!git_usage_cache_is_stale(&cache, 15, "/tmp/old"));
+        assert!(!git_usage_cache_is_stale(&cache, 15, "/tmp/old", ""));
+    }
+
+    fn git_usage_cache_is_stale_when_default_branch_overrides_change() {
+        let now = chrono::Utc::now();
+        let cache = git_usage::GitUsageCache {
+            root_path: "/tmp/old".into(),
+            generated_at: now,
+            default_branch_override_fingerprint: "repo=refs/heads/main".into(),
+            today: git_usage::empty_report(LocalTokenUsageRange::Today, None),
+            last3_days: git_usage::empty_report(LocalTokenUsageRange::Last3Days, None),
+            this_week: git_usage::empty_report(LocalTokenUsageRange::ThisWeek, None),
+            this_month: git_usage::empty_report(LocalTokenUsageRange::ThisMonth, None),
+            custom_window_start: None,
+            custom_window_end: None,
+            custom_days: vec![],
+        };
+
+        assert!(git_usage_cache_is_stale(
+            &cache,
+            15,
+            "/tmp/old",
+            "repo=refs/heads/dev",
+        ));
+        assert!(!git_usage_cache_is_stale(
+            &cache,
+            15,
+            "/tmp/old",
+            "repo=refs/heads/main",
+        ));
+    }
+
+    #[test]
+    fn pr_kpi_cache_is_stale_when_default_branch_overrides_change() {
+        let now = chrono::Utc::now();
+        let cache = pr_kpi::PrKpiCache {
+            root_path: "/tmp/old".into(),
+            generated_at: now,
+            default_branch_override_fingerprint: "repo=refs/heads/main".into(),
+            github_login: Some("octocat".into()),
+            custom_window_start: None,
+            custom_window_end: None,
+            pull_requests: vec![],
+            missing_sources: vec![],
+            warnings: vec![],
+        };
+
+        assert!(pr_kpi_cache_is_stale(
+            &cache,
+            15,
+            "/tmp/old",
+            "repo=refs/heads/dev",
+        ));
+        assert!(!pr_kpi_cache_is_stale(
+            &cache,
+            15,
+            "/tmp/old",
+            "repo=refs/heads/main",
+        ));
     }
 
     #[test]
@@ -1972,6 +2413,7 @@ mod tests {
         let mut cache = git_usage::GitUsageCache {
             root_path: "/tmp/old".into(),
             generated_at: now,
+            default_branch_override_fingerprint: String::new(),
             today: git_usage::empty_report(LocalTokenUsageRange::Today, None),
             last3_days: git_usage::empty_report(LocalTokenUsageRange::Last3Days, None),
             this_week: git_usage::empty_report(LocalTokenUsageRange::ThisWeek, None),
@@ -2004,7 +2446,7 @@ mod tests {
             changed_files: 1,
         });
 
-        assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/old"));
+        assert!(git_usage_cache_is_stale(&cache, 15, "/tmp/old", ""));
     }
 
     #[test]
